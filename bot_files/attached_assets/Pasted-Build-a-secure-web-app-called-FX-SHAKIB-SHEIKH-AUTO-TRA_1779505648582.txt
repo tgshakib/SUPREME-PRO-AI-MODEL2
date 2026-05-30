@@ -1,0 +1,362 @@
+Build a secure web app called “FX SHAKIB SHEIKH AUTO TRADING DASHBOARD”.
+
+GOAL:
+Create a modern, mobile-first trading dashboard for FOREX + BINARY users with Free Trial, Premium Access, Admin Panel, Trade History, Risk Protection, Auto Trading Controls, and Support Chat.
+
+TECH STACK
+- Next.js + TypeScript
+- Tailwind CSS
+- PostgreSQL
+- Prisma ORM
+- Secure Auth (JWT/session)
+- RBAC (Admin / Premium / Free User)
+
+====================================================
+1) LOGIN / ACCESS SYSTEM
+====================================================
+Features:
+- Sign up / Login
+- Email + password
+- Forgot password
+- Session timeout
+- Validation + login error fixes
+- Demo account label
+- Live account label
+- Easy account connect flow
+
+Security:
+- Never store plain-text passwords
+- Hash passwords
+- Secure sessions
+- Rate limiting
+
+====================================================
+2) SUBSCRIPTION / ACCESS BUY FLOW
+====================================================
+Plans:
+- Monthly Access
+- Lifetime Access
+- Refer Lifetime Access
+
+Flow:
+Buy Access
+→ Select Trading Type
+   - FOREX
+   - BINARY
+→ Payment
+→ Admin Approval
+→ Unlock selected system only
+
+Rules:
+- FOREX unlock = forex only
+- BINARY unlock = binary only
+- Monthly = expiry
+- Lifetime = permanent
+- Refer Lifetime = open support chat
+
+====================================================
+3) USER TYPES
+====================================================
+
+A) FREE / NON-ACCESS USER
+Only demo access.
+
+Can use:
+- Demo account login
+- Forex demo
+- Binary demo
+- Basic bot analysis
+- Dashboard preview
+
+Trial rules:
+- Total 3 demo trades only
+- 1 trade per day
+- Reset after 30 days
+- Show trial counter (1/3, 2/3, 3/3)
+
+Locked:
+- Live trading
+- Premium signals
+- Auto execution
+- Broker live connect
+
+B) PREMIUM USER
+After approved purchase:
+Show premium dashboard only.
+
+====================================================
+4) PREMIUM AUTO TRADING DASHBOARD
+====================================================
+
+Show only:
+
+A) ACCOUNT INFO
+- Username
+- Account type (Demo / Live)
+- Subscription (Monthly / Lifetime)
+- Forex Access ON/OFF
+- Binary Access ON/OFF
+- Auto Trading Status
+- Broker Connected
+- Risk Mode
+- Balance Snapshot
+- Last Trade Status
+- Expiry Date (monthly only)
+
+B) AVAILABLE FEATURES
+Show only unlocked:
+- Live trading
+- Auto trading
+- Forex access
+- Binary access
+- Premium signals
+- AI analysis
+- Smart money management
+- Daily drawdown stop
+- Risk control
+- Broker connection
+- Strategy optimization
+- Trade history
+
+C) WARNING PANEL
+Always visible:
+Win rate depends on market conditions.
+No guaranteed profit.
+Risk only money you can afford.
+Live trading is higher risk than demo trading.
+If losses occur in at least 7 of 10 trading days while using auto trading,
+system may reduce risk, pause strategy, re-check analysis,
+and request manual approval before continuing.
+
+NO “Switch to Live Trading” button.
+
+====================================================
+5) AUTO TRADING ENGINE CONTROL PANEL
+====================================================
+Button:
+AUTO TRADING
+
+Features:
+- Start Auto Trading
+- Stop Auto Trading
+- Pause
+- Resume
+- Strategy Status
+- Risk Status
+- Broker Connection Status
+- Last Signal
+- Last Execution
+- Error State
+
+No chart-overlay indicators.
+
+Runs in background logic.
+
+====================================================
+6) RISK / LOSS PROTECTION
+====================================================
+
+A) DAILY DRAWDOWN STOP
+If daily drawdown threshold hit:
+- STOP trading
+- Show permission box:
+Continue / Stop
+- Log event
+
+B) LOSS DETECTION
+If user has losses in 7 out of 10 trading days:
+Bot action:
+- Reduce risk
+- Pause aggressive strategy
+- Re-check analysis
+- Strategy review required
+- Ask manual approval before continue
+
+C) REPEATED LOSS ADAPTATION
+If recent history shows repeated losses:
+- Re-score strategy settings
+- Improve analysis recommendations
+- Tune internal analytics
+(No fake “guaranteed AI self-learning” claims)
+
+====================================================
+7) TRADE HISTORY SYSTEM
+====================================================
+Module:
+AUTO TRADING → TRADE HISTORY
+
+Fields:
+- Trade ID
+- Username
+- Account Type
+- Free/Premium
+- Forex/Binary
+- Broker
+- Pair/Asset
+- Strategy Name
+- Entry
+- Exit
+- SL
+- TP
+- Risk %
+- Direction BUY/SELL
+- Open time
+- Close time
+- Duration
+- Auto/manual confirm
+- Result (Win/Loss/Break-even)
+- Profit/Loss
+- Balance before
+- Balance after
+- Drawdown impact
+- Risk mode
+- Status
+- Notes
+
+Trade row format:
+#TRD-10001
+EURUSD | BUY
+Entry: 1.0850
+Exit: 1.0890
+P/L: +40
+Status: Executed
+
+Filters:
+- Demo/Live
+- Forex/Binary
+- Win/Loss
+- Date range
+- Broker
+- Risk mode
+- Strategy
+- Executed/Paused/Failed
+
+FREE USER:
+- Own demo history only
+
+PREMIUM:
+- Own full history
+
+ADMIN:
+- All history + export
+
+====================================================
+8) ADMIN PANEL
+====================================================
+Admin-only access.
+
+Sections:
+- Active Users
+- User History
+- Search User
+- Remove User Data
+- Old Archive
+- Subscription Approval
+- Trial Usage
+- Risk Alerts
+- Loss Alerts
+- Broker Status
+
+Admin can view:
+- Username
+- User ID
+- Email
+- Demo/live
+- Subscription
+- Forex/Binary enabled
+- Balance snapshot
+- Last login
+- Trial usage
+- Risk state
+- Trade history
+
+Never show raw passwords.
+
+====================================================
+9) DATA RETENTION
+====================================================
+- Archive old inactive logs after 60 days
+- Soft delete
+- Search archived users
+- Audit trail
+
+Sensitive admin view:
+- Auto-hide after 24 sec
+
+====================================================
+10) SUPPORT CHAT
+====================================================
+“Refer Lifetime Access” button
+→ Direct support team chat box
+
+Can handle:
+- Referral support
+- Upgrade issues
+- Payment issues
+- Manual approval
+
+====================================================
+11) BROKER CONNECTION SYSTEM
+====================================================
+- Connect/disconnect broker UI
+- Retry on failure
+- Connection validation
+- Error logs
+- Safe state handling
+- Status badge
+
+No unsafe automation claims.
+
+====================================================
+12) BUG FIX / RELIABILITY
+====================================================
+Fix:
+- Late signal send
+- Login issues
+- Broken broker connect
+- Dashboard mismatch
+- Trial reset bugs
+- Duplicate trade rows
+- Permission issues
+- Expired subscription logic
+- Empty states
+- Failed execution states
+
+====================================================
+13) SECURITY
+====================================================
+Must implement:
+- RBAC
+- bcrypt/argon2 password hashing
+- CSRF protection
+- XSS sanitization
+- SQL injection protection
+- Validation everywhere
+- Audit logs
+- Encrypted secrets
+- Secure session checks
+- User can only access own data unless admin
+
+====================================================
+14) UI DESIGN
+====================================================
+Dark premium trading UI
+Mobile responsive
+Clean professional layout
+
+Status badges:
+- ACTIVE
+- LOCKED
+- DEMO
+- LIVE
+- PREMIUM
+- FREE
+- WIN
+- LOSS
+- PAUSED
+- FAILED
+- RISK REDUCED
+- REVIEW REQUIRED
+- TRIAL EXPIRED
+
+Build complete folder structure, DB schema, frontend, backend APIs, auth flow, admin panel, dashboard, trade history, risk system, support chat, and scalable architecture.

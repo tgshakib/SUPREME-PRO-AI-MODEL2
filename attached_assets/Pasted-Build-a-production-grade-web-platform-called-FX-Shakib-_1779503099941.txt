@@ -1,0 +1,242 @@
+Build a production-grade web platform called “FX Shakib Sheikh Auto Trading Dashboard”.
+
+TECH STACK
+- Frontend: Next.js + TypeScript + Tailwind
+- Backend: Node.js API routes or Express
+- Database: PostgreSQL
+- Auth: Secure JWT/session auth
+- Encryption: hash passwords, never store plain text passwords
+- Role system: Admin / Premium User / Free User
+- Clean responsive UI (mobile-first)
+
+CORE MODULES
+
+1) LOGIN / ACCESS SYSTEM
+- Easy login and signup
+- Email + password auth
+- Forgot password
+- Session timeout
+- Login error handling
+- Secure validation
+- No plain-text credential display anywhere
+- Support Demo Account and Live Account labels
+
+2) SUBSCRIPTION / ACCESS BUY
+Plans:
+- Monthly Access
+- Lifetime Access
+- Refer Lifetime Access
+
+Flow:
+Buy plan
+→ choose trading type
+   - FOREX
+   - BINARY
+→ payment
+→ admin approval
+→ unlock selected system only
+
+Rules:
+- FOREX purchase unlocks only forex features
+- BINARY purchase unlocks only binary features
+- Monthly shows expiry
+- Lifetime permanent access
+- Free users locked from premium tools
+
+3) SUPPORT CHAT
+- “Refer Lifetime Access” button
+- Opens support team chat box
+- Ticket/chat style support UI
+
+4) USER TYPES
+
+A) FREE / NON-ACCESS USER
+Only demo features:
+- Demo account access only
+- Forex demo
+- Binary demo
+- Basic analysis preview
+- Dashboard preview
+
+Trial rules:
+- Total 3 demo trades
+- Max 1 trade per day
+- After 3 total trades → lock
+- Reset after 30 days
+
+No:
+- Live trading
+- Premium signals
+- Auto execution
+- Broker auto connect
+
+B) PREMIUM / ACCESS USER
+Show dashboard:
+- Account info
+- Available features
+- Warning panel
+
+Features:
+- Live trading mode
+- Auto trading
+- Premium signals
+- AI analysis
+- Smart money management
+- Risk controls
+- Drawdown stop
+- Broker connection status
+- Forex or Binary depending on subscription
+
+5) AUTO TRADING DASHBOARD
+
+Premium dashboard sections:
+A. Account Info
+- Username
+- Account type (Demo/Live)
+- Subscription type
+- Forex access ON/OFF
+- Binary access ON/OFF
+- Auto trading status
+- Broker connected
+- Risk mode
+- Balance snapshot
+- Last trade status
+- Expiry date (monthly)
+
+B. Available Features
+Only show unlocked features.
+
+C. Warning Panel
+Display:
+“Win rate depends on market conditions.”
+“No guaranteed profit.”
+“Risk only money you can afford.”
+“Live trading has higher risk than demo.”
+“If losses occur in at least 7 of 10 trading days while using auto trading, system may reduce risk, pause strategy, re-check analysis, or request manual review before continuing.”
+
+6) LOSS PROTECTION LOGIC
+If 7 out of 10 trading days are loss days:
+- Reduce risk mode
+- Pause aggressive strategy
+- Re-check analysis settings
+- Flag review required
+- Require manual confirm before continuing auto trading
+
+7) DAILY DRAWDOWN PROTECTION
+- Set daily drawdown threshold
+- If threshold hit:
+  STOP trading
+  Require permission to continue or remain stopped
+- Log event
+
+8) SELF-IMPROVEMENT / ANALYTICS
+If recent trade history shows repeated losses:
+- Update internal analytics settings
+- Re-score strategies
+- Improve recommendations
+Important:
+Do NOT falsely claim “AI self-learning trading edge.”
+This is analytics tuning, not guaranteed performance.
+
+9) ADMIN PANEL (ROLE LOCKED)
+Only admin can access.
+
+Sections:
+- Active users
+- User history
+- Search user
+- Remove user data
+- Old archive
+- Subscription approvals
+- Trial usage
+- Risk alerts
+- Loss alerts
+
+Admin can view:
+- Username
+- User ID
+- Email
+- Subscription
+- Demo/live status
+- Forex/Binary enabled
+- Balance snapshot
+- Last login
+- Trial usage
+- Risk status
+
+Never show raw passwords.
+
+10) DATA RETENTION
+- Archive inactive/old logs after 60 days
+- Soft delete
+- Search archived users by username/email/user id
+- Audit trail
+
+11) SENSITIVE VIEW AUTO-HIDE
+When admin opens sensitive user detail panel:
+- Auto-hide after 24 seconds
+- Remove exposed panel
+- Keep audit log
+
+12) BROKER CONNECTION MODULE
+- Broker connection status UI
+- Connect/disconnect state
+- Retry on connection issue
+- Error logs
+- Validation
+- Safe handling
+
+Do NOT automate broker actions in unsafe ways.
+Design modular integration layer only.
+
+13) BUG / ERROR HANDLING
+Fix/cover:
+- Late signal display
+- Login errors
+- Broken account connection
+- Dashboard state mismatch
+- Expired subscription logic
+- Trial reset logic
+- Duplicate trades
+- Permission bugs
+- Empty state UI
+
+14) SECURITY
+Critical:
+- RBAC
+- Rate limiting
+- CSRF protection
+- XSS sanitization
+- SQL injection protection
+- Password hashing (bcrypt/argon2)
+- Encrypted secrets
+- Audit logs
+- Secure sessions
+- Validation everywhere
+- No raw credentials exposed
+
+15) UI STYLE
+Modern clean trading dashboard
+Dark professional style
+Mobile responsive
+Fast
+Clear status badges:
+- Active
+- Locked
+- Premium
+- Demo
+- Live
+- Risk Reduced
+- Review Required
+- Trial Expired
+
+16) IMPORTANT PRODUCT RULES
+Never promise:
+- guaranteed win rate
+- guaranteed safety
+- guaranteed profit
+- no account bans
+
+Use realistic warnings and safe system messaging.
+
+Build complete folder structure, schema, API routes, auth flow, admin panel, dashboard, and scalable clean architecture.

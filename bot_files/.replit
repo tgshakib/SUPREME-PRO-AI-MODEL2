@@ -1,0 +1,40 @@
+modules = ["python-3.11"]
+[nix]
+channel = "stable-25_05"
+packages = ["glibcLocales"]
+
+[agent]
+expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python bot.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[userenv]
+
+[userenv.shared]
+ADMIN_ID = "5087570194"
+BOT_TOKEN = "7017116805:AAFhLDiUh8oblRRgSryEr7uiZbj1GK_IinI"
+
+[[ports]]
+localPort = 8080
+externalPort = 80

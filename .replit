@@ -1,0 +1,52 @@
+modules = ["python-3.11"]
+[nix]
+channel = "stable-25_05"
+packages = ["glibcLocales"]
+
+[agent]
+expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python bot.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[userenv]
+
+[userenv.shared]
+ADMIN_ID = "5087570194"
+BOT_TOKEN = "7017116805:AAFhLDiUh8oblRRgSryEr7uiZbj1GK_IinI"
+SUPPORT_USERNAME = "@JAYITAUTOBO"
+OWNER_USERNAME = "@OAWHIDSHAKIB"
+COMMUNITY_BOT = "@TRADERGUIDE_BOT"
+SVIP_BOT = "@managementTG_bot"
+REQUIRED_BOT = "@traderguide_bot"
+REQUIRED_BOT_ID = "7116421438"
+DAILY_FREE_LIMIT = "4"
+PO_EMAIL = "tgshakib012@gmail.com"
+PO_PASSWORD = "tgshakib012@g"
+PO_SSID = "g.a000-Ai13jQkQYD2vmUfrl1__ykff4-QQiOqs6vH3QY6NCDqJsjyyW5gw61CrJei5KRzT8h1rwACgYKAXESARQSFQHGX2MidDQ1Nyi9mQ0B9CaMyNyTdhoVAUF8yKqW_DYkz9SHvUGWIEH008bP0076"
+QUOTEX_EMAIL = "hosnaranupur@gmail.com"
+QUOTEX_PASSWORD = "hosnaranupur@"
+
+[[ports]]
+localPort = 8080
+externalPort = 80

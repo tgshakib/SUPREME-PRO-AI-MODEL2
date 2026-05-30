@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.log
+venv/
+node_modules/
+*.tmp
+.cache/
+mybot_backup.zip
+.env
+*.db
+.po_ssid_cache
+session.json

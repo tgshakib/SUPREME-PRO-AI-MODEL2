@@ -1,0 +1,163 @@
+====================================================
+15) TODAY TRADE HISTORY SYSTEM
+====================================================
+
+Add a “TODAY TRADE HISTORY” module inside AUTO TRADING DASHBOARD.
+
+Trigger:
+After every trade ends:
+- Stop Loss hit
+- Take Profit hit
+- Closed manually
+- Bot closed trade
+- Timeout close
+- Broker close confirm
+
+Then auto-save trade to TODAY HISTORY.
+
+====================================================
+A) FOREX TODAY TRADE HISTORY
+====================================================
+
+Show simple compact card list.
+
+Format:
+
+📈 FOREX TRADE HISTORY
+━━━━━━━━━━━━━━━━━━
+
+EURUSD | 0.05 | +$12 🟢 PROFIT
+GBPJPY | 0.10 | -$00 🔴 LOSS
+XAUUSD | 0.02 | +$25 🟢 PROFIT
+USDJPY | 0.03 | +$09 🟢 PROFIT
+AUDUSD | 0.08 | -$00 🔴 LOSS
+
+Each row stores:
+- Pair
+- Lot Size
+- Entry Price
+- Exit Price
+- SL
+- TP
+- Direction (BUY/SELL)
+- Profit/Loss
+- Close reason
+   - SL HIT
+   - TP HIT
+   - MANUAL CLOSE
+   - BOT CLOSE
+   - TIMEOUT
+- Open time
+- Close time
+- Status
+- Trade ID
+
+Color badges:
+🟢 PROFIT
+🔴 LOSS
+🟡 BREAK-EVEN
+
+====================================================
+B) BINARY TODAY TRADE HISTORY
+====================================================
+
+Table format:
+
+📊 BINARY TRADE HISTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Trade No | Currency | Dir | Amt | Result
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1 | EURUSD_otc | PUT  | 10 | 🟢 WIN
+2 | GBPUSD_otc | CALL | 20 | 🔴 LOSS
+3 | USDJPY_otc | PUT  | 10 | 🟢 WIN
+4 | AUDUSD_otc | CALL | 15 | 🟢 WIN
+5 | EURGBP_otc | PUT  | 10 | 🟢 WIN
+
+Store:
+- Trade No
+- Asset
+- Direction (CALL / PUT)
+- Amount
+- Entry timestamp
+- Expiry timestamp
+- Result
+- Payout
+- Trade ID
+- Manual/Auto
+- Broker confirm
+- Status
+
+Badges:
+🟢 WIN
+🔴 LOSS
+🟡 REFUND
+
+====================================================
+C) AUTO RESET RULE
+====================================================
+
+At new day (00:00 server time):
+- Move “Today Trade History” to main trade archive
+- Start fresh new Today History
+- Keep old history searchable
+
+====================================================
+D) USER ACCESS
+====================================================
+
+FREE USER:
+- Own demo today history only
+
+PREMIUM USER:
+- Own forex/binary today history
+- Demo + live
+
+ADMIN:
+- All user today history
+- Search
+- Filter
+- Export
+
+====================================================
+E) SUMMARY BAR
+====================================================
+
+Show top summary:
+
+FOREX:
+- Total trades today
+- Profit trades
+- Loss trades
+- Net P/L
+
+BINARY:
+- Total trades today
+- Win
+- Loss
+- Win rate %
+
+====================================================
+F) SAFETY / LOGIC
+====================================================
+
+- Save trade only after broker close confirmation
+- Prevent duplicate rows
+- Handle partial close
+- Handle failed close
+- Handle reconnect delay
+- If missing close price → mark Pending Verify
+- Audit log every update
+
+====================================================
+G) UI POSITION
+====================================================
+
+AUTO TRADING DASHBOARD
+ ┣ Account Info
+ ┣ Available Features
+ ┣ Warning Panel
+ ┣ Auto Trading Controls
+ ┣ TODAY TRADE HISTORY
+ ┗ Full Trade History

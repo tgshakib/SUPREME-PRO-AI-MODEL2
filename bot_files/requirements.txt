@@ -1,0 +1,15 @@
+aiogram==3.13.1
+aiosqlite==0.20.0
+pytz>=2023.3
+timezonefinder>=6.2
+yfinance>=0.2.40
+pandas>=2.0
+requests>=2.31
+websockets>=12.0
+httpx>=0.27.0
+aiohttp>=3.9
+beautifulsoup4>=4.12.3
+fake-useragent==2.2.0
+certifi>=2025.1.31
+pyfiglet>=1.0.2
+flask>=3.0
