@@ -148,26 +148,25 @@ async def _ssid_probe(bot):
         _SSID_LAST_OK["consecutive_fails"] = 0
         _SSID_LAST_OK["ts"] = time.time()
 
-        # Check if we're approaching the expected session expiry
-        # PO sessions typically last ~24h for active connections
-        # We track how long since the SSID was last freshly obtained
+        # Check if we're approaching the token's actual expiry boundary
+        # po_auth._SSID_STAMP now tracks both fetched_at and ttl (7d or 30d)
         try:
-            from po_auth import _SSID_STAMP
+            from po_auth import _SSID_STAMP, _DEFAULT_TTL, _REFRESH_RATIO
             fetched_at = _SSID_STAMP.get("fetched_at", 0)
             if fetched_at:
-                # Sessions are refreshed every 6 days normally.
-                # But we want to ensure connection health:
-                # if we have had consecutive probe failures → refresh early
-                age = time.time() - fetched_at
-                # 6 days = 518400 s. Refresh if < SSID_EXPIRY_BUFFER seconds remain
-                max_age = 6 * 24 * 3600  # 6 days
-                remaining = max_age - age
-                if 0 < remaining <= SSID_EXPIRY_BUFFER:
+                ttl           = int(_SSID_STAMP.get("ttl", _DEFAULT_TTL))
+                age           = time.time() - fetched_at
+                refresh_after = ttl * _REFRESH_RATIO        # 85% of lifetime
+                hard_deadline = ttl - SSID_EXPIRY_BUFFER    # 4 min before full expiry
+                remaining     = ttl - age
+                # Trigger proactive refresh if past 85% or within 4 min of expiry
+                if 0 < remaining <= SSID_EXPIRY_BUFFER or age >= refresh_after:
                     log.info(
-                        "[Agent-2/SSIDGuard] SSID expiring in %.0fs (< 4 min threshold) → refreshing",
-                        remaining,
+                        "[Agent-2/SSIDGuard] SSID approaching expiry "
+                        "(age=%.1fh / ttl=%dh, %.0fs remaining) → silent refresh",
+                        age / 3600, ttl // 3600, remaining,
                     )
-                    await _do_ssid_refresh(bot, reason=f"Proactive refresh ({remaining:.0f}s remaining)")
+                    await _do_ssid_refresh(bot, reason=f"Expiry refresh ({remaining:.0f}s remaining)")
         except Exception:
             pass
 
@@ -184,7 +183,7 @@ async def _ssid_probe(bot):
 
 
 async def _do_ssid_refresh(bot, reason: str = ""):
-    """Run SSID refresh in executor (blocking login call), then notify admin."""
+    """Run SSID refresh in executor (blocking login call). 100% silent — no bot messages ever."""
     loop = asyncio.get_event_loop()
     try:
         from po_auth import refresh_ssid_now
@@ -192,13 +191,7 @@ async def _do_ssid_refresh(bot, reason: str = ""):
         _SSID_LAST_OK["consecutive_fails"] = 0
         _SSID_LAST_OK["ts"] = time.time()
         if ok:
-            log.info("[Agent-2/SSIDGuard] ✅ SSID refreshed (%s)", reason)
-            await _silent_admin_notify(
-                bot,
-                f"🔑 <b>AI Agent-2: PO SSID Auto-Refreshed</b>\n"
-                f"Reason: {reason}\n"
-                f"<i>WebSocket connections reconnecting with fresh SSID.</i>",
-            )
+            log.info("[Agent-2/SSIDGuard] ✅ SSID silently refreshed (%s)", reason)
         else:
             log.warning("[Agent-2/SSIDGuard] ❌ SSID refresh failed (%s) — retrying in 60s", reason)
     except Exception as exc:
@@ -355,13 +348,13 @@ def verify_signal_text(text: str) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _silent_admin_notify(bot, text: str):
-    """Send a private admin-only status message and delete it after 30 s."""
+    """Send a private admin-only status message and auto-delete it after 5 s."""
     try:
         admin_id = db.get_admin_id()
         if not admin_id:
             return
         msg = await bot.send_message(int(admin_id), text, parse_mode="HTML")
-        await asyncio.sleep(30)
+        await asyncio.sleep(5)
         try:
             await bot.delete_message(int(admin_id), msg.message_id)
         except Exception:

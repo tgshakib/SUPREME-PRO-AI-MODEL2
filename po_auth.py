@@ -28,10 +28,20 @@ PO_EMAIL    = os.environ.get("PO_EMAIL",    "tgshakib012@gmail.com")
 PO_PASSWORD = os.environ.get("PO_PASSWORD", "tgshakib012@g")
 
 _SSID_FILE        = os.path.join(os.path.dirname(__file__), ".po_ssid_cache")
-_REFRESH_INTERVAL = 6 * 24 * 3600   # 6 days — before 7-day minimum expiry
 _LOGIN_RETRY_DELAY = 30              # seconds between login retries on failure
 
-_SSID_STAMP: dict = {}   # {"ssid": str, "fetched_at": float}
+# ── SSID token lifetime options ───────────────────────────────────────────────
+# PO issues two token lifetimes depending on login method:
+#   • Standard session (UUID format)  → 7-day TTL   (604 800 s)
+#   • Extended / OAuth token          → 30-day TTL  (2 592 000 s)
+# We refresh at 85% of actual TTL so the SSID never actually expires.
+_SSID_TTL_7D  = 7  * 24 * 3600    # 604 800 s
+_SSID_TTL_30D = 30 * 24 * 3600    # 2 592 000 s
+_REFRESH_RATIO = 0.85              # refresh when 85% of lifetime has elapsed
+_EARLY_REFRESH_BUFFER = 240        # also refresh if < 4 min remain
+_DEFAULT_TTL  = _SSID_TTL_7D       # conservative default
+
+_SSID_STAMP: dict = {}   # {"ssid": str, "fetched_at": float, "ttl": int}
 
 # ── PO login endpoints (tried in order) ──────────────────────────────────────
 _PO_LOGIN_ENDPOINTS = [
@@ -194,48 +204,77 @@ def _do_login() -> Optional[str]:
 def _load_cached_ssid() -> Optional[str]:
     """Load SSID from the local cache file, or from environment.
 
-    Always reads the cache file's fetched_at so the age check in
-    run_po_auth_manager() works correctly even when the SSID comes
-    from the environment variable.
+    Reads fetched_at AND ttl so the TTL-aware age check in
+    run_po_auth_manager() works correctly across restarts.
     """
-    # Try cache file first — most reliable source of age information
+    # Try cache file first — most reliable source of age + TTL information
     try:
         if os.path.exists(_SSID_FILE):
             with open(_SSID_FILE, "r") as f:
                 d = json.load(f)
-            ssid = d.get("ssid", "")
+            ssid       = d.get("ssid", "")
             fetched_at = d.get("fetched_at", 0)
-            age = time.time() - fetched_at
-            if ssid and age < _REFRESH_INTERVAL:
+            ttl        = int(d.get("ttl", _DEFAULT_TTL))
+            age        = time.time() - fetched_at
+            refresh_after = ttl * _REFRESH_RATIO   # 85% of lifetime
+            if ssid and age < refresh_after:
                 if not _SSID_STAMP.get("fetched_at"):
-                    _SSID_STAMP["ssid"] = ssid
+                    _SSID_STAMP["ssid"]       = ssid
                     _SSID_STAMP["fetched_at"] = fetched_at
+                    _SSID_STAMP["ttl"]        = ttl
                 return ssid
     except Exception:
         pass
-    # Fall back to environment variable — treat as OLD (fetched_at=0) so the
-    # auth manager immediately attempts a fresh login.  If login succeeds the
-    # new SSID replaces the env value; if it fails the old value stays as a
-    # last-resort fallback for the WebSocket connection attempt.
+    # Fall back to environment variable — treat as stale (fetched_at=0) so the
+    # auth manager immediately attempts a fresh login.
     env_ssid = os.environ.get("PO_SSID", "").strip()
     if env_ssid:
         if not _SSID_STAMP.get("fetched_at"):
-            _SSID_STAMP["ssid"] = env_ssid
-            _SSID_STAMP["fetched_at"] = 0   # mark as immediately stale → force refresh
+            _SSID_STAMP["ssid"]       = env_ssid
+            _SSID_STAMP["fetched_at"] = 0   # immediately stale → force refresh
+            _SSID_STAMP["ttl"]        = _detect_ssid_ttl(env_ssid)
         return env_ssid
     return None
+
+
+def _detect_ssid_ttl(ssid: str) -> int:
+    """Detect the expected lifetime of an SSID token.
+
+    Rules (heuristic — conservative side always wins):
+    • Starts with 'g.a' (Google OAuth) or is longer than 80 chars → 30-day token
+    • Standard UUID format (8-4-4-4-12 hex, 36 chars)             → 7-day token
+    • Anything else                                                 → 7-day (safe default)
+    """
+    if not ssid:
+        return _DEFAULT_TTL
+    s = ssid.strip()
+    if s.startswith("g.a") or len(s) > 80:
+        logger.debug("[po_auth] Detected 30-day extended SSID token")
+        return _SSID_TTL_30D
+    import re as _re
+    if _re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", s, _re.I):
+        logger.debug("[po_auth] Detected 7-day UUID SSID token")
+        return _SSID_TTL_7D
+    return _DEFAULT_TTL
 
 
 def _save_ssid(ssid: str):
     """Persist SSID to cache file and update the environment."""
     os.environ["PO_SSID"] = ssid
+    ttl = _detect_ssid_ttl(ssid)
     try:
         with open(_SSID_FILE, "w") as f:
-            json.dump({"ssid": ssid, "fetched_at": time.time()}, f)
+            json.dump({"ssid": ssid, "fetched_at": time.time(), "ttl": ttl}, f)
     except Exception as exc:
         logger.debug(f"[po_auth] Could not save SSID cache: {exc}")
     _SSID_STAMP["ssid"] = ssid
     _SSID_STAMP["fetched_at"] = time.time()
+    _SSID_STAMP["ttl"] = ttl
+    refresh_at = ttl * _REFRESH_RATIO
+    logger.info(
+        f"[po_auth] SSID saved — type={'30d' if ttl == _SSID_TTL_30D else '7d'}  "
+        f"TTL={ttl//3600}h  auto-refresh in {refresh_at/3600:.1f}h"
+    )
 
 
 def _notify_services(ssid: str):
@@ -280,11 +319,11 @@ def refresh_ssid_now() -> bool:
 
 
 async def run_po_auth_manager():
-    """Background task: keeps the PO SSID alive by logging in when needed.
+    """Background task: keeps the PO SSID alive indefinitely.
 
-    1. On first run: check existing SSID age — refresh if older than 6 days.
-    2. Every 6 days: proactively log in to get a fresh SSID.
-    3. On WebSocket auth failure: immediate re-login triggered externally.
+    Supports both 7-day and 30-day PO session tokens (auto-detected).
+    Refresh strategy: proactive at 85% of detected TTL, plus immediate
+    refresh when < 4 minutes remain, and on any auth failure.
     """
     logger.info("[po_auth] Starting Pocket Option auth manager …")
     logger.info(f"[po_auth] Using account: {PO_EMAIL}")
@@ -292,15 +331,19 @@ async def run_po_auth_manager():
     existing = _load_cached_ssid()
     if existing:
         logger.info("[po_auth] Existing SSID found — verifying age …")
-        fetched_at = _SSID_STAMP.get("fetched_at", 0)
-        age = time.time() - fetched_at
-        if age > _REFRESH_INTERVAL:
-            logger.info("[po_auth] SSID is older than 6 days — refreshing now")
+        fetched_at    = _SSID_STAMP.get("fetched_at", 0)
+        ttl           = _SSID_STAMP.get("ttl", _DEFAULT_TTL)
+        refresh_after = ttl * _REFRESH_RATIO
+        age           = time.time() - fetched_at
+        token_type    = "30d" if ttl == _SSID_TTL_30D else "7d"
+        if age >= refresh_after:
+            logger.info(f"[po_auth] SSID ({token_type}) is {age/3600:.1f}h old ≥ "
+                        f"{refresh_after/3600:.1f}h threshold — refreshing now")
             await asyncio.get_event_loop().run_in_executor(None, refresh_ssid_now)
         else:
             logger.info(
                 f"[po_auth] SSID is {age/3600:.1f}h old — valid "
-                f"(next refresh in {(_REFRESH_INTERVAL - age)/3600:.1f}h)"
+                f"(type={token_type}  next refresh in {(refresh_after - age)/3600:.1f}h)"
             )
     else:
         logger.info("[po_auth] No SSID found — logging in now …")
@@ -308,38 +351,55 @@ async def run_po_auth_manager():
         if not ok:
             logger.warning("[po_auth] Initial login failed — will retry in background")
 
-    # Main maintenance loop — checks every 60 s, refreshes:
-    #   • At 6-day boundary (normal scheduled refresh)
-    #   • When < 240 seconds (4 minutes) remain before expected expiry
-    #   • Immediately on any auth failure detected by SSIDGuard
-    _EARLY_REFRESH_BUFFER = 240   # seconds — refresh 4 min before expiry
-
+    # Main maintenance loop — checks every 60 s, refreshes when:
+    #   • 85% of TTL elapsed (7-day → ~6d  |  30-day → ~25.5d)
+    #   • < 4 minutes remain before full TTL expiry
+    #   • Auth failure detected by Agent-2 SSIDGuard (external trigger)
     while True:
-        fetched_at = _SSID_STAMP.get("fetched_at", 0)
-        age        = time.time() - fetched_at
-        remaining  = max(0, _REFRESH_INTERVAL - age)
+        fetched_at    = _SSID_STAMP.get("fetched_at", 0)
+        ttl           = _SSID_STAMP.get("ttl", _DEFAULT_TTL)
+        age           = time.time() - fetched_at
+        refresh_after = ttl * _REFRESH_RATIO      # 85% threshold
+        hard_deadline = ttl - _EARLY_REFRESH_BUFFER  # 4 min before expiry
+        token_type    = "30d" if ttl == _SSID_TTL_30D else "7d"
 
-        if remaining <= 0:
-            logger.info("[po_auth] SSID refresh due — logging in …")
+        if age >= ttl:
+            # Fully expired — must refresh immediately
+            logger.info(f"[po_auth] SSID ({token_type}) fully expired — refreshing …")
             ok = await asyncio.get_event_loop().run_in_executor(None, refresh_ssid_now)
             if not ok:
-                logger.warning(
-                    f"[po_auth] Login failed — retrying in {_LOGIN_RETRY_DELAY}s"
-                )
+                logger.warning(f"[po_auth] Login failed — retrying in {_LOGIN_RETRY_DELAY}s")
                 await asyncio.sleep(_LOGIN_RETRY_DELAY)
             else:
                 await asyncio.sleep(60)
-        elif remaining <= _EARLY_REFRESH_BUFFER:
-            # Expiry approaching within 4 minutes — refresh now proactively
+
+        elif age >= refresh_after:
+            # Past 85% of lifetime — proactive refresh
+            remaining = ttl - age
             logger.info(
-                f"[po_auth] ⚡ SSID expiring in {remaining:.0f}s — proactive early refresh"
+                f"[po_auth] ⚡ SSID ({token_type}) at {age/3600:.1f}h / "
+                f"{ttl/3600:.0f}h — proactive refresh ({remaining/3600:.1f}h before expiry)"
             )
             ok = await asyncio.get_event_loop().run_in_executor(None, refresh_ssid_now)
             if not ok:
-                logger.warning("[po_auth] Early refresh failed — retrying in 30s")
+                logger.warning("[po_auth] Proactive refresh failed — retrying in 30s")
                 await asyncio.sleep(30)
             else:
                 await asyncio.sleep(60)
+
+        elif age >= hard_deadline:
+            # Within 4 minutes of full expiry — emergency early refresh
+            remaining = ttl - age
+            logger.info(
+                f"[po_auth] ⚡ SSID expiring in {remaining:.0f}s — emergency early refresh"
+            )
+            ok = await asyncio.get_event_loop().run_in_executor(None, refresh_ssid_now)
+            if not ok:
+                logger.warning("[po_auth] Emergency refresh failed — retrying in 30s")
+                await asyncio.sleep(30)
+            else:
+                await asyncio.sleep(60)
+
         else:
-            # Check again in 60 seconds (fine-grained expiry detection)
+            # All good — check again in 60 seconds
             await asyncio.sleep(60)
