@@ -783,6 +783,14 @@ async def run_otc_price_service():
     sync_task = asyncio.create_task(_sync_from_po_candles(), name="otc-po-candle-sync")
     yf_task   = asyncio.create_task(_yf_otc_poll_loop(),     name="otc-yf-fallback")
 
+    # Register tasks with Agent-3 (PriceFundAgent) so it can cancel/restart them
+    try:
+        from ai_guardian import _register_stream_task
+        _register_stream_task("otc-qx-stream", qx_task)
+        _register_stream_task("otc-po-stream", po_task)
+    except Exception:
+        pass
+
     # Status log every 5 minutes
     async def _status_loop():
         while True:

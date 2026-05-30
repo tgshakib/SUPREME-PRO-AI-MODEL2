@@ -1,6 +1,6 @@
 """SUPREME PRO AI — Silent AI Guardian System
 =============================================
-Three autonomous agents working silently under the bot at all times:
+Four autonomous agents working silently under the bot at all times:
 
   Agent-1 (WinRateAgent)   — monitors 2-day winrate every 5 min.
                               If < 85% → auto-boost AI thresholds.
@@ -10,6 +10,12 @@ Three autonomous agents working silently under the bot at all times:
   Agent-2 (SSIDGuard)      — probes PO SSID health every 45 seconds.
                               Detects expiry 3-4 minutes early → auto-refresh.
                               On any auth failure → immediate refresh + reconnect.
+
+  Agent-3 (PriceFundAgent) — monitors every OTC pair price every 20 seconds.
+                              Detects stale/delayed/missing broker prices.
+                              Auto force-reconnects QX + PO streams to fix delays.
+                              3-layer recovery: restart tasks → SSID refresh → notify.
+                              Never shows anything in signal cards.
 
   ClaudeAdvisor            — uses Anthropic Claude API (if key set) to analyse
                               per-pair/per-engine failure patterns every 15 min
@@ -199,6 +205,210 @@ async def _do_ssid_refresh(bot, reason: str = ""):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# AGENT-3: PRICE FUND AGENT — OTC + Live price delay auto-fix
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FUND_CHECK_INTERVAL   = 20    # seconds between price health checks
+_FUND_STALE_THRESHOLD  = 90    # seconds — broker price older than this = stale
+_FUND_STALE_ALERT_PCT  = 0.60  # 60%+ pairs stale → trigger recovery
+_FUND_RECONNECT_COOL   = 180   # seconds between reconnect attempts (anti-spam)
+_FUND_NOTIFY_COOL      = 600   # seconds between admin notifications (10 min)
+
+# Mutable state (single dict avoids global keyword issues)
+_FUND_STATE: dict = {
+    "last_reconnect": 0.0,
+    "last_notify":    0.0,
+    "consecutive_stale_rounds": 0,
+    "total_reconnects": 0,
+    "total_fixed": 0,
+}
+
+# Task handles so we can cancel + restart individual streams
+_STREAM_TASKS: dict = {}   # populated when tasks are created
+
+
+def _register_stream_task(name: str, task: "asyncio.Task"):
+    """Called by otc_price_service to register its tasks so Agent-3 can restart them."""
+    _STREAM_TASKS[name] = task
+
+
+async def _price_fund_agent(bot):
+    """Agent-3 main loop — monitors OTC/live price freshness every 20 seconds."""
+    log.info("[Agent-3/PriceFund] Started — monitoring OTC price health every %ds", _FUND_CHECK_INTERVAL)
+    await asyncio.sleep(45)   # let streams connect first
+
+    while True:
+        try:
+            await _price_fund_check(bot)
+        except Exception as exc:
+            log.debug("[Agent-3/PriceFund] check error: %s", exc)
+        await asyncio.sleep(_FUND_CHECK_INTERVAL)
+
+
+async def _price_fund_check(bot):
+    """Analyse price buffer. If broker prices stale → force-reconnect streams."""
+    try:
+        from otc_price_service import _PRICES, _LOCK, _QX_OTC_PAIRS, _PO_OTC_PAIRS
+    except ImportError:
+        return
+
+    now = time.time()
+    all_pairs = set(p.lower() for p in _QX_OTC_PAIRS + _PO_OTC_PAIRS)
+    total = len(all_pairs)
+    if total == 0:
+        return
+
+    # Tally freshness per pair
+    broker_fresh  = 0  # has broker (qx/po) price newer than threshold
+    broker_stale  = 0  # has broker price but it's old
+    yf_only       = 0  # only yfinance price, no broker data ever
+    no_data       = 0  # no price at all
+
+    with _LOCK:
+        snapshot = dict(_PRICES)
+
+    for key in all_pairs:
+        entry = snapshot.get(key)
+        if not entry:
+            no_data += 1
+            continue
+        source = entry.get("source", "yf")
+        age    = now - entry.get("time", 0)
+        if source in ("qx", "po"):
+            if age < _FUND_STALE_THRESHOLD:
+                broker_fresh += 1
+            else:
+                broker_stale += 1
+        else:
+            yf_only += 1
+
+    stale_count  = broker_stale + yf_only + no_data
+    stale_ratio  = stale_count / total
+    has_problem  = stale_ratio >= _FUND_STALE_ALERT_PCT
+
+    if not has_problem:
+        # Price feeds healthy — reset stale counter
+        if _FUND_STATE["consecutive_stale_rounds"] > 0:
+            log.info(
+                "[Agent-3/PriceFund] ✅ Prices recovered — "
+                "broker_fresh=%d / %d pairs (%.0f%%)",
+                broker_fresh, total, 100 * broker_fresh / total,
+            )
+            _FUND_STATE["total_fixed"] += 1
+        _FUND_STATE["consecutive_stale_rounds"] = 0
+        return
+
+    _FUND_STATE["consecutive_stale_rounds"] += 1
+    rounds = _FUND_STATE["consecutive_stale_rounds"]
+
+    log.warning(
+        "[Agent-3/PriceFund] ⚠ Price delay detected — "
+        "fresh=%d  stale=%d  yf_only=%d  no_data=%d / %d pairs (%.0f%% stale) round#%d",
+        broker_fresh, broker_stale, yf_only, no_data, total,
+        100 * stale_ratio, rounds,
+    )
+
+    # ── Layer 1: Force-reconnect streams (after 1st stale round) ─────────────
+    cool_ok = (now - _FUND_STATE["last_reconnect"]) > _FUND_RECONNECT_COOL
+    if rounds >= 1 and cool_ok:
+        await _fund_force_reconnect(bot, broker_fresh, stale_count, total)
+        _FUND_STATE["last_reconnect"] = now
+        _FUND_STATE["total_reconnects"] += 1
+
+    # ── Layer 2: Also refresh PO SSID in case auth is the cause ──────────────
+    if rounds >= 2:
+        try:
+            from po_auth import refresh_ssid_now
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(None, refresh_ssid_now)
+            if ok:
+                log.info("[Agent-3/PriceFund] PO SSID refreshed as part of recovery")
+        except Exception as exc:
+            log.debug("[Agent-3/PriceFund] SSID refresh error: %s", exc)
+
+    # ── Layer 3: Admin notification (rate-limited to every 10 min) ───────────
+    notify_ok = (now - _FUND_STATE["last_notify"]) > _FUND_NOTIFY_COOL
+    if rounds >= 3 and notify_ok:
+        _FUND_STATE["last_notify"] = now
+        await _silent_admin_notify(
+            bot,
+            f"⚡ <b>Agent-3 Price Recovery Active</b>\n"
+            f"Stale pairs: <b>{stale_count}/{total}</b> ({100*stale_ratio:.0f}%)\n"
+            f"Broker fresh: {broker_fresh} | YF-only: {yf_only} | No data: {no_data}\n"
+            f"Reconnect #{_FUND_STATE['total_reconnects']} triggered\n"
+            f"<i>Streams force-restarted. Fixing…</i>",
+        )
+
+
+async def _fund_force_reconnect(bot, broker_fresh: int, stale_count: int, total: int):
+    """Cancel and restart QX + PO asyncio stream tasks to force a fresh connection."""
+    log.info("[Agent-3/PriceFund] 🔄 Force-reconnecting OTC streams …")
+
+    restarted = []
+
+    # Restart any registered stream tasks
+    for task_name in ("otc-qx-stream", "otc-po-stream"):
+        old_task = _STREAM_TASKS.get(task_name)
+        if old_task and not old_task.done():
+            old_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(old_task), timeout=2.0)
+            except Exception:
+                pass
+            restarted.append(task_name)
+            log.info("[Agent-3/PriceFund] Cancelled task: %s", task_name)
+
+    # Find any matching tasks in the running loop (catches tasks we didn't register)
+    for task in list(asyncio.all_tasks()):
+        name = task.get_name()
+        if name in ("otc-qx-stream", "otc-po-stream") and name not in restarted:
+            if not task.done():
+                task.cancel()
+                restarted.append(name)
+                log.info("[Agent-3/PriceFund] Cancelled task (loop scan): %s", name)
+
+    # Restart fresh stream loops from otc_price_service
+    try:
+        from otc_price_service import _run_qx_loop, _run_po_loop
+        if "otc-qx-stream" in restarted or not any(
+            t.get_name() == "otc-qx-stream" and not t.done()
+            for t in asyncio.all_tasks()
+        ):
+            new_qx = asyncio.create_task(_run_qx_loop(), name="otc-qx-stream")
+            _STREAM_TASKS["otc-qx-stream"] = new_qx
+            log.info("[Agent-3/PriceFund] ▶ QX stream task restarted")
+
+        if "otc-po-stream" in restarted or not any(
+            t.get_name() == "otc-po-stream" and not t.done()
+            for t in asyncio.all_tasks()
+        ):
+            new_po = asyncio.create_task(_run_po_loop(), name="otc-po-stream")
+            _STREAM_TASKS["otc-po-stream"] = new_po
+            log.info("[Agent-3/PriceFund] ▶ PO stream task restarted")
+
+        # Also restart the PO candle sync and yf fallback if they died
+        for task_name, coro_fn in (
+            ("otc-po-candle-sync", "otc_price_service._sync_from_po_candles"),
+        ):
+            alive = any(
+                t.get_name() == task_name and not t.done()
+                for t in asyncio.all_tasks()
+            )
+            if not alive:
+                from otc_price_service import _sync_from_po_candles
+                asyncio.create_task(_sync_from_po_candles(), name=task_name)
+                log.info("[Agent-3/PriceFund] ▶ %s restarted", task_name)
+
+    except Exception as exc:
+        log.warning("[Agent-3/PriceFund] stream restart error: %s", exc)
+
+    log.info(
+        "[Agent-3/PriceFund] Reconnect done. broker_fresh=%d/%d pairs before restart.",
+        broker_fresh, total,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CLAUDE AI ADVISOR — Premium signal quality analysis
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -368,9 +578,10 @@ async def _silent_admin_notify(bot, text: str):
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def run_ai_guardian(bot):
-    """Start all three silent agents as background asyncio tasks."""
-    log.info("[AIGuardian] Launching 3 agents: WinRateAgent, SSIDGuard, ClaudeAdvisor")
-    asyncio.create_task(_winrate_agent(bot),   name="ai_winrate_agent")
-    asyncio.create_task(_ssid_guard(bot),       name="ai_ssid_guard")
-    asyncio.create_task(_claude_advisor(bot),   name="ai_claude_advisor")
+    """Start all four silent agents as background asyncio tasks."""
+    log.info("[AIGuardian] Launching 4 agents: WinRateAgent, SSIDGuard, PriceFundAgent, ClaudeAdvisor")
+    asyncio.create_task(_winrate_agent(bot),      name="ai_winrate_agent")
+    asyncio.create_task(_ssid_guard(bot),         name="ai_ssid_guard")
+    asyncio.create_task(_price_fund_agent(bot),   name="ai_price_fund_agent")
+    asyncio.create_task(_claude_advisor(bot),     name="ai_claude_advisor")
     log.info("[AIGuardian] All agents started — running silently in background")
