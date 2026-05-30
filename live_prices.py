@@ -495,20 +495,24 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
         except Exception:
             pass
 
-        # Source 0c: last known price from otc_price_service regardless of age
-        # (last resort — any broker price beats yfinance for OTC pairs)
+        # Source 0c: last known broker price from otc_price_service regardless of age
+        # Critically: EXCLUDE yfinance (source == "yf") — yfinance gives real-market
+        # prices which can differ 5-15%+ from the broker's synthetic OTC feed.
+        # A stale QX/PO broker price is always more accurate than a fresh yfinance price.
         try:
             from otc_price_service import _PRICES, _normalize_pair as _norm, _LOCK
-            import threading as _th
             _key = _norm(pair)
             with _LOCK:
                 _entry = _PRICES.get(_key)
-            if _entry and _entry.get("price", 0) > 0:
+            if (_entry
+                    and _entry.get("price", 0) > 0
+                    and _entry.get("source") != "yf"):   # ← broker-only gate
                 return float(_entry["price"])
         except Exception:
             pass
 
         # No broker price at all — do NOT fall to yfinance for OTC.
+        # yfinance prices are wrong for synthetic OTC pairs (can be 10%+ off).
         return None
 
     # ── 1. Spot metals: gold-api.com → stooq metals ────────────────

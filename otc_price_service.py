@@ -280,26 +280,41 @@ def _write_price(asset_key: str, price: float, source: str):
             _PRICES[key] = {"price": price, "time": now, "source": source}
 
 
-def get_live_otc_price(pair: str) -> Optional[float]:
+def get_live_otc_price(pair: str, broker_only: bool = True) -> Optional[float]:
     """Return the freshest live OTC price for a bot pair label.
 
-    Priority:
-      1. Entry younger than _PRICE_MAX_AGE (3s)  → guaranteed fresh tick
-      2. Entry younger than _PRICE_STALE_AGE (90s) → recent enough for signal accuracy
-      3. None — no data at all (first start / both streams down)
+    broker_only=True (DEFAULT) — NEVER returns yfinance prices for OTC.
+    Broker OTC prices (QX / PO) are completely synthetic and can differ
+    from the real market by 5-15%+. Mixing yfinance into OTC signals
+    produces wrong entry prices that cause systematic trade losses.
 
-    Returning a 10-60s old tick is far more accurate than falling back to
-    yfinance which gives the REAL-market price, not the broker's synthetic OTC price.
+    Priority when broker_only=True:
+      1. Broker tick (source == "qx" or "po") younger than _PRICE_STALE_AGE → return it
+      2. No broker data or yfinance-only → return None (caller must handle gracefully)
+
+    broker_only=False → legacy behaviour, includes yfinance (only for non-OTC fallback).
     """
     key = _normalize_pair(pair)
     with _LOCK:
         entry = _PRICES.get(key)
     if not entry:
         return None
+    # Core fix: yfinance prices are real-market rates that can differ 5-15%+
+    # from the broker's synthetic OTC feed. Never use them for OTC signal direction.
+    if broker_only and entry.get("source") == "yf":
+        return None
     age = time.time() - entry["time"]
     if age < _PRICE_STALE_AGE:
         return entry["price"]
     return None
+
+
+def get_live_otc_source(pair: str) -> Optional[str]:
+    """Return the price source for a pair: 'qx', 'po', 'yf', or None."""
+    key = _normalize_pair(pair)
+    with _LOCK:
+        entry = _PRICES.get(key)
+    return entry.get("source") if entry else None
 
 
 def get_otc_status() -> Dict[str, int]:
@@ -653,7 +668,7 @@ _YF_OTC_MAP: Dict[str, str] = {
     "dotusd_otc": "DOT-USD",  "linkusd_otc": "LINK-USD",
     "dashusd_otc": "DASH-USD","tonusd_otc": "TON11419-USD",
     "xrpusd_otc": "XRP-USD",  "adausd_otc": "ADA-USD",
-    "maticusd_otc": "POL-USD",
+    "maticusd_otc": "MATIC-USD",
     # Stocks
     "aapl_otc": "AAPL",  "amzn_otc": "AMZN", "tsla_otc": "TSLA",
     "googl_otc": "GOOGL","msft_otc": "MSFT",  "meta_otc": "META",
@@ -664,19 +679,27 @@ _YF_OTC_MAP: Dict[str, str] = {
     "dis_otc":  "DIS",   "ibm_otc":  "IBM",   "fb_otc":   "META",
 }
 
-# yfinance OTC poll interval (seconds) — keeps prices live when broker streams down
-_YF_POLL_INTERVAL = 10
-# How stale a price must be before yf replaces it (don't overwrite fresh broker ticks)
-_YF_REPLACE_AGE   = 30
+# yfinance OTC poll interval (seconds) — only runs to seed pairs with ZERO broker data ever
+_YF_POLL_INTERVAL = 30
+# yfinance is NEVER allowed to overwrite a broker price (source=qx/po), regardless of age.
+# It may only seed a pair that has had NO broker tick at all (source absent or source=yf only).
+# This constant is kept for reference but the loop now uses source-based gating, not age.
+_YF_REPLACE_AGE   = 9999999   # effectively infinite — source check is the real gate
 
 
 async def _yf_otc_poll_loop():
-    """Poll yfinance for OTC pair prices every 10s as a real-time fallback.
+    """Poll yfinance for OTC pairs that have NEVER received a real broker tick.
 
-    Fills _PRICES for any pair that is missing or older than 30s so that
-    get_live_otc_price() always returns a valid price even when both QX and
-    PO WebSocket streams are down.  Fresh broker ticks (< 30s) are never
-    overwritten so broker data always takes priority.
+    CRITICAL RULE: yfinance gives REAL-MARKET prices. Broker OTC prices are
+    SYNTHETIC — completely broker-defined, disconnected from real markets.
+    They can differ by 5-15%+ (e.g. yfinance=17.33, Quotex OTC=19.37).
+    Using yfinance prices for OTC signals causes wrong entry points → losing trades.
+
+    This loop ONLY writes yfinance data for pairs where source is absent or
+    already "yf" — it NEVER overwrites a broker tick (source="qx" or "po"),
+    regardless of how old that broker tick is.  A 10-minute-old broker price
+    is infinitely more accurate for an OTC synthetic pair than a fresh
+    yfinance real-market price.
     """
     try:
         import yfinance as yf
@@ -684,21 +707,21 @@ async def _yf_otc_poll_loop():
         logger.warning("[otc_svc:yf] yfinance not installed — yf OTC fallback disabled")
         return
 
-    logger.info("[otc_svc:yf] yfinance OTC fallback poller started")
+    logger.info("[otc_svc:yf] yfinance OTC fallback poller started (broker-safe mode)")
     while True:
         try:
-            now = time.time()
-            # Collect pairs that need a yfinance update
+            # Only update pairs that have NO broker data at all (no entry, or existing source == "yf")
+            # Never touch pairs that have a real qx/po broker tick.
             with _LOCK:
                 need_update = [
                     k for k in _YF_OTC_MAP
                     if k not in _PRICES
-                    or (now - _PRICES[k].get("time", 0)) > _YF_REPLACE_AGE
+                    or _PRICES[k].get("source") == "yf"
                 ]
 
             # Process in batches of 20 to avoid Yahoo rate-limit
             for i in range(0, len(need_update), 20):
-                batch_keys   = need_update[i: i + 20]
+                batch_keys    = need_update[i: i + 20]
                 batch_tickers = [_YF_OTC_MAP[k] for k in batch_keys]
                 try:
                     raw = yf.download(
@@ -708,7 +731,6 @@ async def _yf_otc_poll_loop():
                         threads=False,
                     )
                     if raw is not None and len(raw) > 0:
-                        # Multi-ticker download returns MultiIndex columns
                         try:
                             closes = raw["Close"]
                         except KeyError:
@@ -716,6 +738,11 @@ async def _yf_otc_poll_loop():
                         if closes is not None and len(closes) > 0:
                             last_row = closes.iloc[-1]
                             for key, ticker in zip(batch_keys, batch_tickers):
+                                # Double-check: still no broker tick before writing yf price
+                                with _LOCK:
+                                    cur = _PRICES.get(key)
+                                if cur and cur.get("source") in ("qx", "po"):
+                                    continue   # broker data arrived — skip yfinance write
                                 try:
                                     px = float(last_row[ticker] if ticker in last_row.index
                                                else last_row.iloc[batch_tickers.index(ticker)])
@@ -726,6 +753,10 @@ async def _yf_otc_poll_loop():
                 except Exception:
                     # Fall back to individual Ticker calls on batch failure
                     for key, ticker in zip(batch_keys, batch_tickers):
+                        with _LOCK:
+                            cur = _PRICES.get(key)
+                        if cur and cur.get("source") in ("qx", "po"):
+                            continue   # broker data present — never overwrite
                         try:
                             t   = yf.Ticker(ticker)
                             fi  = t.fast_info
