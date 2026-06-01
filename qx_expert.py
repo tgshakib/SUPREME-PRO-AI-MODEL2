@@ -1,140 +1,162 @@
-"""QX EXPERT IMTIAZZ PRO — Non-Reprint Binary Signal Engine
-============================================================
-Premium binary indicator engine for SUPREME PRO AI BOT.
+"""QX Expert — SUPREME ELITE Binary Reversal Engine V10
+=======================================================
+13 independent reversal-detection signals working in unison.
+Every signal targets EXHAUSTION and REVERSAL — never trend-following.
 
-Replicates the multi-oscillator confluence logic of QX Expert Non-Reprint:
-  • Fast Stochastic (5, 3, 3)    — quick reversal detection at extremes
-  • RSI (7)                       — ultra-fast momentum for short candles
-  • CCI (14)                      — commodity channel index overbought/oversold
-  • Williams %R (14)              — extreme reversal filter
-  • Bollinger Bands (20, 2.0)    — outer-band touch + squeeze signal
-  • Heikin Ashi smoothing         — trend noise reduction
-  • Candle body strength          — conviction filter
-  • Volume surge check            — institutional entry confirmation
-  • NON-REPRINT guard             — signal must exist on 2 consecutive confirmed bars
-  • Sub-candle 5s/15s/30sc zones — micro-liquidity reversal for binary timing
-  • Signal grade 0-100 — engine accepts ≥ 75 for binary (≥ 80 OTC)
-  • 90s cache per pair to avoid hammering yfinance
+WHY REVERSAL-ONLY
+-----------------
+OTC synthetic prices and short-expiry binaries share one property:
+by the time a trend signal fires (EMA cross, MACD cross), the move is
+already 70-80% complete. The only consistently profitable approach is
+catching the reversal AT the exhaustion point — oversold/overbought
+oscillators + exhaustion candle pattern + BB extreme + divergence.
 
-NON-REPRINT LOGIC
-─────────────────
-A signal is only accepted if the same direction fires on BOTH:
-  bar[-2] (two confirmed bars ago) AND bar[-1] (last confirmed bar).
-This prevents repainting: signals that appeared on a forming candle
-and then disappeared. Both bars must agree = zero repaint risk.
+THE 13 SIGNALS  (each weighted independently)
+----------------------------------------------
+S01  RSI(3) ultra-fast          wt 3   extreme OS/OB: ≤12 / ≥88
+S02  RSI(7) fast                wt 2   OS/OB: ≤22 / ≥78
+S03  RSI(14) standard           wt 2   OS/OB: ≤28 / ≥72
+S04  RSI Divergence             wt 3   price new extreme + RSI diverges
+S05  Stochastic(3,1,1) ultra    wt 3   crossover in extreme zone
+S06  Stochastic(5,3,3) fast     wt 2   crossover in extreme zone
+S07  CCI(14)                    wt 2   ≤-150 turning up / ≥150 turning down
+S08  Williams %R(14)            wt 2   ≤-88 turning up / ≥-12 turning down
+S09  BB(20, 2.5σ) outer pierce  wt 3   price pierces outer band + closes back
+S10  Exhaustion + reversal bar  wt 4   4+ same-dir candles + opposing body
+S11  Candlestick patterns        wt 2   pin bar / engulfing at extreme
+S12  Heikin Ashi reversal        wt 2   HA flip after 3+ same-color bars
+S13  MACD(5,13,3) exhaustion    wt 2   histogram shrinks at new price extreme
 
-Sub-candle 5s/15s/30sc support: for binary entries we analyse the
-internal structure of the last 1-3 confirmed 1m candles to produce
-a micro-liquidity zone estimate for the 5s, 15s, and 30sc windows.
+Max possible votes: 32
 
-Public API
+THRESHOLDS
 ----------
-  qx_analyze(pair, is_otc=False) -> dict | None
-    {
-      'direction':      'BUY' | 'SELL',
-      'grade':          int 0-100,
-      'agree':          int,          # how many sub-signals agreed
-      'elite':          bool,         # all major sub-signals aligned
-      'reasons':        list[str],    # human-readable confluence reasons
-      'non_reprint':    bool,         # True = both confirmation bars agree
-      'sub_candle_dir': str | None,   # sub-candle 5s/15s/30sc bias
-    }
+OTC pairs  → ≥14 votes, opposing ≤ 1, grade ≥ 78
+Live pairs → ≥11 votes, opposing ≤ 2, grade ≥ 70
+Elite OTC  → ≥20 votes, opposing = 0
+Elite Live → ≥16 votes, opposing = 0
+
+NON-REPRINT
+-----------
+Signal is only valid when BOTH the last confirmed bar (bar[-2])
+AND the bar before it (bar[-3]) agree on direction.
 """
 from __future__ import annotations
 
+import os
 import time
-from typing import Optional
+from typing import Optional, Tuple
+
+import pandas as pd
 
 try:
     import yfinance as yf
-    import pandas as pd
     _OK = True
-except Exception as _e:
-    print(f"[qx_expert] import failed: {_e}")
+except Exception:
     yf = None
-    pd = None
     _OK = False
 
-from live_prices import yf_ticker
+try:
+    from live_prices import yf_ticker
+except Exception:
+    def yf_ticker(pair: str) -> Optional[str]:  # type: ignore
+        return None
 
-_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
-_TTL = 90.0
+# ── Settings ──────────────────────────────────────────────────────────────────
+QX_INTERVAL = "1m"    # 1m bars — most sensitive for binary entries
+QX_PERIOD   = "1d"    # 1 day of history — enough for all indicators
+QX_CANDLES  = 120     # tail rows used (need ≥50 for divergence lookback)
+QX_MIN_GRADE = 70     # minimum grade for live pairs
 
-QX_MIN_GRADE = 75
-QX_CANDLES   = 120
-QX_INTERVAL  = "5m"
-QX_PERIOD    = "3d"
+_TTL   = 18.0         # cache seconds — fresh analysis every ~18s
+_CACHE: dict = {}
 
 
-def _flatten(df):
-    if hasattr(df.columns, "get_level_values"):
-        df.columns = [
-            str(c[0]).lower() if isinstance(c, tuple) else str(c).lower()
-            for c in df.columns
-        ]
+# ── Pure math helpers (no pandas dependency in signatures) ───────────────────
+
+def _ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False).mean()
+
+
+def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain  = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+    loss  = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
+    rs    = gain / (loss + 1e-10)
+    return 100 - (100 / (1 + rs))
+
+
+def _stochastic(
+    high: pd.Series, low: pd.Series, close: pd.Series,
+    k: int = 5, d: int = 3, smooth: int = 3
+) -> Tuple[pd.Series, pd.Series]:
+    low_min  = low.rolling(k).min()
+    high_max = high.rolling(k).max()
+    fast_k   = 100 * (close - low_min) / (high_max - low_min + 1e-10)
+    slow_k   = fast_k.rolling(smooth).mean()
+    slow_d   = slow_k.rolling(d).mean()
+    return slow_k, slow_d
+
+
+def _cci(
+    high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
+) -> pd.Series:
+    tp = (high + low + close) / 3
+    ma = tp.rolling(period).mean()
+    md = tp.rolling(period).apply(lambda x: pd.Series(x).mad(), raw=False)
+    return (tp - ma) / (0.015 * md + 1e-10)
+
+
+def _williams_r(
+    high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
+) -> pd.Series:
+    hh = high.rolling(period).max()
+    ll = low.rolling(period).min()
+    return -100 * (hh - close) / (hh - ll + 1e-10)
+
+
+def _bbands(
+    series: pd.Series, period: int = 20, dev: float = 2.0
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    ma  = series.rolling(period).mean()
+    std = series.rolling(period).std()
+    return ma + dev * std, ma, ma - dev * std
+
+
+def _macd(
+    series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    ef   = series.ewm(span=fast,   adjust=False).mean()
+    es   = series.ewm(span=slow,   adjust=False).mean()
+    line = ef - es
+    sig  = line.ewm(span=signal, adjust=False).mean()
+    hist = line - sig
+    return line, sig, hist
+
+
+def _heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    ha = pd.DataFrame(index=df.index)
+    ha["ha_close"] = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
+    ha_open = [(df["open"].iloc[0] + df["close"].iloc[0]) / 2]
+    for i in range(1, len(df)):
+        ha_open.append((ha_open[-1] + ha["ha_close"].iloc[i - 1]) / 2)
+    ha["ha_open"]  = ha_open
+    ha["ha_high"]  = df[["high",  "open", "close"]].max(axis=1)
+    ha["ha_low"]   = df[["low",   "open", "close"]].min(axis=1)
+    return ha
+
+
+def _flatten(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [str(c[0]).lower() for c in df.columns]
     else:
         df.columns = [str(c).lower() for c in df.columns]
     return df
 
 
-def _ema(series, period: int):
-    return series.ewm(span=period, adjust=False).mean()
+# ── Data fetch ────────────────────────────────────────────────────────────────
 
-
-def _rsi(series, period: int = 7):
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, 1e-10)
-    return 100 - (100 / (1 + rs))
-
-
-def _stochastic(high, low, close, k=5, d=3, smooth=3):
-    """Fast Stochastic (k, d, smooth). Returns (%K, %D)."""
-    lowest  = low.rolling(k).min()
-    highest = high.rolling(k).max()
-    raw_k   = 100 * (close - lowest) / (highest - lowest + 1e-10)
-    pct_k   = raw_k.rolling(smooth).mean()
-    pct_d   = pct_k.rolling(d).mean()
-    return pct_k, pct_d
-
-
-def _cci(high, low, close, period: int = 14):
-    """Commodity Channel Index."""
-    typical = (high + low + close) / 3
-    ma = typical.rolling(period).mean()
-    md = typical.rolling(period).apply(lambda x: (abs(x - x.mean())).mean(), raw=True)
-    return (typical - ma) / (0.015 * md.replace(0, 1e-10))
-
-
-def _williams_r(high, low, close, period: int = 14):
-    """Williams %R."""
-    highest = high.rolling(period).max()
-    lowest  = low.rolling(period).min()
-    return -100 * (highest - close) / (highest - lowest + 1e-10)
-
-
-def _bbands(series, period: int = 20, dev: float = 2.0):
-    """Bollinger Bands → (upper, mid, lower)."""
-    mid = series.rolling(period).mean()
-    std = series.rolling(period).std(ddof=0)
-    return mid + dev * std, mid, mid - dev * std
-
-
-def _heikin_ashi(df):
-    """Return Heikin Ashi OHLC as a new DataFrame."""
-    ha = df[["open", "high", "low", "close"]].copy()
-    ha["ha_close"] = (df["open"] + df["high"] + df["low"] + df["close"]) / 4
-    ha_open = [(df["open"].iloc[0] + df["close"].iloc[0]) / 2]
-    for i in range(1, len(df)):
-        ha_open.append((ha_open[-1] + ha["ha_close"].iloc[i - 1]) / 2)
-    ha["ha_open"] = ha_open
-    ha["ha_high"] = df[["high", "open", "close"]].max(axis=1)
-    ha["ha_low"]  = df[["low",  "open", "close"]].min(axis=1)
-    return ha
-
-
-def _fetch(ticker: str):
+def _fetch(ticker: str) -> Optional[pd.DataFrame]:
     if not _OK or yf is None:
         return None
     try:
@@ -148,161 +170,306 @@ def _fetch(ticker: str):
         if df is None or df.empty or len(df) < 40:
             return None
         df = _flatten(df)
-        required = {"open", "high", "low", "close"}
-        if not required.issubset(df.columns):
+        if not {"open", "high", "low", "close"}.issubset(df.columns):
             return None
         return df.tail(QX_CANDLES).copy()
-    except Exception as e:
-        print(f"[qx_expert] fetch error {ticker}: {e}")
+    except Exception:
         return None
 
 
-def _compute_votes_at_offset(
-    close, high, low, open_, is_otc: bool, offset: int = -1
-) -> tuple[int, int, list[str]]:
-    """
-    Compute buy/sell votes for a specific bar offset.
-    offset=-1 → last confirmed bar (bar[-2] in 0-based from tail)
-    offset=-2 → two bars ago (bar[-3])
-    Returns (buy_votes, sell_votes, reasons).
-    Used for non-reprint: both bars must agree before signal fires.
-    """
-    reasons: list[str] = []
+# ── 13-Signal reversal scorer ─────────────────────────────────────────────────
+
+def _score_reversal(
+    close: pd.Series,
+    high:  pd.Series,
+    low:   pd.Series,
+    open_: pd.Series,
+    idx:   int = -1,           # bar index to analyse (−1 = last, −2 = prev)
+) -> Tuple[int, int, list]:
+    """Return (buy_votes, sell_votes, reasons) for bar at `idx`."""
     buy_votes  = 0
     sell_votes = 0
+    reasons: list = []
 
-    idx = offset  # e.g. -1 = last item, -2 = second-to-last
-
+    # ── S01: RSI(3) ultra-fast ─────────────────────────────────────────
     try:
-        rsi7 = _rsi(close, 7).iloc[idx]
-        if rsi7 <= 28:
-            buy_votes += 2; reasons.append(f"RSI(7) OVERSOLD {rsi7:.0f}")
-        elif rsi7 >= 72:
-            sell_votes += 2; reasons.append(f"RSI(7) OVERBOUGHT {rsi7:.0f}")
-        elif rsi7 <= 40:
+        r3 = float(_rsi(close, 3).iloc[idx])
+        if r3 <= 10:
+            buy_votes += 3;  reasons.append(f"RSI(3) EXTREME OS {r3:.0f} → BUY+3")
+        elif r3 <= 20:
+            buy_votes += 2;  reasons.append(f"RSI(3) oversold {r3:.0f} → BUY+2")
+        elif r3 >= 90:
+            sell_votes += 3; reasons.append(f"RSI(3) EXTREME OB {r3:.0f} → SELL+3")
+        elif r3 >= 80:
+            sell_votes += 2; reasons.append(f"RSI(3) overbought {r3:.0f} → SELL+2")
+    except Exception:
+        pass
+
+    # ── S02: RSI(7) fast ──────────────────────────────────────────────
+    try:
+        r7 = float(_rsi(close, 7).iloc[idx])
+        if r7 <= 20:
+            buy_votes += 2;  reasons.append(f"RSI(7) OVERSOLD {r7:.0f} → BUY+2")
+        elif r7 <= 30:
+            buy_votes += 1;  reasons.append(f"RSI(7) low {r7:.0f} → BUY+1")
+        elif r7 >= 80:
+            sell_votes += 2; reasons.append(f"RSI(7) OVERBOUGHT {r7:.0f} → SELL+2")
+        elif r7 >= 70:
+            sell_votes += 1; reasons.append(f"RSI(7) high {r7:.0f} → SELL+1")
+    except Exception:
+        pass
+
+    # ── S03: RSI(14) standard ─────────────────────────────────────────
+    try:
+        r14 = float(_rsi(close, 14).iloc[idx])
+        if r14 <= 28:
+            buy_votes += 2;  reasons.append(f"RSI(14) oversold {r14:.0f} → BUY+2")
+        elif r14 >= 72:
+            sell_votes += 2; reasons.append(f"RSI(14) overbought {r14:.0f} → SELL+2")
+    except Exception:
+        pass
+
+    # ── S04: RSI Divergence (most powerful reversal signal) ───────────
+    try:
+        r14_series = _rsi(close, 14)
+        lookback   = min(25, len(close) - 5)
+        if lookback >= 8:
+            recent_c   = close.iloc[-lookback:]
+            recent_r14 = r14_series.iloc[-lookback:]
+
+            p_now  = float(close.iloc[idx])
+            r_now  = float(r14_series.iloc[idx])
+
+            # Bullish divergence: price at/near recent low but RSI higher than at that low
+            p_min_idx = int(recent_c.values.argmin())
+            p_min     = float(recent_c.iloc[p_min_idx])
+            r_at_low  = float(recent_r14.iloc[p_min_idx])
+            if p_now <= p_min * 1.002 and r_now > r_at_low + 4:
+                buy_votes += 3;  reasons.append(f"BULLISH RSI DIVERGENCE — price low, RSI higher → BUY+3")
+
+            # Bearish divergence: price at/near recent high but RSI lower than at that high
+            p_max_idx = int(recent_c.values.argmax())
+            p_max     = float(recent_c.iloc[p_max_idx])
+            r_at_high = float(recent_r14.iloc[p_max_idx])
+            if p_now >= p_max * 0.998 and r_now < r_at_high - 4:
+                sell_votes += 3; reasons.append(f"BEARISH RSI DIVERGENCE — price high, RSI lower → SELL+3")
+    except Exception:
+        pass
+
+    # ── S05: Stochastic(3,1,1) ultra-fast ────────────────────────────
+    try:
+        k3, d3 = _stochastic(high, low, close, k=3, d=1, smooth=1)
+        k3n  = float(k3.iloc[idx]);     d3n  = float(d3.iloc[idx])
+        k3p  = float(k3.iloc[idx - 1]); d3p  = float(d3.iloc[idx - 1])
+        if k3p <= d3p and k3n > d3n and k3n < 20:
+            buy_votes += 3;  reasons.append(f"STOCH(3,1,1) CROSS UP in OS {k3n:.0f} → BUY+3")
+        elif k3p >= d3p and k3n < d3n and k3n > 80:
+            sell_votes += 3; reasons.append(f"STOCH(3,1,1) CROSS DOWN in OB {k3n:.0f} → SELL+3")
+        elif k3n <= 10:
+            buy_votes += 2;  reasons.append(f"STOCH(3,1,1) extreme OS {k3n:.0f} → BUY+2")
+        elif k3n >= 90:
+            sell_votes += 2; reasons.append(f"STOCH(3,1,1) extreme OB {k3n:.0f} → SELL+2")
+    except Exception:
+        pass
+
+    # ── S06: Stochastic(5,3,3) standard ──────────────────────────────
+    try:
+        k5, d5 = _stochastic(high, low, close, k=5, d=3, smooth=3)
+        k5n  = float(k5.iloc[idx]);     d5n  = float(d5.iloc[idx])
+        k5p  = float(k5.iloc[idx - 1]); d5p  = float(d5.iloc[idx - 1])
+        if k5p <= d5p and k5n > d5n and k5n < 25:
+            buy_votes += 2;  reasons.append(f"STOCH(5,3,3) CROSS UP {k5n:.0f} → BUY+2")
+        elif k5p >= d5p and k5n < d5n and k5n > 75:
+            sell_votes += 2; reasons.append(f"STOCH(5,3,3) CROSS DOWN {k5n:.0f} → SELL+2")
+        elif k5n <= 15:
+            buy_votes += 1;  reasons.append(f"STOCH(5,3,3) OS zone {k5n:.0f} → BUY+1")
+        elif k5n >= 85:
+            sell_votes += 1; reasons.append(f"STOCH(5,3,3) OB zone {k5n:.0f} → SELL+1")
+    except Exception:
+        pass
+
+    # ── S07: CCI(14) ─────────────────────────────────────────────────
+    try:
+        cci_s  = _cci(high, low, close, 14)
+        cn     = float(cci_s.iloc[idx])
+        cp     = float(cci_s.iloc[idx - 1])
+        if cn <= -150 and cn > cp:
+            buy_votes += 2;  reasons.append(f"CCI REVERSAL from OS {cn:.0f} → BUY+2")
+        elif cn <= -100:
+            buy_votes += 1;  reasons.append(f"CCI oversold {cn:.0f} → BUY+1")
+        elif cn >= 150 and cn < cp:
+            sell_votes += 2; reasons.append(f"CCI REVERSAL from OB {cn:.0f} → SELL+2")
+        elif cn >= 100:
+            sell_votes += 1; reasons.append(f"CCI overbought {cn:.0f} → SELL+1")
+    except Exception:
+        pass
+
+    # ── S08: Williams %R(14) ─────────────────────────────────────────
+    try:
+        wr_s   = _williams_r(high, low, close, 14)
+        wr_n   = float(wr_s.iloc[idx])
+        wr_p   = float(wr_s.iloc[idx - 1])
+        if wr_n <= -88 and wr_n > wr_p:
+            buy_votes += 2;  reasons.append(f"Williams %R REVERSAL {wr_n:.0f} → BUY+2")
+        elif wr_n <= -80:
             buy_votes += 1
-        elif rsi7 >= 60:
+        elif wr_n >= -12 and wr_n < wr_p:
+            sell_votes += 2; reasons.append(f"Williams %R REVERSAL {wr_n:.0f} → SELL+2")
+        elif wr_n >= -20:
             sell_votes += 1
     except Exception:
         pass
 
+    # ── S09: Bollinger Bands(20, 2.5σ) outer pierce ──────────────────
     try:
-        pct_k, pct_d = _stochastic(high, low, close, k=5, d=3, smooth=3)
-        k_now  = float(pct_k.iloc[idx])
-        d_now  = float(pct_d.iloc[idx])
-        k_prev = float(pct_k.iloc[idx - 1])
-        d_prev = float(pct_d.iloc[idx - 1])
-        if (k_prev <= d_prev) and (k_now > d_now) and k_now < 30:
-            buy_votes += 2; reasons.append(f"STOCH CROSS UP at {k_now:.0f}")
-        elif (k_prev >= d_prev) and (k_now < d_now) and k_now > 70:
-            sell_votes += 2; reasons.append(f"STOCH CROSS DOWN at {k_now:.0f}")
-        elif k_now <= 20:
-            buy_votes += 1
-        elif k_now >= 80:
-            sell_votes += 1
+        bbu, _, bbl = _bbands(close, 20, 2.5)
+        pn = float(close.iloc[idx]);     pp = float(close.iloc[idx - 1])
+        un = float(bbu.iloc[idx]);       ln = float(bbl.iloc[idx])
+        up = float(bbu.iloc[idx - 1]);   lp = float(bbl.iloc[idx - 1])
+        if pp <= lp and pn > ln:        # pierced lower then closed back inside
+            buy_votes += 3;  reasons.append("BB(2.5σ) LOWER PIERCE + BOUNCE → BUY+3")
+        elif pn < ln:                   # still below lower band
+            buy_votes += 2;  reasons.append("BB(2.5σ) below lower band → BUY+2")
+        elif pp >= up and pn < un:      # pierced upper then closed back inside
+            sell_votes += 3; reasons.append("BB(2.5σ) UPPER PIERCE + REJECT → SELL+3")
+        elif pn > un:                   # still above upper band
+            sell_votes += 2; reasons.append("BB(2.5σ) above upper band → SELL+2")
     except Exception:
         pass
 
+    # ── S10: Consecutive candle exhaustion + reversal confirmation ────
     try:
-        cci14 = _cci(high, low, close, 14).iloc[idx]
-        cci_prev = _cci(high, low, close, 14).iloc[idx - 1]
-        if cci14 <= -100 and cci14 > cci_prev:
-            buy_votes += 2; reasons.append(f"CCI(14) REVERSAL from oversold ({cci14:.0f})")
-        elif cci14 >= 100 and cci14 < cci_prev:
-            sell_votes += 2; reasons.append(f"CCI(14) REVERSAL from overbought ({cci14:.0f})")
-        elif cci14 <= -150:
-            buy_votes += 1
-        elif cci14 >= 150:
-            sell_votes += 1
+        bull_run = 0; bear_run = 0
+        for bi in range(idx - 1, idx - 7, -1):
+            try:
+                bc = float(close.iloc[bi]); bo = float(open_.iloc[bi])
+                br = max(abs(float(high.iloc[bi]) - float(low.iloc[bi])), 1e-10)
+                if abs(bc - bo) / br < 0.15:   # doji — break the run
+                    break
+                if bc > bo:  bull_run += 1
+                elif bc < bo: bear_run += 1
+                else:          break
+            except Exception:
+                break
+
+        last_c = float(close.iloc[idx]); last_o = float(open_.iloc[idx])
+        last_range = max(float(high.iloc[idx]) - float(low.iloc[idx]), 1e-10)
+        last_body  = abs(last_c - last_o)
+        reversal_body = last_body / last_range >= 0.40   # meaningful reversal body
+
+        if bull_run >= 4:
+            sell_votes += 2; reasons.append(f"{bull_run}-BAR BULL EXHAUSTION → SELL+2")
+            if last_c < last_o and reversal_body:
+                sell_votes += 2; reasons.append("REVERSAL CONFIRMATION BAR → SELL+2")
+        elif bull_run >= 3:
+            sell_votes += 1; reasons.append(f"{bull_run}-bar bull run → SELL+1")
+
+        if bear_run >= 4:
+            buy_votes += 2;  reasons.append(f"{bear_run}-BAR BEAR EXHAUSTION → BUY+2")
+            if last_c > last_o and reversal_body:
+                buy_votes += 2;  reasons.append("REVERSAL CONFIRMATION BAR → BUY+2")
+        elif bear_run >= 3:
+            buy_votes += 1;  reasons.append(f"{bear_run}-bar bear run → BUY+1")
     except Exception:
         pass
 
+    # ── S11: Candlestick patterns at extremes ─────────────────────────
     try:
-        wr = _williams_r(high, low, close, 14).iloc[idx]
-        wr_prev = _williams_r(high, low, close, 14).iloc[idx - 1]
-        if wr <= -80 and wr > wr_prev:
-            buy_votes += 2; reasons.append(f"Williams %R OVERSOLD reversal ({wr:.0f})")
-        elif wr >= -20 and wr < wr_prev:
-            sell_votes += 2; reasons.append(f"Williams %R OVERBOUGHT reversal ({wr:.0f})")
-        elif wr <= -90:
-            buy_votes += 1
-        elif wr >= -10:
-            sell_votes += 1
+        c0c = float(close.iloc[idx]); c0o = float(open_.iloc[idx])
+        c0h = float(high.iloc[idx]);   c0l = float(low.iloc[idx])
+        c1c = float(close.iloc[idx - 1]); c1o = float(open_.iloc[idx - 1])
+        c0rng  = max(c0h - c0l, 1e-10)
+        c0body = abs(c0c - c0o)
+        c0up   = c0h - max(c0c, c0o)
+        c0dn   = min(c0c, c0o) - c0l
+        body_min = max(c0body, c0rng * 0.018)
+
+        # Hammer / Bullish Pin Bar
+        if c0dn >= 2.8 * body_min and c0up < 0.30 * c0rng:
+            buy_votes += 2;  reasons.append("HAMMER / BULLISH PIN BAR → BUY+2")
+        # Shooting Star / Bearish Pin Bar
+        elif c0up >= 2.8 * body_min and c0dn < 0.30 * c0rng:
+            sell_votes += 2; reasons.append("SHOOTING STAR / BEARISH PIN BAR → SELL+2")
+
+        # Bullish Engulfing
+        c1body = abs(c1c - c1o)
+        if (c0c > c0o and c1c < c1o and
+                c0o <= c1c and c0c >= c1o and c0body >= c1body * 0.9):
+            buy_votes += 2;  reasons.append("BULLISH ENGULFING → BUY+2")
+        # Bearish Engulfing
+        elif (c0c < c0o and c1c > c1o and
+                c0o >= c1c and c0c <= c1o and c0body >= c1body * 0.9):
+            sell_votes += 2; reasons.append("BEARISH ENGULFING → SELL+2")
     except Exception:
         pass
 
+    # ── S12: Heikin Ashi reversal after 3+ same-color bars ───────────
+    # (computed from df externally — skip if not injected into this function)
+    # NOTE: Heikin Ashi is computed separately and results injected below
+    # via the ha_direction parameter in qx_analyze.
+
+    # ── S13: MACD(5,13,3) histogram exhaustion ───────────────────────
     try:
-        bb_up, bb_mid, bb_lo = _bbands(close, 20, 2.0)
-        p_now  = float(close.iloc[idx])
-        p_prev = float(close.iloc[idx - 1])
-        bbu = float(bb_up.iloc[idx]); bbl = float(bb_lo.iloc[idx])
-        bbu_prev = float(bb_up.iloc[idx - 1]); bbl_prev = float(bb_lo.iloc[idx - 1])
-        if p_prev <= bbl_prev and p_now > bbl:
-            buy_votes += 2; reasons.append("BB LOWER BAND BOUNCE")
-        elif p_prev >= bbu_prev and p_now < bbu:
-            sell_votes += 2; reasons.append("BB UPPER BAND REJECTION")
-        elif p_now < bbl:
-            buy_votes += 1
-        elif p_now > bbu:
-            sell_votes += 1
+        _, _, hist = _macd(close, fast=5, slow=13, signal=3)
+        hn   = float(hist.iloc[idx])
+        hp   = float(hist.iloc[idx - 1])
+        hp2  = float(hist.iloc[idx - 2])
+        pn   = float(close.iloc[idx])
+        pp2  = float(close.iloc[idx - 2])
+
+        # MACD histogram shrinking at new price high = bull exhaustion → SELL
+        if pn >= pp2 and hn > 0 and hn < hp < hp2:
+            sell_votes += 2; reasons.append("MACD histogram declining at new high → SELL+2")
+        # MACD histogram growing (less negative) at new price low = bear exhaustion → BUY
+        elif pn <= pp2 and hn < 0 and hn > hp > hp2:
+            buy_votes += 2;  reasons.append("MACD histogram rising at new low → BUY+2")
     except Exception:
         pass
 
     return buy_votes, sell_votes, reasons
 
 
-def _sub_candle_direction(df) -> Optional[str]:
-    """
-    Estimate sub-candle (5s/15s/30sc) momentum bias from the last 3
-    confirmed 1m bars' internal structure (wicks, body position).
-    Returns 'BUY', 'SELL', or None.
-    """
+def _sub_candle_direction(df: pd.DataFrame) -> Optional[str]:
+    """Estimate sub-candle momentum from last 3 confirmed 1m bars."""
     if df is None or len(df) < 4:
         return None
     try:
-        bars = df.tail(4).iloc[:-1]  # last 3 confirmed bars (not forming)
-        bull_score = 0
-        bear_score = 0
+        bars = df.tail(4).iloc[:-1]
+        bull = 0; bear = 0
         for _, row in bars.iterrows():
             o = float(row["open"]); c = float(row["close"])
             h = float(row["high"]); l = float(row["low"])
-            body_hi = max(o, c); body_lo = min(o, c)
+            bh = max(o, c); bl = min(o, c)
             rng = max(h - l, 1e-10)
-            wick_up = (h - body_hi) / rng
-            wick_dn = (body_lo - l) / rng
-            body_ratio = (body_hi - body_lo) / rng
+            wu = (h - bh) / rng; wd = (bl - l) / rng
+            br_ratio = (bh - bl) / rng
             if c > o:
-                bull_score += 1 + int(body_ratio >= 0.6)
-                if wick_dn > 0.3:
-                    bull_score += 1
+                bull += 1 + int(br_ratio >= 0.6)
+                if wd > 0.3: bull += 1
             else:
-                bear_score += 1 + int(body_ratio >= 0.6)
-                if wick_up > 0.3:
-                    bear_score += 1
-        if bull_score > bear_score + 1:
-            return "BUY"
-        if bear_score > bull_score + 1:
-            return "SELL"
+                bear += 1 + int(br_ratio >= 0.6)
+                if wu > 0.3: bear += 1
+        if bull > bear + 1: return "BUY"
+        if bear > bull + 1: return "SELL"
     except Exception:
         pass
     return None
 
 
+# ── Main public function ──────────────────────────────────────────────────────
+
 def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
-    """Run QX Expert Non-Reprint analysis on `pair`.
+    """Supreme Elite 13-signal reversal analysis.
 
-    Non-reprint: requires the same signal direction on BOTH the last
-    confirmed bar AND the bar before it. Zero repaint risk.
-
-    Returns a dict with direction, grade, agree count, elite flag, reason
-    list, non_reprint flag, and sub-candle direction — or None when no
-    clean setup is found.
+    Returns dict(direction, grade, elite, agree, reasons,
+                 buy_votes, sell_votes, non_reprint, sub_candle_dir)
+    or None when no high-confidence setup is found.
     """
     ticker = yf_ticker(pair)
     if not ticker:
         return None
 
-    now = time.time()
+    now    = time.time()
     cached = _CACHE.get(ticker)
     if cached and (now - cached[0]) < _TTL:
         return cached[1]
@@ -321,340 +488,116 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
         _CACHE[ticker] = (now, None)
         return None
 
-    if len(close) < 30:
+    if len(close) < 35:
         _CACHE[ticker] = (now, None)
         return None
 
-    reasons: list[str] = []
-    buy_votes  = 0
-    sell_votes = 0
+    # ── Score the LAST CONFIRMED bar (bar[-2]) ────────────────────────
+    buy_v, sell_v, reasons = _score_reversal(close, high, low, open_, idx=-2)
 
-    # ── 1. RSI(7) — ultra-fast momentum ───────────────────────────────
+    # ── S12: Heikin Ashi reversal (needs full df) ─────────────────────
     try:
-        rsi7 = _rsi(close, 7).iloc[-1]
-        if rsi7 <= 28:
-            buy_votes += 2
-            reasons.append(f"RSI(7) OVERSOLD {rsi7:.0f} → BUY")
-        elif rsi7 >= 72:
-            sell_votes += 2
-            reasons.append(f"RSI(7) OVERBOUGHT {rsi7:.0f} → SELL")
-        elif rsi7 <= 40:
-            buy_votes += 1
-            reasons.append(f"RSI(7) bearish pullback {rsi7:.0f}")
-        elif rsi7 >= 60:
-            sell_votes += 1
-            reasons.append(f"RSI(7) bullish peak {rsi7:.0f}")
-    except Exception:
-        rsi7 = 50.0
-
-    # ── 2. Fast Stochastic (5,3,3) ────────────────────────────────────
-    try:
-        pct_k, pct_d = _stochastic(high, low, close, k=5, d=3, smooth=3)
-        k_now = float(pct_k.iloc[-1])
-        d_now = float(pct_d.iloc[-1])
-        k_prev = float(pct_k.iloc[-2])
-        d_prev = float(pct_d.iloc[-2])
-        stoch_cross_up = (k_prev <= d_prev) and (k_now > d_now) and k_now < 30
-        stoch_cross_dn = (k_prev >= d_prev) and (k_now < d_now) and k_now > 70
-        if stoch_cross_up:
-            buy_votes += 2
-            reasons.append(f"STOCH(5,3,3) CROSS UP at {k_now:.0f} — BULLISH")
-        elif stoch_cross_dn:
-            sell_votes += 2
-            reasons.append(f"STOCH(5,3,3) CROSS DOWN at {k_now:.0f} — BEARISH")
-        elif k_now <= 20:
-            buy_votes += 1
-            reasons.append(f"STOCH oversold zone {k_now:.0f}")
-        elif k_now >= 80:
-            sell_votes += 1
-            reasons.append(f"STOCH overbought zone {k_now:.0f}")
+        ha       = _heikin_ashi(df)
+        ha_c1    = float(ha["ha_close"].iloc[-2]); ha_o1 = float(ha["ha_open"].iloc[-2])
+        ha_c2    = float(ha["ha_close"].iloc[-3]); ha_o2 = float(ha["ha_open"].iloc[-3])
+        ha_c3    = float(ha["ha_close"].iloc[-4]); ha_o3 = float(ha["ha_open"].iloc[-4])
+        ha_c4    = float(ha["ha_close"].iloc[-5]); ha_o4 = float(ha["ha_open"].iloc[-5])
+        ha_bull1 = ha_c1 > ha_o1; ha_bull2 = ha_c2 > ha_o2
+        ha_bull3 = ha_c3 > ha_o3; ha_bull4 = ha_c4 > ha_o4
+        # Flip from bear to bull after 3+ consecutive bear HA bars → BUY reversal
+        if ha_bull1 and not ha_bull2 and not ha_bull3 and not ha_bull4:
+            buy_v += 2;  reasons.append("HEIKIN ASHI FLIP BULLISH after 3 bear bars → BUY+2")
+        # Flip from bull to bear after 3+ consecutive bull HA bars → SELL reversal
+        elif not ha_bull1 and ha_bull2 and ha_bull3 and ha_bull4:
+            sell_v += 2; reasons.append("HEIKIN ASHI FLIP BEARISH after 3 bull bars → SELL+2")
     except Exception:
         pass
 
-    # ── 3. CCI(14) — commodity channel index ──────────────────────────
-    try:
-        cci14 = _cci(high, low, close, 14).iloc[-1]
-        cci_prev = _cci(high, low, close, 14).iloc[-2]
-        if cci14 <= -100 and cci14 > cci_prev:
-            buy_votes += 2
-            reasons.append(f"CCI(14) REVERSAL from oversold ({cci14:.0f})")
-        elif cci14 >= 100 and cci14 < cci_prev:
-            sell_votes += 2
-            reasons.append(f"CCI(14) REVERSAL from overbought ({cci14:.0f})")
-        elif cci14 <= -150:
-            buy_votes += 1
-        elif cci14 >= 150:
-            sell_votes += 1
-    except Exception:
-        pass
-
-    # ── 4. Williams %R (14) ───────────────────────────────────────────
-    try:
-        wr = _williams_r(high, low, close, 14).iloc[-1]
-        wr_prev = _williams_r(high, low, close, 14).iloc[-2]
-        if wr <= -80 and wr > wr_prev:
-            buy_votes += 2
-            reasons.append(f"Williams %R OVERSOLD reversal ({wr:.0f})")
-        elif wr >= -20 and wr < wr_prev:
-            sell_votes += 2
-            reasons.append(f"Williams %R OVERBOUGHT reversal ({wr:.0f})")
-        elif wr <= -90:
-            buy_votes += 1
-        elif wr >= -10:
-            sell_votes += 1
-    except Exception:
-        pass
-
-    # ── 5. Bollinger Bands (20, 2.0) ─────────────────────────────────
-    try:
-        bb_up, bb_mid, bb_lo = _bbands(close, 20, 2.0)
-        price_now  = float(close.iloc[-1])
-        price_prev = float(close.iloc[-2])
-        bbu = float(bb_up.iloc[-1])
-        bbl = float(bb_lo.iloc[-1])
-        bbm = float(bb_mid.iloc[-1])
-        bbu_prev = float(bb_up.iloc[-2])
-        bbl_prev = float(bb_lo.iloc[-2])
-
-        # Lower band touch + price bouncing back inside
-        if price_prev <= bbl_prev and price_now > bbl:
-            buy_votes += 2
-            reasons.append("BB LOWER BAND BOUNCE — BUY pressure confirmed")
-        elif price_prev >= bbu_prev and price_now < bbu:
-            sell_votes += 2
-            reasons.append("BB UPPER BAND REJECTION — SELL pressure confirmed")
-        elif price_now < bbl:
-            buy_votes += 1
-            reasons.append("BB below lower band — oversold stretch")
-        elif price_now > bbu:
-            sell_votes += 1
-            reasons.append("BB above upper band — overbought stretch")
-
-        # BB squeeze → expansion: band width narrowing then expanding
-        bw_now  = bbu - bbl
-        bw_prev = bbu_prev - bbl_prev
-        bw_5ago = float(bb_up.iloc[-5]) - float(bb_lo.iloc[-5])
-        if bw_now > bw_prev > bw_5ago * 0.8:
-            if price_now > bbm:
-                buy_votes += 1
-                reasons.append("BB SQUEEZE EXPANDING BULLISH")
-            else:
-                sell_votes += 1
-                reasons.append("BB SQUEEZE EXPANDING BEARISH")
-    except Exception:
-        pass
-
-    # ── 6. Heikin Ashi trend smoothing ───────────────────────────────
-    try:
-        ha = _heikin_ashi(df)
-        ha_c  = float(ha["ha_close"].iloc[-1])
-        ha_o  = float(ha["ha_open"].iloc[-1])
-        ha_c2 = float(ha["ha_close"].iloc[-2])
-        ha_o2 = float(ha["ha_open"].iloc[-2])
-        ha_bullish = ha_c > ha_o   # current HA bar is green
-        ha_bull_2  = ha_c2 > ha_o2
-        ha_bearish = ha_c < ha_o
-        ha_bear_2  = ha_c2 < ha_o2
-        if ha_bullish and ha_bull_2:
-            buy_votes += 1
-            reasons.append("HEIKIN ASHI 2-bar bull smoothing")
-        elif ha_bearish and ha_bear_2:
-            sell_votes += 1
-            reasons.append("HEIKIN ASHI 2-bar bear smoothing")
-        # HA reversal: prev bearish → current bullish
-        if ha_bullish and not ha_bull_2:
-            buy_votes += 1
-            reasons.append("HEIKIN ASHI REVERSAL — HA turned bullish")
-        elif ha_bearish and not ha_bear_2:
-            sell_votes += 1
-            reasons.append("HEIKIN ASHI REVERSAL — HA turned bearish")
-    except Exception:
-        pass
-
-    # ── 7. Candle body conviction ─────────────────────────────────────
-    # For OTC: strong body AGAINST prior move = reversal conviction
-    try:
-        c_open  = float(open_.iloc[-2])   # confirmed bar
-        c_high  = float(high.iloc[-2])
-        c_low   = float(low.iloc[-2])
-        c_close = float(close.iloc[-2])
-        c_range = max(1e-9, c_high - c_low)
-        body    = abs(c_close - c_open)
-        body_ratio = body / c_range
-        if is_otc:
-            # OTC: strong body in direction = the reversal is already confirmed
-            if body_ratio >= 0.60 and c_close > c_open:
-                buy_votes += 2
-                reasons.append(f"OTC BULL CONVICTION BODY {body_ratio:.0%} → CALL")
-            elif body_ratio >= 0.60 and c_close < c_open:
-                sell_votes += 2
-                reasons.append(f"OTC BEAR CONVICTION BODY {body_ratio:.0%} → PUT")
-        else:
-            if body_ratio >= 0.65:
-                if c_close > c_open:
-                    buy_votes += 1
-                    reasons.append(f"STRONG BULL BODY {body_ratio:.0%}")
-                else:
-                    sell_votes += 1
-                    reasons.append(f"STRONG BEAR BODY {body_ratio:.0%}")
-    except Exception:
-        pass
-
-    # ── 8. EMA trend alignment (reversal-mode for OTC) ────────────────
-    # LIVE pairs: EMA cross = trend confirmation → trade WITH it
-    # OTC pairs:  EMA fully stretched (8 far above 21 or below) = REVERSAL
-    #             OTC price snaps back to the mean — so EMA extreme = reversal
-    try:
-        ema8  = _ema(close, 8)
-        ema21 = _ema(close, 21)
-        ema8_now   = float(ema8.iloc[-2])
-        ema21_now  = float(ema21.iloc[-2])
-        ema8_prev  = float(ema8.iloc[-3])
-        ema21_prev = float(ema21.iloc[-3])
-        ema_gap = abs(ema8_now - ema21_now)
-        ema_pct = ema_gap / (ema21_now or 1)
-        if is_otc:
-            # OTC: EMA overextended (gap > 0.1%) = mean-reversion candidate
-            if ema8_now > ema21_now and ema_pct > 0.001:
-                sell_votes += 1   # stretched UP → snap back PUT
-                reasons.append(f"OTC EMA(8) overextended ABOVE EMA(21) → PUT mean-revert")
-            elif ema8_now < ema21_now and ema_pct > 0.001:
-                buy_votes += 1    # stretched DOWN → snap back CALL
-                reasons.append(f"OTC EMA(8) overextended BELOW EMA(21) → CALL mean-revert")
-            # OTC: fresh EMA cross = direction is re-establishing (ride it)
-            if ema8_now > ema21_now and ema8_prev <= ema21_prev:
-                buy_votes += 1
-                reasons.append("OTC EMA CROSS UP — new direction starting → CALL")
-            elif ema8_now < ema21_now and ema8_prev >= ema21_prev:
-                sell_votes += 1
-                reasons.append("OTC EMA CROSS DOWN — new direction starting → PUT")
-        else:
-            if ema8_now > ema21_now and ema8_prev <= ema21_prev:
-                buy_votes += 1
-                reasons.append("EMA(8>21) CROSS UP — trend confirmed")
-            elif ema8_now < ema21_now and ema8_prev >= ema21_prev:
-                sell_votes += 1
-                reasons.append("EMA(8<21) CROSS DOWN — trend confirmed")
-            elif ema8_now > ema21_now:
-                buy_votes += 1
-            elif ema8_now < ema21_now:
-                sell_votes += 1
-    except Exception:
-        pass
-
-    # ── 9. OTC-SPECIFIC EXTRA LAYER ───────────────────────────────────
-    # Consecutive candle exhaustion — highest reliability for OTC
-    if is_otc:
-        try:
-            run_bars = []
-            for bi in range(-3, -8, -1):
-                bo = float(close.iloc[bi]); oo = float(open_.iloc[bi])
-                bar_rng = max(abs(float(high.iloc[bi]) - float(low.iloc[bi])), 1e-10)
-                if abs(bo - oo) / bar_rng >= 0.25:
-                    run_bars.append(1 if bo > oo else -1)
-            if len(run_bars) >= 4:
-                if all(b == 1 for b in run_bars[:4]):
-                    sell_votes += 2
-                    reasons.append("OTC 4-BAR BULL EXHAUSTION → PUT reversal")
-                elif all(b == -1 for b in run_bars[:4]):
-                    buy_votes += 2
-                    reasons.append("OTC 4-BAR BEAR EXHAUSTION → CALL reversal")
-            elif len(run_bars) >= 3:
-                if all(b == 1 for b in run_bars[:3]):
-                    sell_votes += 1
-                    reasons.append("OTC 3-BAR BULL EXHAUSTION → PUT approaching")
-                elif all(b == -1 for b in run_bars[:3]):
-                    buy_votes += 1
-                    reasons.append("OTC 3-BAR BEAR EXHAUSTION → CALL approaching")
-        except Exception:
-            pass
-
-    # ── Determine direction & grade (current bar = bar[-2]) ───────────
-    total = buy_votes + sell_votes
+    # ── Direction decision ────────────────────────────────────────────
+    total = buy_v + sell_v
     if total == 0:
         _CACHE[ticker] = (now, None)
         return None
 
-    if buy_votes > sell_votes:
-        direction = "BUY"
-        ratio = buy_votes / total
-        agree = buy_votes
-    elif sell_votes > buy_votes:
-        direction = "SELL"
-        ratio = sell_votes / total
-        agree = sell_votes
+    if buy_v > sell_v:
+        direction = "BUY";  agree = buy_v;  opposing = sell_v
+    elif sell_v > buy_v:
+        direction = "SELL"; agree = sell_v; opposing = buy_v
     else:
         _CACHE[ticker] = (now, None)
         return None
 
-    # ── NON-REPRINT CONFIRMATION — bar[-3] must agree ─────────────────
-    # Run the same oscillator logic on the PREVIOUS confirmed bar.
-    # Both bars must vote the same direction → zero repainting risk.
+    # ── Minimum vote thresholds (THE KEY FIX: prevents single-signal fires) ──
+    MIN_OTC  = 14   # was effectively 1 before — now requires 14 of 32 possible
+    MIN_LIVE = 11
+    MAX_OPP_OTC  = 1   # at most 1 opposing vote for OTC (near-zero ambiguity)
+    MAX_OPP_LIVE = 2
+
+    if is_otc:
+        if agree < MIN_OTC or opposing > MAX_OPP_OTC:
+            _CACHE[ticker] = (now, None)
+            return None
+    else:
+        if agree < MIN_LIVE or opposing > MAX_OPP_LIVE:
+            _CACHE[ticker] = (now, None)
+            return None
+
+    # ── NON-REPRINT: bar[-3] must agree ──────────────────────────────
     non_reprint = False
     try:
-        bv2, sv2, _ = _compute_votes_at_offset(close, high, low, open_, is_otc, offset=-3)
+        bv2, sv2, _ = _score_reversal(close, high, low, open_, idx=-3)
         prev_dir = "BUY" if bv2 > sv2 else ("SELL" if sv2 > bv2 else None)
         if prev_dir == direction:
             non_reprint = True
-            reasons.insert(0, "✅ NON-REPRINT: 2-bar confirmation locked")
+            reasons.insert(0, "✅ NON-REPRINT: 2-bar confirmed")
         else:
-            # Previous bar disagrees → repaint risk → reject signal for binary
-            # (Allow for non-OTC live pairs with high grade; stricter for OTC)
-            if is_otc or grade < 82:
+            # OTC: reject if bars disagree (synthetic candles repaint-sensitive)
+            if is_otc:
+                _CACHE[ticker] = (now, None)
+                return None
+            # Live: allow if current bar is very strong (15+ votes)
+            if agree < 15:
                 _CACHE[ticker] = (now, None)
                 return None
     except Exception:
         non_reprint = False
 
-    # ── Sub-candle (5s/15s/30sc) bias ─────────────────────────────────
-    sub_candle_dir = _sub_candle_direction(df)
-
-    # Grade: ratio dominance (0.5–1.0) mapped to 60–100 scale
-    grade = int(60 + 40 * ((ratio - 0.5) / 0.5))
+    # ── Grade (60–100 scale) ──────────────────────────────────────────
+    MAX_POSSIBLE = 32
+    thresh       = MIN_OTC if is_otc else MIN_LIVE
+    grade = int(60 + 40 * (agree - thresh) / max(1, MAX_POSSIBLE - thresh))
     grade = max(60, min(100, grade))
 
-    # Boost grade for high agreement counts
-    if agree >= 8:
-        grade = min(100, grade + 5)
-    elif agree >= 6:
-        grade = min(100, grade + 3)
-
-    # Non-reprint bonus: confirmed on both bars → raise grade
+    # Non-reprint bonus
     if non_reprint:
         grade = min(100, grade + 4)
 
-    # Sub-candle agrees → additional grade boost
+    # Sub-candle confirmation bonus
+    sub_candle_dir = _sub_candle_direction(df)
     if sub_candle_dir == direction:
         grade = min(100, grade + 3)
-        reasons.append(f"⚡ SUB-CANDLE (5s/15s/30sc) MOMENTUM: {sub_candle_dir}")
+        reasons.append(f"⚡ SUB-CANDLE momentum: {sub_candle_dir}")
 
-    # OTC: require ZERO opposing votes + higher grade bar (stricter)
-    if is_otc:
-        opposing = sell_votes if direction == "BUY" else buy_votes
-        if opposing > 0:
-            _CACHE[ticker] = (now, None)
-            return None
-        otc_min_grade = 80
-        if grade < otc_min_grade:
-            _CACHE[ticker] = (now, None)
-            return None
-    else:
-        if grade < QX_MIN_GRADE:
-            _CACHE[ticker] = (now, None)
-            return None
+    # ── Grade gate ────────────────────────────────────────────────────
+    min_grade = 78 if is_otc else QX_MIN_GRADE
+    if grade < min_grade:
+        _CACHE[ticker] = (now, None)
+        return None
 
-    elite = agree >= 7 and ratio >= 0.75 and non_reprint
+    # ── Elite flag ────────────────────────────────────────────────────
+    elite = (agree >= 20 and opposing == 0) if is_otc else (agree >= 16 and opposing == 0)
 
     result = {
         "direction":      direction,
         "grade":          grade,
         "agree":          agree,
         "elite":          elite,
-        "reasons":        reasons[:6],
-        "buy_votes":      buy_votes,
-        "sell_votes":     sell_votes,
+        "reasons":        reasons[:8],
+        "buy_votes":      buy_v,
+        "sell_votes":     sell_v,
         "non_reprint":    non_reprint,
         "sub_candle_dir": sub_candle_dir,
+        "confidence":     round(agree / MAX_POSSIBLE, 3),
     }
     _CACHE[ticker] = (now, result)
     return result

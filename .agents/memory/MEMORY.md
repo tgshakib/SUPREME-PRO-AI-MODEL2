@@ -1,0 +1,2 @@
+- [QX Expert V10 Supreme Engine](qx-expert-v10.md) — QX was firing with 1 vote (grade=100 with zero opposing); rebuilt with 13-signal engine requiring ≥14 OTC / ≥11 live votes
+- [OTC Signal Direction Fixes](otc-signal-fixes.md) — binary sniper + vol sniper blocked from OTC (trend-following on synthetic prices = systematic losses); chart-conditions also blocked for OTC fallback

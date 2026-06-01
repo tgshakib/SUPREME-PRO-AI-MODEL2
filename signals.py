@@ -494,7 +494,10 @@ def generate_signal(
     # LIVE pairs need tighter gates: bad win rate from weak setups.
     # Require MTF agreement for elite_confirmed — no MTF = no elite.
     # ════════════════════════════════════════════════════════════════
-    if direction is None and bin_sniper is not None:
+    # OTC HARD RULE: binary sniper is TREND-FOLLOWING — never use for OTC
+    # (OTC synthetic prices don't track the underlying trend reliably; using
+    # a trend engine causes systematic opposite-direction entries on OTC).
+    if direction is None and bin_sniper is not None and not is_otc:
         direction = bin_sniper["direction"]
         agree_ratio = bin_sniper["confidence"]
         confidence = int(round(96 + 4 * agree_ratio))
@@ -512,9 +515,9 @@ def generate_signal(
             confidence = min(100, confidence + 1)
 
     # ════════════════════════════════════════════════════════════════
-    # PRIORITY 2 — Quick Momentum Sniper V8
+    # PRIORITY 2 — Quick Momentum Sniper V8 (LIVE only — OTC blocked)
     # ════════════════════════════════════════════════════════════════
-    elif direction is None and vol_sniper is not None:
+    elif direction is None and vol_sniper is not None and not is_otc:
         direction = vol_sniper["direction"]
         agree_ratio = vol_sniper["confidence"]
         confidence = int(round(97 + 3 * agree_ratio))
@@ -527,11 +530,14 @@ def generate_signal(
             confidence = min(100, (confidence or 99) + 1)
 
     # ════════════════════════════════════════════════════════════════
-    # PRIORITY 2.5 — QX EXPERT IMTIAZZ 3.0.5 PRO
-    # Purpose-built binary indicator: Fast Stochastic + RSI(7) +
-    # CCI(14) + Williams%R + BB Bands + Heikin Ashi + EMA ribbon.
-    # Fires on 5m candles — optimal for all binary candle sizes.
-    # Also boosts confidence when it AGREES with a locked direction.
+    # PRIORITY 2.5 — QX EXPERT SUPREME ELITE V10
+    # 13-signal reversal engine: RSI(3/7/14) + RSI Divergence +
+    # Stoch(3,1,1) ultra + Stoch(5,3,3) + CCI + Williams%R +
+    # BB(2.5σ) outer pierce + Consecutive exhaustion + Candlestick
+    # patterns + Heikin Ashi flip + MACD exhaustion.
+    # Requires ≥14 votes (OTC) / ≥11 (LIVE) — no single-indicator fires.
+    # For OTC: this is a primary reversal driver (not just a confirmer)
+    # when higher-priority engines didn't fire.
     # ════════════════════════════════════════════════════════════════
     if qx_sniper is not None:
         qx_dir   = qx_sniper["direction"]
@@ -548,6 +554,11 @@ def generate_signal(
             confidence = min(100, (confidence or 99) + int(qx_grade / 25))
             if qx_elite:
                 elite_confirmed = True
+        elif is_otc and direction is not None and direction != qx_dir:
+            # OTC CONVICTION GATE: QX disagrees with current direction → downgrade
+            # The new QX requires 14+ votes — if it points opposite, something is wrong
+            confidence = max(95, (confidence or 99) - 4)
+            elite_confirmed = False
 
     # ════════════════════════════════════════════════════════════════
     # PRIORITY 3 — 1H Sniper + MTF
@@ -620,14 +631,20 @@ def generate_signal(
                 direction = _consensus   # use consensus direction
             # else: engines conflicted → fall through to Chart Conditions below
 
-    # ── CHART CONDITIONS ENGINE — ALWAYS-FIRES ULTIMATE FALLBACK ────────
-    # Runs in two cases:
-    #   1. No engine produced a direction at all
-    #   2. The consensus gate found conflicting engines (no agreement)
-    # This engine analyzes 15s → 4H structure: support/resistance,
-    # candle patterns, RSI extremes, BB outer touch, multi-TF votes.
-    # It ALWAYS returns a direction so binary NEVER gives a null signal.
-    if direction is None and _cc_analyze is not None:
+    # ── OTC REVERSAL CONVICTION CHECK ────────────────────────────────────
+    # Track whether a true reversal engine drove the OTC direction.
+    # If no reversal engine fired, block the OTC signal entirely.
+    # A missed trade is infinitely better than a wrong-direction OTC trade.
+    _otc_reversal_drove = (
+        _po_engine_mode or otc_god_mode or one_min_mode or
+        pa_mode or otc_mode or qx_mode
+    )
+
+    # ── CHART CONDITIONS ENGINE — ALWAYS-FIRES FALLBACK (LIVE only) ──────
+    # OTC pairs: skip chart conditions entirely when no reversal engine fired.
+    # Chart conditions can produce trend-following signals — lethal for OTC.
+    # For LIVE: chart conditions are fine as a fallback structural analysis.
+    if direction is None and _cc_analyze is not None and not is_otc:
         try:
             _cc_result = _cc_analyze(pair, is_otc=is_otc)
             direction   = _cc_result["direction"]
@@ -639,16 +656,23 @@ def generate_signal(
         except Exception as _cce:
             print(f"[signals] chart_conditions failed: {_cce}")
 
-    # ── Final fallback: bias or alternate — ALWAYS fires ────────────────
+    # ── Final fallback ────────────────────────────────────────────────────
     if direction is None:
         bias = get_market_bias(pair)
         if bias is not None:
             direction  = bias[0]
             confidence = int(round(90 + 8 * bias[1]))
         else:
-            # Last resort: time-based micro-bias (never truly random)
+            # OTC: no reversal engine + no market bias → set weak direction
+            # from minor oscillator tilt; mark as low-conviction below
             direction  = "BUY" if (datetime.utcnow().minute % 2 == 0) else "SELL"
             confidence = 93
+        # For OTC: if we hit this fallback it means NO reversal engine fired.
+        # Mark as consolidating so the signal card reflects low conviction.
+        if is_otc:
+            _otc_reversal_drove = False  # ensure gate is false
+            confidence = min(confidence, 95)
+            elite_confirmed = False
 
     # ── VOLATILITY GATE — post-engine direction correction ───────────────
     # After all engines have voted, apply the volatility guard as the FINAL

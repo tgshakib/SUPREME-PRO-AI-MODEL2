@@ -1217,22 +1217,22 @@ def otc_reversal_sniper(pair: str) -> Optional[dict]:
         except Exception:
             pass
 
-    # ── Score: GOD LEVEL — need 4+ votes, ZERO opposing ───────
-    # Raised from 3 votes / 1-opposing-allowed to 4 votes / ZERO
-    # opposing. OTC candles are synthetic — any ambiguity = stay out.
-    # Unanimity ensures only true reversal setups fire.
+    # ── Score: GOD LEVEL — need 5+ votes, ZERO opposing ───────
+    # Raised from 4 votes to 5 votes (tighter precision).
+    # OTC candles are synthetic — any ambiguity = stay out.
+    # Unanimity (zero opposing) ensures only true reversal setups fire.
     active = {k: v for k, v in votes.items() if v != 0}
-    if len(active) < 4:
+    if len(active) < 5:
         _OTC_CACHE[ticker] = (now, None); return None
 
     put_votes  = sum(1 for v in active.values() if v > 0)
     call_votes = sum(1 for v in active.values() if v < 0)
 
     # STRICT: zero opposing votes allowed
-    if put_votes >= 4 and call_votes == 0:
+    if put_votes >= 5 and call_votes == 0:
         direction = "SELL"
         agree = put_votes
-    elif call_votes >= 4 and put_votes == 0:
+    elif call_votes >= 5 and put_votes == 0:
         direction = "BUY"
         agree = call_votes
     else:
