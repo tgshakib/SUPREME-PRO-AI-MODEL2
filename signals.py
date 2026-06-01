@@ -1120,20 +1120,19 @@ def generate_signal(
         except Exception:
             pass
 
-    # ── CURRENT PRICE LINE — broker OTC price for OTC, live tick for LIVE ──
-    # For OTC pairs  : get_live_price now returns the actual broker price
-    #                  (from pocket_option_ws candle buffer or QX stream) —
-    #                  NEVER yfinance, which would give a wrong real-market price.
-    # For LIVE pairs : yfinance fast_info.last_price (<5 s latency).
+    # ── CURRENT PRICE LINE — live tick for LIVE pairs only, never OTC ──
+    # OTC pairs use broker-synthetic prices that differ from any real feed.
+    # We only show the live price for real LIVE market pairs.
     _current_px_line = ""
-    try:
-        from live_prices import format_price as _fp
-        _cpx = get_live_price(pair, force_fresh=True)
-        if _cpx is not None:
-            _cpx_fmt = _fp(pair, float(_cpx))
-            _current_px_line = f"💰 Current Price: <b>{_cpx_fmt}</b>\n"
-    except Exception:
-        pass
+    if not _is_otc_pair:
+        try:
+            from live_prices import format_price as _fp
+            _cpx = get_live_price(pair, force_fresh=True)
+            if _cpx is not None:
+                _cpx_fmt = _fp(pair, float(_cpx))
+                _current_px_line = f"💰 Current Price: <b>{_cpx_fmt}</b>\n"
+        except Exception:
+            pass
 
     grade = _grade_label(user_id)
     mtg = _mtg_label(user_id)
@@ -1492,7 +1491,6 @@ def generate_signal(
             f"🏅 Grade: {grade}\n"
             f"🚀 Trend: <b>{trend}</b>\n"
             f"🎯 Confidence: {conf_display}\n"
-            f"{_big_move_line}"
             f"🛡️ MTG: {mtg}\n"
             f"{_current_px_line}"
             + f"{_sep3}\n"
@@ -1511,7 +1509,6 @@ def generate_signal(
             f"🏅 Grade: {grade}\n"
             f"🚀 Trend: <b>{trend}</b>\n"
             f"🎯 Confidence: {conf_display}\n"
-            f"{_big_move_line}"
             f"🛡️ MTG: {mtg}\n"
             f"{_current_px_line}"
             + f"💀 Community: @Traderguide_bot\n"
