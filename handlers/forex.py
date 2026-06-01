@@ -241,9 +241,9 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    # Free user trying to pick >20 pips → upsell screen (not auto-capped).
-    # They can still come BACK and choose 20+ PIPS to keep using the free trial.
-    if not _is_premium(call.from_user.id) and max_tp > 20:
+    # Free user trying to pick >30 pips → upsell screen (not auto-capped).
+    # They can still come BACK and choose 30+ PIPS to keep using the free trial.
+    if not _is_premium(call.from_user.id) and max_tp > 30:
         from config import pip_target_from_max_tp
         pips = pip_target_from_max_tp(max_tp)
         await call.answer()
@@ -253,14 +253,14 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
             "━━━━━━━━━━━━━━━━━━━\n"
             "🚀 <b>BUY BOT ACCESS TO UNLOCK ALL THIS BENEFIT &amp; "
             "USE THE BOT AT FULL POWER:</b>\n\n"
-            "✅ <b>40 / 60 / 80 / 100 / 120 / 150 / 200+ PIPS</b> targets\n"
-            "✅ <b>BIG MOVE</b> &amp; <b>RESERVE MOVE</b> sniper signals\n"
+            "✅ <b>40 / 60 / 80 / 100 / 120 / 150 / 200 / 300 / 500 / 900+ PIPS</b> targets\n"
+            "✅ <b>BIG MOVE · RESERVE · ULTRA · MEGA · MONSTER</b> sniper signals\n"
             "✅ Watch up to <b>10 markets</b> at once\n"
             "✅ <b>Unlimited 24/7</b> Forex signals (no daily cap)\n"
             "✅ Full <b>SUPREME PRO</b> setups — session + footprint confirmed\n"
             "━━━━━━━━━━━━━━━━━━━\n"
             "🎯 Tap <b>BUY FULL ACCESS</b> below — or go back to "
-            "<b>WORKPLACE</b> and stay on the free trial (20+ PIPS).",
+            "<b>WORKPLACE</b> and stay on the free trial (30+ PIPS).",
             forex_tp_locked_kb(),
         )
         return

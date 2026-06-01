@@ -408,7 +408,7 @@ def forex_pairs_input_kb() -> InlineKeyboardMarkup:
 
 def forex_tp_kb() -> InlineKeyboardMarkup:
     rows = []
-    for chunk in _chunk(TP_LEVELS, 2):
+    for chunk in _chunk(TP_LEVELS, 3):
         rows.append([
             InlineKeyboardButton(text=label, callback_data=f"fxtp:{val}")
             for label, val in chunk

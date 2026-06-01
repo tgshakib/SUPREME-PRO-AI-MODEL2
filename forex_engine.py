@@ -404,7 +404,10 @@ def _signal_move_class(estimated_pips: int,
     """Return (class_label, class_icon, class_desc) for the signal.
 
     Classification tiers:
-        RESERVE MOVE  200+ pips  — major institutional liquidity sweep
+        MONSTER MOVE  900+ pips  — extreme multi-session institutional flush
+        MEGA MOVE     500-899    — rare high-momentum extended swing
+        ULTRA MOVE    300-499    — major multi-day institutional run
+        RESERVE MOVE  200-299    — major liquidity reserve sweep
         BIG MOVE      120-199    — strong institutional momentum
         NORMAL ENTRY   60-119    — confirmed directional setup
         SNIPER ENTRY    <60      — precision tight-range entry
@@ -414,6 +417,15 @@ def _signal_move_class(estimated_pips: int,
     if smart is not None and estimated_pips < 100:
         return ("SNIPER ENTRY", "🔫",
                 "Sweep · BoS · MS confirmed — precision reversal")
+    if estimated_pips >= 900:
+        return ("MONSTER MOVE", "☄️",
+                "Extreme institutional flush · Multi-session mega run")
+    if estimated_pips >= 500:
+        return ("MEGA MOVE", "🚀",
+                "Rare high-momentum extended swing · Full trend ride")
+    if estimated_pips >= 300:
+        return ("ULTRA MOVE", "⚡",
+                "Major multi-day institutional run · Deep liquidity pool")
     if estimated_pips >= 200:
         return ("RESERVE MOVE", "💥",
                 "Major liquidity reserve sweep · Big institutional flush")
@@ -439,10 +451,13 @@ def _pip_aware_tp_ladder(pair: str, direction: str, entry: float, sl: float,
         the chart's honest potential (never invent unreachable TPs).
 
     Number of TP levels:
-      <60 pips   → 2-3 levels (sniper, tight)
-      60-119     → 3-4 levels
-      120-199    → 4-5 levels (big move)
-      200+       → 5-6 levels (reserve move)
+      <60 pips   → 3 levels  (sniper, tight)
+      60-119     → 4 levels  (normal entry)
+      120-199    → 5 levels  (big move)
+      200-299    → 6 levels  (reserve move)
+      300-499    → 7 levels  (ultra move)
+      500-899    → 8 levels  (mega move)
+      900+       → 9 levels  (monster move)
     """
     effective_pips = max(pip_target, estimated_pips)
 
@@ -457,7 +472,16 @@ def _pip_aware_tp_ladder(pair: str, direction: str, entry: float, sl: float,
     # Standard forex path — rebuild from pip count
     total_dist = effective_pips * pip
 
-    if effective_pips >= 200:
+    if effective_pips >= 900:
+        n_tps = 9
+        weights = [0.10, 0.18, 0.28, 0.40, 0.53, 0.66, 0.78, 0.89, 1.00]
+    elif effective_pips >= 500:
+        n_tps = 8
+        weights = [0.12, 0.22, 0.34, 0.47, 0.60, 0.73, 0.86, 1.00]
+    elif effective_pips >= 300:
+        n_tps = 7
+        weights = [0.14, 0.25, 0.38, 0.52, 0.66, 0.82, 1.00]
+    elif effective_pips >= 200:
         n_tps = 6
         weights = [0.20, 0.35, 0.52, 0.68, 0.83, 1.00]
     elif effective_pips >= 120:
