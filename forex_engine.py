@@ -48,6 +48,14 @@ except Exception as _ge:
     _GOD_OK = False
 
 try:
+    from finorix_engine import finorix_analyse as _finorix_analyse
+    _FINORIX_FX_OK = True
+except Exception as _fxe:
+    print(f"[forex_engine] finorix_engine import failed: {_fxe}")
+    _finorix_analyse = None  # type: ignore
+    _FINORIX_FX_OK = False
+
+try:
     from elite_signal_engine import (
         get_htf_levels       as _elite_htf,
         elite_forex_rr       as _elite_rr,
@@ -1743,6 +1751,28 @@ async def _send_signal(bot: Bot, setup: dict):
         print(f"[forex_engine] 🚫 ELITE BLOCKED {pair} {direction} — "
               f"no sniper/pattern/liq anchor (pure bias fallback < 75% quality)")
         return   # skip — below elite threshold
+
+    # ── FINORIX SUPREME ANALYSIS ENGINE — silent confirmation layer ──────
+    # Runs the 12-model weighted AI (SMC, Indicators, Wyckoff, Divergence,
+    # Market Structure). When Finorix has a hard VETO (split consensus) AND
+    # no sniper backed us → skip. When it agrees → log elite confirmation.
+    if _FINORIX_FX_OK and _finorix_analyse is not None:
+        try:
+            _fx = _finorix_analyse(pair, "FOREX")
+            if _fx.get("veto") and not _has_sniper:
+                print(f"[forex_engine] 🔮 FINORIX VETO {pair} {direction} — "
+                      f"12-model split, no sniper backing → skipping")
+                return
+            if not _fx.get("veto") and _fx["direction"] == direction:
+                print(f"[forex_engine] ✅ FINORIX CONFIRMED {pair} {direction} "
+                      f"grade={_fx['grade']} conf={_fx['confidence']} "
+                      f"agree={_fx['agree']}%")
+            elif _fx["direction"] not in ("WAIT", direction) and _fx["confidence"] >= 75:
+                print(f"[forex_engine] ⚠️ FINORIX OPPOSES {pair}: "
+                      f"finorix={_fx['direction']} signal={direction} "
+                      f"conf={_fx['confidence']} — proceeding (sniper/pattern backed)")
+        except Exception:
+            pass
 
     _elite_class = "SNIPER" if _has_sniper else "STANDARD"
     _inst_tag = ""

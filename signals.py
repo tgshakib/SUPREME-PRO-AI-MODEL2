@@ -141,6 +141,14 @@ except Exception as _mtle:
     _MTF_LIQ_OK = False
 
 try:
+    from finorix_engine import finorix_analyse as _finorix_analyse
+    _FINORIX_OK = True
+except Exception as _fxe:
+    print(f"[signals] finorix_engine import failed: {_fxe}")
+    _finorix_analyse = None  # type: ignore
+    _FINORIX_OK = False
+
+try:
     from binary_tracker import (
         format_entry_time_instruction as _fmt_entry,
         get_streak_alert as _streak_alert,
@@ -624,6 +632,28 @@ def generate_signal(
             _engine_votes.append(_inst_dir)
             if _inst_result and (_inst_result.get("trap_detected") or _inst_result.get("absorption")):
                 _engine_votes.append(_inst_dir)  # second vote for elite institutional signal
+
+        # ── FINORIX SUPREME ANALYSIS ENGINE — silent extra vote ──────────
+        # 12-model weighted AI vote (SMC + Indicators + Wyckoff + Divergence).
+        # When Finorix agrees it adds a vote; when it fires a hard VETO (split
+        # consensus) it removes confidence. Never blocks a signal alone.
+        if _FINORIX_OK and _finorix_analyse is not None and direction is not None:
+            try:
+                _mx = "OTC" if is_otc else "LIVE"
+                _fx_res = _finorix_analyse(pair, _mx)
+                if _fx_res["direction"] not in ("WAIT", None):
+                    _engine_votes.append(_fx_res["direction"])
+                    # Elite grade → double vote
+                    if _fx_res["grade"] in ("GOD", "ULTRA", "ELITE"):
+                        _engine_votes.append(_fx_res["direction"])
+                    # Agreement boost: Finorix says same direction + high confidence
+                    if _fx_res["direction"] == direction and _fx_res["confidence"] >= 75:
+                        confidence = min(100, (confidence or 97) + 1)
+                # Veto: 12-model split consensus — slight confidence dip
+                if _fx_res.get("veto") and not elite_confirmed:
+                    confidence = max(90, (confidence or 97) - 3)
+            except Exception:
+                pass
 
         if len([v for v in _engine_votes if v is not None]) >= 2:
             _consensus = supreme_binary_gate(pair, is_otc, _engine_votes, tf_label)
