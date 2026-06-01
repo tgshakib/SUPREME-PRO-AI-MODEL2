@@ -1,2 +1,3 @@
 - [QX Expert V10 Supreme Engine](qx-expert-v10.md) — QX was firing with 1 vote (grade=100 with zero opposing); rebuilt with 13-signal engine requiring ≥14 OTC / ≥11 live votes
 - [OTC Signal Direction Fixes](otc-signal-fixes.md) — binary sniper + vol sniper blocked from OTC (trend-following on synthetic prices = systematic losses); chart-conditions also blocked for OTC fallback
+- [Binary Master Filter](binary-master-filter.md) — supreme quality gate wired into signals.py after all engines vote; hard-blocks news/Friday/ATR spikes; OTC requires oscillator extremes; LIVE requires trend+ATR+conviction; BLOCKED crushes confidence to ≤62 (signal text unchanged)

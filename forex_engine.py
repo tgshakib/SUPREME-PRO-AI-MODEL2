@@ -1749,6 +1749,24 @@ async def _send_signal(bot: Bot, setup: dict):
               f"no sniper/pattern/liq anchor (pure bias fallback < 75% quality)")
         return   # skip — below elite threshold
 
+    # ── FOREX HIDDEN POWER ENGINE — 7 institutional tools silent layer ───
+    # DXY correlation · COT proxy · HTF level magnet · Session liquidity hunt
+    # Hidden divergence · Day-of-week seasonality · Market structure shift
+    # Runs after elite gate — adjusts quality tier and confidence silently.
+    try:
+        from forex_hidden_power import forex_power_analyze as _fhp_analyze
+        _fhp = _fhp_analyze(pair, direction)
+        if not _fhp.get("approved", True):
+            print(f"[forex_engine] ⛔ FHP BLOCK {pair} {direction} — "
+                  f"power_score={_fhp['power_score']} tier={_fhp['quality_tier']}")
+            return
+        _fhp_adj = _fhp.get("confidence_adj", 0)
+        if _fhp_adj > 0:
+            print(f"[forex_engine] 💎 FHP {_fhp['quality_tier']} {pair} "
+                  f"score={_fhp['power_score']} adj={_fhp_adj:+d}")
+    except Exception:
+        pass
+
     # ── FINORIX SUPREME ANALYSIS ENGINE — silent confirmation layer ──────
     # Runs the 12-model weighted AI (SMC, Indicators, Wyckoff, Divergence,
     # Market Structure). When Finorix has a hard VETO (split consensus) AND

@@ -149,6 +149,14 @@ except Exception as _fxe:
     _FINORIX_OK = False
 
 try:
+    from binary_master_filter import binary_master_check as _master_check
+    _MASTER_OK = True
+except Exception as _mfe:
+    print(f"[signals] binary_master_filter import failed: {_mfe}")
+    _master_check = None  # type: ignore
+    _MASTER_OK = False
+
+try:
     from binary_tracker import (
         format_entry_time_instruction as _fmt_entry,
         get_streak_alert as _streak_alert,
@@ -805,6 +813,50 @@ def generate_signal(
                     elite_confirmed = True
         except Exception:
             pass
+
+    # ── BINARY MASTER FILTER — supreme quality gate ───────────────────────
+    # Runs AFTER all 20+ engines have voted. Final arbiter:
+    #   OTC: requires oscillator extreme + exhaustion + zero opposing oscillators
+    #   LIVE: requires trend alignment + healthy ATR + conviction close
+    #   Both: hard-blocks news windows, Friday close, Monday gap, ATR spikes
+    #   Engine consensus ratio: >60% opposing → block, >75% unanimous → elite boost
+    # When blocked: confidence pulled to 62 max (still shows signal — UX intact)
+    # When elite: +12 confidence boost, elite_confirmed = True
+    if _MASTER_OK and _master_check is not None and direction is not None:
+        try:
+            from live_prices import yf_ticker as _yft
+            _master_ticker = _yft(pair)
+            _ev = locals().get("_engine_votes") or []
+            _agree_n  = sum(1 for v in _ev if v == direction)
+            _oppose_n = sum(1 for v in _ev if v not in (None, direction))
+            _total_n  = len([v for v in _ev if v is not None])
+            _mf = _master_check(
+                pair        = pair,
+                direction   = direction,
+                is_otc      = is_otc,
+                tf_label    = tf_label,
+                ticker      = _master_ticker,
+                engine_agree  = _agree_n,
+                engine_oppose = _oppose_n,
+                total_engines = _total_n,
+            )
+            if not _mf["approved"]:
+                # Hard block — crush confidence, strip elite flag
+                # Signal text still renders so UX never breaks
+                confidence    = min(confidence or 95, 62)
+                elite_confirmed = False
+                print(f"[signals] 🛑 MASTER BLOCKED {pair} {'OTC' if is_otc else 'LIVE'}: "
+                      f"{_mf['block_reason']}")
+            else:
+                adj = _mf["confidence_adj"]
+                if adj != 0:
+                    confidence = max(62, min(100, (confidence or 95) + adj))
+                if _mf["quality_tier"] == "ELITE" and adj >= 10:
+                    elite_confirmed = True
+                print(f"[signals] ✅ MASTER {_mf['quality_tier']} {pair} "
+                      f"{'OTC' if is_otc else 'LIVE'} adj={adj:+d}")
+        except Exception as _mfe:
+            print(f"[signals] master_filter error: {_mfe}")
 
     # ── MULTI-TF LIQUIDITY REVERSE ZONE — smallest to largest TF ────────
     # Runs after all engines have voted on direction. Confirms the signal
