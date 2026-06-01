@@ -417,6 +417,13 @@ def forex_tp_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def forex_pip_target_label(max_tp: int) -> str:
+    """Human-readable pip target label from stored max_tp value."""
+    from config import pip_target_from_max_tp
+    pips = pip_target_from_max_tp(max_tp)
+    return f"{pips}+ PIPS"
+
+
 def forex_active_kb(gold_king: bool = False) -> InlineKeyboardMarkup:
     gold_label = ("🥇 GOLD KING : ON ✅" if gold_king
                   else "🥇 GOLD KING : OFF")

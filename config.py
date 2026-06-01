@@ -95,13 +95,28 @@ def price_band(pair: str) -> tuple[float, float, int]:
 
 
 TP_LEVELS = [
-    ("TP 1 (+60 pips)",  1),
-    ("TP 2 (+90 pips)",  2),
-    ("TP 3 (+130 pips)", 3),
-    ("TP 4 (+160 pips)", 4),
-    ("TP 5 (+190 pips)", 5),
-    ("TP 6 (+250 pips)", 6),
+    ("🎯 20+ PIPS",  20),
+    ("🎯 40+ PIPS",  40),
+    ("🎯 60+ PIPS",  60),
+    ("🎯 80+ PIPS",  80),
+    ("🎯 100+ PIPS", 100),
+    ("🎯 120+ PIPS", 120),
+    ("🎯 150+ PIPS", 150),
+    ("🎯 200+ PIPS", 200),
 ]
+
+# Legacy max_tp values (1-6) came from old TP-count format.
+# New values (>=10) are pip targets. Use this helper everywhere.
+def pip_target_from_max_tp(max_tp: int) -> int:
+    """Convert stored max_tp to a pip target.
+    Old format  : 1-6  → mapped to legacy pip steps [60,90,130,160,190,250]
+    New format  : >=10 → already a pip target
+    """
+    if max_tp >= 10:
+        return int(max_tp)
+    legacy = [60, 90, 130, 160, 190, 250]
+    idx = max(0, min(max_tp - 1, len(legacy) - 1))
+    return legacy[idx]
 
 # ── Binary pricing (MTG / NON-MTG) ────────────────────────
 # `was` = 3× current price → shown struck-through so the live `price`

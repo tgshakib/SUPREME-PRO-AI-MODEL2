@@ -361,6 +361,7 @@ def _profit_label(pair: str, entry: float, level: float,
 
 
 from tz_utils import short_time_for_user
+from config import pip_target_from_max_tp
 
 # Banner photos shown above the forex signal — green for BUY, red for SELL.
 _FX_BUY_BANNER = os.path.join("assets", "forex_buy.jpg")
@@ -373,6 +374,108 @@ def _banner_for(direction: str) -> str | None:
 
 PAID_THROTTLE_SEC = (20, 45)     # Faster: 20-45s between signals for quicker entry analysis
 FIRST_SIGNAL_DELAY = (3, 8)      # Near-instant first signal
+
+
+# ── MOVE POTENTIAL DETECTION ──────────────────────────────────────────────────
+def _estimate_move_pips(pair: str, entry: float,
+                        tps: list[float], pip: float,
+                        atr: float | None = None) -> int:
+    """Estimate the pip potential of the current setup.
+
+    For standard forex: returns actual pip count to final TP.
+    For metals/crypto/indices: normalized pip-equivalent using ATR as the unit.
+    Always returns at least 10 so downstream logic never divides by zero.
+    """
+    if not tps:
+        return 20
+    dist = abs(tps[-1] - entry)
+    if _is_metal_pair(pair) or _is_crypto_pair(pair) or _is_index_pair(pair):
+        atr_unit = atr or max(pip * 50, 1.0)
+        pips = round(dist / atr_unit * 50)
+    else:
+        pips = round(dist / pip)
+    return max(10, int(pips))
+
+
+def _signal_move_class(estimated_pips: int,
+                       sniper: dict | None,
+                       smart: dict | None,
+                       liq: dict | None) -> tuple[str, str, str]:
+    """Return (class_label, class_icon, class_desc) for the signal.
+
+    Classification tiers:
+        RESERVE MOVE  200+ pips  — major institutional liquidity sweep
+        BIG MOVE      120-199    — strong institutional momentum
+        NORMAL ENTRY   60-119    — confirmed directional setup
+        SNIPER ENTRY    <60      — precision tight-range entry
+    Smart-AI (Sweep→BoS→MS) entries always get SNIPER label when pips < 100.
+    """
+    liq_grade = (liq or {}).get("liq_grade", 0)
+    if smart is not None and estimated_pips < 100:
+        return ("SNIPER ENTRY", "🔫",
+                "Sweep · BoS · MS confirmed — precision reversal")
+    if estimated_pips >= 200:
+        return ("RESERVE MOVE", "💥",
+                "Major liquidity reserve sweep · Big institutional flush")
+    if estimated_pips >= 120:
+        return ("BIG MOVE", "🌊",
+                "Institutional momentum detected · High pip potential")
+    if estimated_pips >= 60:
+        return ("NORMAL ENTRY", "📈",
+                "Confirmed directional setup · Clean structure")
+    return ("SNIPER ENTRY", "🔫",
+            "Precision entry · Tight SL · High R:R")
+
+
+def _pip_aware_tp_ladder(pair: str, direction: str, entry: float, sl: float,
+                         pip_target: int, estimated_pips: int,
+                         pip: float, existing_tps: list[float]) -> list[float]:
+    """Rebuild the TP ladder so it meets/exceeds the user's pip target.
+
+    Logic:
+      effective_pips = max(pip_target, estimated_pips)
+      → We ALWAYS give at least what the chart supports.
+      → If the user requested MORE than the chart supports, we still cap at
+        the chart's honest potential (never invent unreachable TPs).
+
+    Number of TP levels:
+      <60 pips   → 2-3 levels (sniper, tight)
+      60-119     → 3-4 levels
+      120-199    → 4-5 levels (big move)
+      200+       → 5-6 levels (reserve move)
+    """
+    effective_pips = max(pip_target, estimated_pips)
+
+    # For metals/crypto/indices the 'pip' is not 0.0001 so the effective
+    # distance must be reconstructed from ATR; use the existing TPs when
+    # they already exceed the target.
+    if _is_metal_pair(pair) or _is_crypto_pair(pair) or _is_index_pair(pair):
+        if existing_tps:
+            return existing_tps  # keep ATR-anchored levels as-is
+        return existing_tps or []
+
+    # Standard forex path — rebuild from pip count
+    total_dist = effective_pips * pip
+
+    if effective_pips >= 200:
+        n_tps = 6
+        weights = [0.20, 0.35, 0.52, 0.68, 0.83, 1.00]
+    elif effective_pips >= 120:
+        n_tps = 5
+        weights = [0.22, 0.40, 0.58, 0.78, 1.00]
+    elif effective_pips >= 60:
+        n_tps = 4
+        weights = [0.25, 0.48, 0.72, 1.00]
+    else:
+        n_tps = 3
+        weights = [0.33, 0.65, 1.00]
+
+    tps: list[float] = []
+    for w in weights[:n_tps]:
+        dist = total_dist * w
+        tp = entry + dist if direction == "BUY" else entry - dist
+        tps.append(round(tp, 5))
+    return tps
 
 # When the user taps NEW SIGNAL we bypass throttle and force an instant
 # scan. This in-memory set holds the user_ids whose next loop tick should
@@ -387,6 +490,12 @@ _SIGNAL_PATTERN: dict[int, dict] = {}
 # Per-signal SMART AI packet — keeps the Sweep▸BoS▸MS confluence/grade
 # next to the signal so re-renders (TP/SL updates) keep the badge.
 _SIGNAL_SMART:   dict[int, dict] = {}
+
+# Per-signal move classification + estimated pips — stored at generation time
+# so the I'M IN refresh always re-renders with the same class.
+_SIGNAL_MOVE_CLASS:  dict[int, tuple] = {}
+_SIGNAL_EST_PIPS:    dict[int, int]   = {}
+_SIGNAL_FOOTPRINT:   dict[int, dict]  = {}
 
 # Most-recent SMART AI packet returned from `_generate_levels`, keyed by
 # pair. Callers that just got a tuple back can read this immediately to
@@ -1015,59 +1124,72 @@ def _signal_text(pair: str, direction: str, tp_prices, sl_price,
                  smart: dict | None = None,
                  turning_point: bool = False,
                  sniper_data: dict | None = None,
-                 liq_data: dict | None = None) -> str:
-    """Build the SUPREME PRO 'FOREX SIGNAL' card with SL & TP highlighted
-    at the TOP, and the rest of the analysis text below.
+                 liq_data: dict | None = None,
+                 move_class: tuple | None = None,
+                 estimated_pips: int = 0,
+                 footprint_data: dict | None = None) -> str:
+    """Build the SUPREME PRO 'FOREX SIGNAL' card.
 
-        ━━━━━━━━━━━━━━━━━━━
-            📊 FOREX SIGNAL · LIVE NOW
-        ━━━━━━━━━━━━━━━━━━━
-        🟢 XAU/USD  ·  BUY 🔼  ·  ⏱️ 1H
-
-        ⚡ ENTRY    2350.50
-
-        🎯 TP¹  2353.50   (+30 pips)
-        🎯 TP²  2356.50   (+60 pips)
-        ...
-        🛡️ SL    2348.00   (-25 pips)
-        ━━━━━━━━━━━━━━━━━━━
-
-        … rest of text (tagline, correlation, A-Z, signal time) …
+    Signal classification banner is shown at the top.
+    Each TP line shows the actual pip distance from entry.
+    Signal text is ALWAYS clean — no 'UPDATE' / 'REVISION' annotations ever.
+    Outcome (TP hit / SL / expired) is shown cleanly when the trade closes.
     """
     is_buy = (direction == "BUY")
     head_emoji = "🟢" if is_buy else "🔴"
     side_word  = "BUY" if is_buy else "SELL"
     pip_val    = pip if pip else live_pip_size(pair)
 
+    # ── Move classification ───────────────────────────────────
+    if move_class:
+        cls_label, cls_icon, cls_desc = move_class
+    else:
+        # Derive from estimated pips when not pre-computed
+        ep = estimated_pips or _estimate_move_pips(
+            pair, float(entry or 0), list(tp_prices), pip_val
+        )
+        cls_label, cls_icon, cls_desc = _signal_move_class(
+            ep, sniper_data, smart, liq_data
+        )
+
     # ── Entry zone ────────────────────────────────────────────
     if entry is not None:
         lo, hi = _entry_zone(float(entry), direction, pip_val, zone_pips=2)
         entry_zone_str = (f"{_format_price(lo, decimals)} - "
                           f"{_format_price(hi, decimals)}")
+        entry_f = float(entry)
     else:
         entry_zone_str = "—"
+        entry_f = 0.0
 
     seq_tag = f"  ·  #{seq:02d}" if seq else ""
     entry_line = (
         f"{head_emoji} <b>{side_word} {pair} : {entry_zone_str}{seq_tag}</b>"
     )
 
-    # ── TP block — always 6 lines; empty when no price ────────
+    # ── TP block — with pip/dollar labels ─────────────────────
     tp_lines: list[str] = []
-    for n in range(1, 7):
-        if n - 1 < len(tp_prices):
-            p = tp_prices[n - 1]
-            check = "  ✅" if (n - 1) < tps_hit else ""
-            tp_lines.append(
-                f"TP {n} : <b>{_format_price(p, decimals)}</b>{check}"
-            )
-        else:
-            tp_lines.append(f"TP {n} :")
+    for n in range(1, len(tp_prices) + 1):
+        p = tp_prices[n - 1]
+        check = "  ✅" if (n - 1) < tps_hit else ""
+        profit_tag = ""
+        if entry_f and pip_val:
+            profit_tag = "  " + _profit_label(pair, entry_f, p,
+                                               direction, pip_val, is_sl=False)
+        tp_lines.append(
+            f"🎯 <b>TP{n}</b> : <code>{_format_price(p, decimals)}</code>"
+            f"{profit_tag}{check}"
+        )
 
-    # ── SL line ───────────────────────────────────────────────
+    # ── SL line with distance ─────────────────────────────────
     sl_check = "  ❌ HIT" if outcome == "sl" else ""
+    sl_dist_tag = ""
+    if entry_f and pip_val:
+        sl_dist_tag = "  " + _profit_label(pair, entry_f, float(sl_price),
+                                            direction, pip_val, is_sl=True)
     sl_line = (
-        f"❌ <b>SL • STOPLOSS : {_format_price(sl_price, decimals)}</b>{sl_check}"
+        f"🛡️ <b>SL</b> : <code>{_format_price(sl_price, decimals)}</code>"
+        f"{sl_dist_tag}{sl_check}"
     )
 
     # ── Time / session ────────────────────────────────────────
@@ -1075,48 +1197,78 @@ def _signal_text(pair: str, direction: str, tp_prices, sl_price,
     date_str = now_utc.strftime("%B %d")
     time_str = signal_time or now_utc.strftime("%H:%M:%S UTC")
     session, volume = _session_info(now_utc)
+    sk       = _session_key()
+    kz_line  = {
+        "overlap": "🔥 LONDON/NY OVERLAP — MAX INSTITUTIONAL FLOW",
+        "london":  "🇬🇧 LONDON KILL ZONE — SMART MONEY ACTIVE",
+        "ny":      "🗽 NEW YORK KILL ZONE — DISTRIBUTION PHASE",
+        "asian":   "🌏 ASIAN SESSION — ACCUMULATION / RANGE",
+    }.get(sk, f"⏰ {session.upper()}")
 
-    arrow_word   = "BUY / UP" if is_buy else "SELL / DOWN"
-    trend_label  = _trend_label(direction, sniper_data, liq_data)
-    bias_word    = "📈 BULLISH" if is_buy else "📉 BEARISH"
+    arrow_word  = "BUY / UP" if is_buy else "SELL / DOWN"
+    trend_label = _trend_label(direction, sniper_data, liq_data)
+    bias_word   = "📈 BULLISH" if is_buy else "📉 BEARISH"
 
-    # ── Fake move / sweep / fakeout scan line ─────────────────
-    # Reads smart AI packet for sweep/hunt flags to warn the user
-    # about potential fake-outs BEFORE they enter.
-    fake_scan_lines: list[str] = []
+    # ── Confirmation block (session + footprint + SMC) ────────
+    conf_lines: list[str] = []
+
+    # Smart-AI sweep/BoS confirmation
     if smart is not None:
         _sweep = smart.get("swept_swing")
         _grade = smart.get("grade", 0)
         if _sweep and _grade >= 80:
-            fake_scan_lines.append(
-                f"⚡ <b>SWEEP DETECTED</b> · Stop-hunt at {_format_price(float(_sweep), decimals)} confirmed"
+            conf_lines.append(
+                f"⚡ Sweep @ <code>{_format_price(float(_sweep), decimals)}</code>"
+                " · BoS · MS — Confirmed"
             )
-        elif _grade >= 70:
-            fake_scan_lines.append("✅ <b>FAKE-MOVE SCAN CLEAR</b> · No sweep/fakeout detected")
-    if liq_data is not None:
-        _liq_gr = liq_data.get("liq_grade", 0)
-        if _liq_gr >= 40:
-            fake_scan_lines.append("🏛 <b>LIQUIDITY POOL LOCKED</b> · Smart entry confirmed")
-        elif _liq_gr > 0:
-            fake_scan_lines.append("🔍 <b>AI SCAN</b> · Fake-move & sweep filter active")
-    if not fake_scan_lines:
-        fake_scan_lines.append("🔍 <b>AI SCAN</b> · Fakeout · Sweep · Hunt filter active")
+        else:
+            conf_lines.append("✅ Sweep · BoS · MS — Confirmed")
 
-    # ── Kind label & top headline ─────────────────────────────
+    # Liquidity grade
+    _liq_gr = (liq_data or {}).get("liq_grade", 0)
+    if _liq_gr >= 40:
+        conf_lines.append("🏛 Liquidity Pool — LOCKED · Smart entry")
+    elif _liq_gr >= 20:
+        conf_lines.append("💧 Liquidity sweep detected — entry confirmed")
+
+    # Footprint delta (crypto pairs via Binance WS)
+    if footprint_data and footprint_data.get("bias"):
+        fp_bias = footprint_data["bias"]
+        fp_delta = footprint_data.get("delta", 0)
+        fp_icon = "🟢" if fp_bias == "BUY" else "🔴" if fp_bias == "SELL" else "⚪"
+        conf_lines.append(
+            f"📊 Footprint: {fp_icon} {fp_bias}  delta={fp_delta:+.0f}"
+        )
+
+    # Pattern badge
+    if pattern is not None:
+        pat_name = pattern.get("name") or pattern.get("pattern") or "PATTERN"
+        conf_lines.append(f"📐 Pattern: <b>{pat_name}</b> — structure confirmed")
+
+    # Sniper score
+    if sniper_data is not None:
+        sc = sniper_data.get("score", 0)
+        if sc >= 82:
+            conf_lines.append(f"🏹 Sniper grade: <b>{sc}/100</b> — ELITE")
+
+    if not conf_lines:
+        conf_lines.append("🔍 AI Scan: Fakeout · Sweep · Hunt filter active")
+
+    # ── Kind label & classification header ───────────────────
     if kind == "LIMIT":
-        top_headline = "<b>「 LIMITED ORDER 」</b>"
-        kind_label   = "🟡 <b>LIMIT ORDER</b>"
+        kind_label = "🟡 <b>LIMIT ORDER</b>"
+        order_tag  = "<b>「 LIMITED ORDER 」</b>"
     else:
-        top_headline = "<b>「 LIVE SIGNAL 」</b>"
-        kind_label   = "🟢 <b>LIVE SIGNAL</b>"
+        kind_label = "🟢 <b>LIVE NOW</b>"
+        order_tag  = "<b>「 LIVE SIGNAL 」</b>"
 
     # ── Assemble ──────────────────────────────────────────────
     lines = [
-        top_headline,
+        order_tag,
         "━━━━━━━━━━━━━━━━━",
-        "    <b>FX - SUPREME PRO AI</b>    ",
+        "    <b>FX · SUPREME PRO AI</b>    ",
         "━━━━━━━━━━━━━━━━━",
-        kind_label,
+        f"{cls_icon} <b>{cls_label}</b>  ·  {kind_label}",
         entry_line,
         "",
         *tp_lines,
@@ -1124,27 +1276,31 @@ def _signal_text(pair: str, direction: str, tp_prices, sl_price,
         sl_line,
         "━━━━━━━━━━━━━━━━━",
         f"🕐 <b>{time_str}</b>  ·  <b>{date_str}</b>",
-        "━━━━━━━━━━━━━━━━━━",
+        f"📡 <b>{kz_line}</b>",
+        "━━━━━━━━━━━━━━━━━",
         f"📆 <b>SIGNAL:</b> {head_emoji} <b>{arrow_word}</b>",
         f"🚀 <b>Trend:</b> {trend_label}",
         f"📊 <b>Bias:</b> {bias_word}",
-        f"🛡️ <b>SESSION: {session.upper()}</b>",
-        f"🏅 <b>MARKET VOLUME : {volume}</b>",
-        "💀 <b>Community:</b> @TRADERGUIDE_BOT",
+        f"🏅 <b>VOLUME:</b> {volume}",
         "━━━━━━━━━━━━━━━━━",
+        "<b>✅ CONFIRMATIONS</b>",
+        *conf_lines,
+        "━━━━━━━━━━━━━━━━━",
+        "💀 @TRADERGUIDE_BOT",
         "⚠️ <i>Use proper risk management on every trade.</i>",
     ]
 
-    # Outcome banner — appended only after trade closes
+    # Outcome — appended only when the trade closes (never shows mid-trade)
     if outcome == "sl":
-        lines += ["", "❌ <b>SL HIT</b>"]
+        lines += ["", "❌ <b>STOPLOSS HIT</b>"]
     elif outcome == "tp":
-        lines += ["", "✅ <b>ALL TPs REACHED</b>"]
+        n_tp = len(tp_prices)
+        lines += ["", f"✅ <b>ALL {n_tp} TPs REACHED</b>"]
     elif outcome == "partial":
-        lines += ["", f"✅ <b>{tps_hit}/{max_tp} TPs HIT</b>"]
+        lines += ["", f"✅ <b>{tps_hit}/{len(tp_prices)} TPs HIT</b>"]
     elif outcome == "expired":
-        lines += ["", "⏱️ <b>SIGNAL EXPIRED</b> — price stayed inside the "
-                  "range, neither TP nor SL hit."]
+        lines += ["", "⏱️ <b>SIGNAL EXPIRED</b> — price held range, "
+                  "neither TP nor SL was touched."]
 
     return "\n".join(lines)
 
@@ -1599,15 +1755,56 @@ async def _send_signal(bot: Bot, setup: dict):
     # Recovery mode disabled — 100% win streak for all users
     recovery = False
 
+    # ── PIP-TARGET AWARE TP REBUILD ──────────────────────────────────
+    # Translate the user's stored max_tp to a pip target (supports both
+    # old TP-count format 1-6 and new pip-target format 20-200).
+    pip_target = pip_target_from_max_tp(max_tp)
+    _atr_est   = abs(entry - sl) * 1.4 if sl and entry else (pip * 30)
+
+    # Estimate how many pips the current engine-generated TP ladder covers
+    est_pips = _estimate_move_pips(pair, entry, tps, pip, atr=_atr_est)
+
+    # Rebuild the TP ladder to match/exceed the pip target.
+    # For big moves the rebuilt ladder gives the user MORE than requested.
+    try:
+        tps = _pip_aware_tp_ladder(
+            pair, direction, entry, sl,
+            pip_target, est_pips, pip, tps
+        )
+        # Re-estimate pips after rebuild so classification is accurate
+        est_pips = _estimate_move_pips(pair, entry, tps, pip, atr=_atr_est)
+    except Exception as _pe:
+        print(f"[forex_engine] pip_aware_tp_ladder error: {_pe}")
+
+    # ── FOOTPRINT DATA (crypto via Binance WS) ──────────────────────
+    _footprint = None
+    try:
+        from footprint_engine import get_footprint
+        _footprint = get_footprint(pair)
+    except Exception:
+        pass
+
+    # ── SIGNAL CLASSIFICATION ───────────────────────────────────────
+    smart_pkt = last_smart(pair)
+    _move_class = _signal_move_class(
+        est_pips, sniper, smart_pkt, _liq_for_levels
+    )
+    print(f"[forex_engine] 🏷 {_move_class[0]} ({est_pips} pips)  "
+          f"pip_target={pip_target}  pair={pair} {direction}")
+
     seq = _next_session_seq(user_id)
     sig_id = db.create_forex_signal(
         user_id=user_id, chat_id=user_id, pair=pair, direction=direction,
         entry=entry, tp_prices=tps, sl_price=sl, max_tp=max_tp, kind=kind,
         session_seq=seq,
     )
-    smart_pkt = last_smart(pair)
     is_turning_point = _LAST_TURNING_POINT.get(pair, False)
     _SIGNAL_TURNING_POINT[sig_id] = is_turning_point
+    _SIGNAL_MOVE_CLASS[sig_id]  = _move_class
+    _SIGNAL_EST_PIPS[sig_id]    = est_pips
+    if _footprint:
+        _SIGNAL_FOOTPRINT[sig_id] = _footprint
+
     text = _signal_text(
         pair, direction, tps, sl, max_tp, dec, 0, None,
         entry=entry, signal_time=short_time_for_user(user_id),
@@ -1615,6 +1812,8 @@ async def _send_signal(bot: Bot, setup: dict):
         seq=seq, pattern=pattern, smart=smart_pkt,
         turning_point=is_turning_point,
         sniper_data=sniper, liq_data=_liq_for_levels,
+        move_class=_move_class, estimated_pips=est_pips,
+        footprint_data=_footprint,
     )
     # Stash the detected pattern so the I'M IN tracker can re-render the
     # same badge on every TP / SL update for THIS signal.
@@ -1658,9 +1857,10 @@ async def _send_signal(bot: Bot, setup: dict):
                 chat_id=user_id,
                 text=(
                     "✅ Your <b>1 free Forex signal</b> for today has been sent.\n\n"
-                    "🔁 To receive more signals, set your TF / pairs / TP again "
+                    "🔁 To receive more signals, set your TF / pairs / target again "
                     "(another free signal tomorrow), or upgrade for "
-                    "<b>24/7 unlimited signals</b> with up to <b>TP 6</b>."
+                    "<b>24/7 unlimited signals</b> with <b>BIG MOVE &amp; SNIPER "
+                    "entry alerts up to 200+ PIPS</b>."
                 ),
                 parse_mode="HTML",
                 reply_markup=forex_free_exhausted_kb(),
@@ -1807,14 +2007,18 @@ async def run_im_in_simulation(bot: Bot, signal_id: int):
     sl_confirm_count = 0
 
     async def _refresh(outcome: str | None):
+        _sid = int(signal_id)
         text = _signal_text(
             pair, direction, tp_prices, sl_price, max_tp, decimals,
             tps_hit, outcome, entry=entry_price, signal_time=sig_time,
             tf_label=tf_label, pip=pip, kind=kind, seq=seq,
-            pattern=_SIGNAL_PATTERN.get(int(signal_id)),
-            smart=_SIGNAL_SMART.get(int(signal_id)),
-            turning_point=_SIGNAL_TURNING_POINT.get(int(signal_id), False),
+            pattern=_SIGNAL_PATTERN.get(_sid),
+            smart=_SIGNAL_SMART.get(_sid),
+            turning_point=_SIGNAL_TURNING_POINT.get(_sid, False),
             sniper_data=None, liq_data=None,
+            move_class=_SIGNAL_MOVE_CLASS.get(_sid),
+            estimated_pips=_SIGNAL_EST_PIPS.get(_sid, 0),
+            footprint_data=_SIGNAL_FOOTPRINT.get(_sid),
         )
         # When the trade closes, swap the I'M IN keyboard for the
         # MORE SIGNAL keyboard so the user can request the next one.
@@ -1996,6 +2200,9 @@ async def run_alert_armed_simulation(bot: Bot, signal_id: int):
         smart=_SIGNAL_SMART.get(sid_int),
         turning_point=_SIGNAL_TURNING_POINT.get(sid_int, False),
         sniper_data=None, liq_data=None,
+        move_class=_SIGNAL_MOVE_CLASS.get(sid_int),
+        estimated_pips=_SIGNAL_EST_PIPS.get(sid_int, 0),
+        footprint_data=_SIGNAL_FOOTPRINT.get(sid_int),
     )
     banner = _banner_for(direction)
     try:

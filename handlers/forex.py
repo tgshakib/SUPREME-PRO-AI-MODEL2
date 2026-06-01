@@ -241,23 +241,26 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    # Free user trying to pick TP 2-6 → big upsell screen (not auto-capped).
-    # They can still come BACK and choose TP 1 to keep using the free trial.
-    if not _is_premium(call.from_user.id) and max_tp > 1:
+    # Free user trying to pick >20 pips → upsell screen (not auto-capped).
+    # They can still come BACK and choose 20+ PIPS to keep using the free trial.
+    if not _is_premium(call.from_user.id) and max_tp > 20:
+        from config import pip_target_from_max_tp
+        pips = pip_target_from_max_tp(max_tp)
         await call.answer()
         await show_screen(
             call.bot, call.message.chat.id,
-            "🚫 <b>TP " + str(max_tp) + " IS A PAID-ONLY TARGET</b>\n"
+            f"🚫 <b>{pips}+ PIPS IS A PAID-ONLY TARGET</b>\n"
             "━━━━━━━━━━━━━━━━━━━\n"
             "🚀 <b>BUY BOT ACCESS TO UNLOCK ALL THIS BENEFIT &amp; "
             "USE THE BOT AT FULL POWER:</b>\n\n"
-            "✅ <b>TP 2 / 3 / 4 / 5 / 6</b> targets unlocked\n"
+            "✅ <b>40 / 60 / 80 / 100 / 120 / 150 / 200+ PIPS</b> targets\n"
+            "✅ <b>BIG MOVE</b> &amp; <b>RESERVE MOVE</b> sniper signals\n"
             "✅ Watch up to <b>10 markets</b> at once\n"
             "✅ <b>Unlimited 24/7</b> Forex signals (no daily cap)\n"
-            "✅ Full <b>SUPREME PRO</b> setups with correlation reads\n"
+            "✅ Full <b>SUPREME PRO</b> setups — session + footprint confirmed\n"
             "━━━━━━━━━━━━━━━━━━━\n"
             "🎯 Tap <b>BUY FULL ACCESS</b> below — or go back to "
-            "<b>WORKPLACE</b> and stay on the free trial (TP 1).",
+            "<b>WORKPLACE</b> and stay on the free trial (20+ PIPS).",
             forex_tp_locked_kb(),
         )
         return
@@ -268,15 +271,17 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.answer("Bot activated ✅")
 
+    from config import pip_target_from_max_tp
+    pip_tgt = pip_target_from_max_tp(max_tp)
     sel_pairs = ", ".join(
         FOREX_PAIRS[int(i)] for i in pairs.split(",")
     )
     free_note = ""
     if not _is_premium(call.from_user.id):
         free_note = (
-            "\n\n⚠️ <b>Free trial:</b> 1 pair · 1 signal · TP 1 max per day. "
+            "\n\n⚠️ <b>Free trial:</b> 1 pair · 1 signal · 20+ PIPS max per day. "
             "After your daily signal, the bot stops and you'll need to set "
-            "TF/pairs/TP again. Buy access for 24/7 unlimited signals."
+            "TF/pairs/target again. Buy access for 24/7 unlimited signals."
         )
 
     text = (
@@ -284,12 +289,12 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⏱️ Timeframe: <b>{_tf_label(tf)}</b>\n"
         f"📊 Markets: <b>{sel_pairs}</b>\n"
-        f"🎯 Max TP: <b>TP {max_tp}</b>\n"
+        f"🎯 Pip Target: <b>{pip_tgt}+ PIPS</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📡 When market creates an <b>A+ / A</b> best set-up,\n"
-        f"   I will alert you <b>5 / 10 / 15 min</b> before — get ready.\n"
-        f"✅ After bot confirms an A+ / A setup,\n"
-        f"   you will receive a full SUPREME PRO signal here.\n"
+        f"📡 Bot scans session + chart for <b>SNIPER / BIG MOVE</b> setups.\n"
+        f"   Signal fires when a <b>high-quality confirmed entry</b> is detected.\n"
+        f"✅ Signal includes: Entry · TP ladder · SL · Session · Footprint\n"
+        f"   Pip range shown on each TP — big moves labelled clearly.\n"
         f"🛑 Tap <b>STOP</b> to deactivate &amp; clear the panel.{free_note}"
     )
     setup_now = db.get_forex_setup(call.from_user.id) or {}
