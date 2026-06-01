@@ -79,7 +79,7 @@ MIN_BODY_RATIO = 0.72  # GOLD V8: trigger candle body >= 72% — strong convicti
 MIN_ATR_PCT = 0.0020   # GOLD V8: strict dead-chop filter (skip low-volatility)
 
 _CACHE: dict[str, tuple[float, Optional[dict]]] = {}
-_TTL = 120.0
+_TTL = 30.0   # Elite: refresh every 30s (was 120s)
 
 
 def _ema(series, period: int):
@@ -395,7 +395,7 @@ _MTF_TFS = [
 _MTF_4H_WEIGHT = 8
 
 _MTF_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
-_MTF_TTL   = 90.0   # seconds
+_MTF_TTL   = 25.0   # Elite: 25s (was 90s — biggest lag source in the system)
 
 
 def _bias_from_closes(closes) -> int:
@@ -586,7 +586,7 @@ def malaysian_snr_confluence(pair: str, direction: str,
 # tracks during market hours) and only fires when the most recent
 # micro-momentum AND the 15m trend BOTH agree with the 1H bias.
 _BIN_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
-_BIN_TTL = 25.0  # ~half a 1m bar — fresh enough for a sniper expiry
+_BIN_TTL = 15.0  # Elite: 15s (was 25s) — fresh within each 1m bar
 
 
 def binary_sniper_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
@@ -1662,129 +1662,157 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
         # All candle-structure checks MUST use bar(-2) as the signal bar.
         c0 = bar1(-2);  c1 = bar1(-3);  c2 = bar1(-4)   # confirmed bars
 
-        # ── M1: 5m HTF alignment (wt 3) — trend filter ─────────────────────
-        # EMA9 vs EMA21 on 5m. Must agree for LIVE pairs (kill-switch).
+        # ── M1: 5m HTF alignment (wt 3) — LIVE trend filter only ──────────────
+        # EMA9 vs EMA21 on 5m. Used as kill-switch for LIVE pairs only.
+        # OTC: EMA trend following HURTS reversal accuracy — M1 is skipped for OTC.
+        # Instead OTC uses RSI extremes + exhaustion patterns for direction.
         m1_dir = 0
-        if df_5m is not None and "close" in df_5m.columns and len(df_5m) >= 25:
+        if not is_otc and df_5m is not None and "close" in df_5m.columns and len(df_5m) >= 25:
             try:
                 cl5 = df_5m["close"].squeeze().astype(float).dropna()
                 ef5 = float(_ema(cl5, 9).iloc[-1])
                 es5 = float(_ema(cl5, 21).iloc[-1])
                 rsi5 = float(_rsi(cl5, 7).iloc[-1])
                 if ef5 > es5 and rsi5 > 50:
-                    m1_dir = -1       # 5m bullish → BUY signal
+                    m1_dir = -1       # 5m bullish → BUY signal (LIVE only)
                     votes["m1_htf"] = -1; weights["m1_htf"] = 3
                     reasons.append(f"5m EMA9>{float(ef5):.4g} / EMA21={float(es5):.4g} BULL trend")
                 elif ef5 < es5 and rsi5 < 50:
-                    m1_dir = +1       # 5m bearish → SELL signal
+                    m1_dir = +1       # 5m bearish → SELL signal (LIVE only)
                     votes["m1_htf"] = +1; weights["m1_htf"] = 3
                     reasons.append(f"5m EMA9<EMA21 BEAR trend")
             except Exception:
                 pass
 
-        # ── M2: 1m micro EMA cross (wt 3) ────────────────────────────────
-        # EMA-3 just crossed EMA-8 on the most recent completed 1m bar.
-        # "Just" = the cross happened between bar-2 and bar-1.
-        try:
-            ema3 = _ema(cl1, 3)
-            ema8 = _ema(cl1, 8)
-            # GOD LEVEL FIX: use iloc[-2] (confirmed bar) for cross detection
-            e3_now  = float(ema3.iloc[-2]); e8_now  = float(ema8.iloc[-2])
-            e3_prev = float(ema3.iloc[-3]); e8_prev = float(ema8.iloc[-3])
-            fresh_bull_cross = (e3_prev <= e8_prev) and (e3_now >  e8_now)
-            fresh_bear_cross = (e3_prev >= e8_prev) and (e3_now <  e8_now)
-            if fresh_bull_cross:
-                votes["m2_ema"] = -1; weights["m2_ema"] = 3
-                reasons.append("1m EMA3 × EMA8 BULLISH cross (confirmed bar)")
-            elif fresh_bear_cross:
-                votes["m2_ema"] = +1; weights["m2_ema"] = 3
-                reasons.append("1m EMA3 × EMA8 BEARISH cross (confirmed bar)")
-            elif e3_now > e8_now:
-                votes["m2_ema"] = -1; weights["m2_ema"] = 1
-                reasons.append("1m EMA3>EMA8 bull bias (confirmed)")
-            else:
-                votes["m2_ema"] = +1; weights["m2_ema"] = 1
-                reasons.append("1m EMA3<EMA8 bear bias (confirmed)")
-        except Exception:
-            pass
+        # ── M2: 1m micro EMA cross (wt 3) — LIVE only ───────────────────────
+        # EMA-3 crossed EMA-8 on the most recent confirmed 1m bar.
+        # OTC: EMA cross is trend-following — SKIPPED for OTC reversal engine.
+        # OTC reversal uses RSI, Stochastic, BB extremes instead.
+        if not is_otc:
+            try:
+                ema3 = _ema(cl1, 3)
+                ema8 = _ema(cl1, 8)
+                # GOD LEVEL FIX: use iloc[-2] (confirmed bar) for cross detection
+                e3_now  = float(ema3.iloc[-2]); e8_now  = float(ema8.iloc[-2])
+                e3_prev = float(ema3.iloc[-3]); e8_prev = float(ema8.iloc[-3])
+                fresh_bull_cross = (e3_prev <= e8_prev) and (e3_now >  e8_now)
+                fresh_bear_cross = (e3_prev >= e8_prev) and (e3_now <  e8_now)
+                if fresh_bull_cross:
+                    votes["m2_ema"] = -1; weights["m2_ema"] = 3
+                    reasons.append("1m EMA3 × EMA8 BULLISH cross (confirmed bar)")
+                elif fresh_bear_cross:
+                    votes["m2_ema"] = +1; weights["m2_ema"] = 3
+                    reasons.append("1m EMA3 × EMA8 BEARISH cross (confirmed bar)")
+                elif e3_now > e8_now:
+                    votes["m2_ema"] = -1; weights["m2_ema"] = 1
+                    reasons.append("1m EMA3>EMA8 bull bias (confirmed)")
+                else:
+                    votes["m2_ema"] = +1; weights["m2_ema"] = 1
+                    reasons.append("1m EMA3<EMA8 bear bias (confirmed)")
+            except Exception:
+                pass
 
-        # ── M3: 1m RSI-7 momentum (wt 2) — tightened to 62/38 ──────────────
-        # 62+ = firmly bullish momentum; 38- = firmly bearish.
-        # This eliminates borderline 58-61 readings that cause noise.
+        # ── M3: 1m RSI-7 (wt 2-3) — LIVE: momentum direction / OTC: reversal ──
+        # LIVE: RSI > 62 = bull momentum; < 38 = bear momentum (trend confirmation)
+        # OTC:  RSI > 80 = exhaustion → SELL; < 20 = exhaustion → BUY (reversal)
+        #       RSI 62-80 or 20-38 skipped for OTC — not extreme enough for reversal
         try:
-            # GOD LEVEL FIX: use iloc[-2] = confirmed closed bar RSI
-            rsi7_1m = float(_rsi(cl1, 7).iloc[-2])
-            if rsi7_1m > 62:
-                votes["m3_rsi"] = -1; weights["m3_rsi"] = 2
-                reasons.append(f"1m RSI(7) {rsi7_1m:.0f} — bull momentum (confirmed)")
-            elif rsi7_1m < 38:
-                votes["m3_rsi"] = +1; weights["m3_rsi"] = 2
-                reasons.append(f"1m RSI(7) {rsi7_1m:.0f} — bear momentum (confirmed)")
-            # OTC: extreme RSI adds extra reversal signal
+            rsi7_1m = float(_rsi(cl1, 7).iloc[-2])  # confirmed closed bar
             if is_otc:
-                if rsi7_1m > 80:
-                    votes["m3_otc_extreme"] = +1; weights["m3_otc_extreme"] = 3
-                    reasons.append(f"1m RSI(7) {rsi7_1m:.0f} OTC EXTREME OVERBOUGHT → PUT")
-                elif rsi7_1m < 20:
-                    votes["m3_otc_extreme"] = -1; weights["m3_otc_extreme"] = 3
-                    reasons.append(f"1m RSI(7) {rsi7_1m:.0f} OTC EXTREME OVERSOLD → CALL")
+                # OTC reversal: only fire at genuine extremes
+                if rsi7_1m > 82:
+                    votes["m3_rsi"] = +1; weights["m3_rsi"] = 3   # SELL reversal
+                    reasons.append(f"1m RSI(7) {rsi7_1m:.0f} OTC EXTREME OB → PUT")
+                elif rsi7_1m < 18:
+                    votes["m3_rsi"] = -1; weights["m3_rsi"] = 3   # BUY reversal
+                    reasons.append(f"1m RSI(7) {rsi7_1m:.0f} OTC EXTREME OS → CALL")
+                elif rsi7_1m > 72:
+                    votes["m3_rsi"] = +1; weights["m3_rsi"] = 2
+                    reasons.append(f"1m RSI(7) {rsi7_1m:.0f} OTC overbought → PUT lean")
+                elif rsi7_1m < 28:
+                    votes["m3_rsi"] = -1; weights["m3_rsi"] = 2
+                    reasons.append(f"1m RSI(7) {rsi7_1m:.0f} OTC oversold → CALL lean")
+            else:
+                # LIVE: trend momentum direction
+                if rsi7_1m > 62:
+                    votes["m3_rsi"] = -1; weights["m3_rsi"] = 2
+                    reasons.append(f"1m RSI(7) {rsi7_1m:.0f} — bull momentum (confirmed)")
+                elif rsi7_1m < 38:
+                    votes["m3_rsi"] = +1; weights["m3_rsi"] = 2
+                    reasons.append(f"1m RSI(7) {rsi7_1m:.0f} — bear momentum (confirmed)")
         except Exception:
             pass
 
-        # ── M4: 1m momentum candle (wt 3) ────────────────────────────────
-        # Current 1m bar: body ≥ 70% of range = institutional conviction bar.
+        # ── M4: 1m momentum candle (wt 2-3) ─────────────────────────────────
+        # LIVE: strong body ≥ 70% = institutional conviction in that direction
+        # OTC:  strong body ≥ 70% = institutional EXHAUSTION → next bar reverses
         if c0["pct"] >= 0.70:
-            if c0["bull"]:
-                votes["m4_body"] = -1; weights["m4_body"] = 3
-                reasons.append(f"1m momentum candle {c0['pct']:.0%} body — BULL")
+            if is_otc:
+                # OTC exhaustion: strong push means reversal is imminent
+                _m4_otc = +1 if c0["bull"] else -1   # bull body → SELL; bear → BUY
+                votes["m4_body"] = _m4_otc; weights["m4_body"] = 2
+                reasons.append(f"1m {c0['pct']:.0%} body OTC EXHAUSTION → {'PUT' if c0['bull'] else 'CALL'}")
             else:
-                votes["m4_body"] = +1; weights["m4_body"] = 3
-                reasons.append(f"1m momentum candle {c0['pct']:.0%} body — BEAR")
-        elif c0["pct"] >= 0.55:
+                if c0["bull"]:
+                    votes["m4_body"] = -1; weights["m4_body"] = 3
+                    reasons.append(f"1m momentum candle {c0['pct']:.0%} body — BULL")
+                else:
+                    votes["m4_body"] = +1; weights["m4_body"] = 3
+                    reasons.append(f"1m momentum candle {c0['pct']:.0%} body — BEAR")
+        elif c0["pct"] >= 0.55 and not is_otc:
             if c0["bull"]:
                 votes["m4_body"] = -1; weights["m4_body"] = 1
             else:
                 votes["m4_body"] = +1; weights["m4_body"] = 1
 
         # ── M5: 1m volume surge (wt 2) ───────────────────────────────────
-        # Current 1m bar volume > 1.8× the 20-bar average → smart money.
+        # LIVE: volume surge confirms the candle direction (smart money entering)
+        # OTC:  volume surge = institutional EXHAUSTION → reversal on next candle
         if vol1 is not None and len(vol1) >= 22:
             try:
-                # GOD LEVEL FIX: use iloc[-2] = confirmed bar volume
-                v0    = float(vol1.iloc[-2])
+                v0    = float(vol1.iloc[-2])   # confirmed bar
                 avg_v = float(vol1.iloc[-22:-2].mean()) or 1.0
                 ratio = v0 / avg_v
                 if ratio >= 1.8:
-                    # Big volume confirms the direction of the confirmed candle
-                    if c0["bull"]:
-                        votes["m5_vol"] = -1; weights["m5_vol"] = 2
-                        reasons.append(f"1m volume surge {ratio:.1f}× — institutional BUY (confirmed)")
+                    if is_otc:
+                        # OTC: high volume = exhaustion → opposite direction
+                        _m5_otc = +1 if c0["bull"] else -1
+                        votes["m5_vol"] = _m5_otc; weights["m5_vol"] = 2
+                        reasons.append(f"1m volume surge {ratio:.1f}× OTC EXHAUSTION → {'PUT' if c0['bull'] else 'CALL'} (confirmed)")
                     else:
-                        votes["m5_vol"] = +1; weights["m5_vol"] = 2
-                        reasons.append(f"1m volume surge {ratio:.1f}× — institutional SELL (confirmed)")
+                        if c0["bull"]:
+                            votes["m5_vol"] = -1; weights["m5_vol"] = 2
+                            reasons.append(f"1m volume surge {ratio:.1f}× — institutional BUY (confirmed)")
+                        else:
+                            votes["m5_vol"] = +1; weights["m5_vol"] = 2
+                            reasons.append(f"1m volume surge {ratio:.1f}× — institutional SELL (confirmed)")
             except Exception:
                 pass
 
         # ── M6: 1m consecutive same-direction bars (wt 1/2) ─────────────
-        # 2 back-to-back bars = wt 1 (momentum present).
-        # 3 back-to-back bars = wt 2 (sustained institutional momentum).
+        # LIVE: 2-3 back-to-back bars = momentum continuation signal
+        # OTC:  2-3 back-to-back bars = EXHAUSTION → reversal on next candle
         try:
             run2_bull = c0["bull"] and c1["bull"]
             run2_bear = not c0["bull"] and not c1["bull"]
             run3_bull = run2_bull and c2["bull"]
             run3_bear = run2_bear and not c2["bull"]
             if run3_bull:
-                votes["m6_consec"] = -1; weights["m6_consec"] = 2
-                reasons.append("1m: 3 consecutive bull bars — sustained BULL")
+                _v = +1 if is_otc else -1   # OTC: exhaustion → SELL; LIVE: continuation → BUY
+                votes["m6_consec"] = _v; weights["m6_consec"] = 2
+                reasons.append("1m: 3 consecutive bull bars — " + ("OTC EXHAUSTION → PUT" if is_otc else "sustained BULL"))
             elif run3_bear:
-                votes["m6_consec"] = +1; weights["m6_consec"] = 2
-                reasons.append("1m: 3 consecutive bear bars — sustained BEAR")
+                _v = -1 if is_otc else +1   # OTC: exhaustion → BUY; LIVE: continuation → SELL
+                votes["m6_consec"] = _v; weights["m6_consec"] = 2
+                reasons.append("1m: 3 consecutive bear bars — " + ("OTC EXHAUSTION → CALL" if is_otc else "sustained BEAR"))
             elif run2_bull:
-                votes["m6_consec"] = -1; weights["m6_consec"] = 1
-                reasons.append("1m: 2 consecutive bull bars")
+                _v = +1 if is_otc else -1
+                votes["m6_consec"] = _v; weights["m6_consec"] = 1
+                reasons.append("1m: 2 consecutive bull bars" + (" OTC exhaustion lean" if is_otc else ""))
             elif run2_bear:
-                votes["m6_consec"] = +1; weights["m6_consec"] = 1
-                reasons.append("1m: 2 consecutive bear bars")
+                _v = -1 if is_otc else +1
+                votes["m6_consec"] = _v; weights["m6_consec"] = 1
+                reasons.append("1m: 2 consecutive bear bars" + (" OTC exhaustion lean" if is_otc else ""))
         except Exception:
             pass
 
@@ -1895,24 +1923,32 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
         except Exception:
             pass
 
-        # ── M11 (NEW): 15m HTF double filter (wt 2) ─────────────────────
-        # A second higher-timeframe filter. When the 5m trend (M1) AND
-        # the 15m EMA align with the 1m direction, noise is near zero.
-        # This is the equivalent of a 3-TF confluence confirmation.
+        # ── M11 (NEW): 15m HTF RSI filter (wt 2) — LIVE trend / OTC extreme ──
+        # LIVE: 15m EMA9/EMA21 double confirmation = near-zero noise
+        # OTC:  15m RSI extremes only (EMA trend-following skipped for OTC)
         if df_5m is not None:
             try:
                 df_15m_1m = _fetch_tf(ticker, "15m", "7d")
                 if df_15m_1m is not None and "close" in df_15m_1m.columns and len(df_15m_1m) >= 25:
                     cl15_1m = df_15m_1m["close"].squeeze().astype(float).dropna()
-                    ef15 = float(_ema(cl15_1m, 9).iloc[-1])
-                    es15 = float(_ema(cl15_1m, 21).iloc[-1])
-                    rsi15_1m = float(_rsi(cl15_1m, 14).iloc[-1])
-                    if ef15 > es15 and rsi15_1m > 50:
-                        votes["m11_15htf"] = -1; weights["m11_15htf"] = 2
-                        reasons.append(f"15m EMA9>EMA21 BULL alignment (double HTF)")
-                    elif ef15 < es15 and rsi15_1m < 50:
-                        votes["m11_15htf"] = +1; weights["m11_15htf"] = 2
-                        reasons.append(f"15m EMA9<EMA21 BEAR alignment (double HTF)")
+                    rsi15_1m = float(_rsi(cl15_1m, 7).iloc[-1])
+                    if is_otc:
+                        # OTC: 15m RSI at extreme adds reversal weight
+                        if rsi15_1m > 80:
+                            votes["m11_15htf"] = +1; weights["m11_15htf"] = 2
+                            reasons.append(f"15m RSI(7) {rsi15_1m:.0f} OTC extreme OB → PUT")
+                        elif rsi15_1m < 20:
+                            votes["m11_15htf"] = -1; weights["m11_15htf"] = 2
+                            reasons.append(f"15m RSI(7) {rsi15_1m:.0f} OTC extreme OS → CALL")
+                    else:
+                        ef15 = float(_ema(cl15_1m, 9).iloc[-1])
+                        es15 = float(_ema(cl15_1m, 21).iloc[-1])
+                        if ef15 > es15 and rsi15_1m > 50:
+                            votes["m11_15htf"] = -1; weights["m11_15htf"] = 2
+                            reasons.append(f"15m EMA9>EMA21 BULL alignment (double HTF)")
+                        elif ef15 < es15 and rsi15_1m < 50:
+                            votes["m11_15htf"] = +1; weights["m11_15htf"] = 2
+                            reasons.append(f"15m EMA9<EMA21 BEAR alignment (double HTF)")
             except Exception:
                 pass
 
@@ -1976,12 +2012,12 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
     buy_wt  = sum(weights.get(k, 1) for k, v in votes.items() if v < 0)
 
     if is_otc:
-        # OTC: threshold 6 — reversal at confirmed extremes
-        threshold     = 6
+        # OTC Elite: threshold 7 — all signals now reversal-oriented, raise bar
+        # (was 6 — raised because M1/M2/M11 EMA signals removed; signals are purer)
+        threshold     = 7
         max_opposing  = 2
     else:
         # LIVE: GOD LEVEL — strict threshold 9, confirmed bars only
-        # (was 7 — raised because all candle checks now use confirmed bar(-2))
         threshold     = 9
         max_opposing  = 2
 

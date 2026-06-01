@@ -31,7 +31,7 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _CACHE: Dict[str, Tuple[float, Optional[dict]]] = {}
-_CACHE_TTL = 55  # seconds — 1 fresh result per candle
+_CACHE_TTL = 18  # seconds — Elite: refresh every 18s, fast as OTC candles (was 55s)
 
 
 def _pair_to_yf_ticker(pair: str) -> Optional[str]:
