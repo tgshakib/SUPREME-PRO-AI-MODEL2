@@ -157,6 +157,14 @@ except Exception as _mfe:
     _MASTER_OK = False
 
 try:
+    from thirty_second_engine import confirm_entry as _30s_confirm
+    _30S_OK = True
+except Exception as _30se:
+    print(f"[signals] thirty_second_engine import failed: {_30se}")
+    _30s_confirm = None  # type: ignore
+    _30S_OK = False
+
+try:
     from binary_tracker import (
         format_entry_time_instruction as _fmt_entry,
         get_streak_alert as _streak_alert,
@@ -857,6 +865,31 @@ def generate_signal(
                       f"{'OTC' if is_otc else 'LIVE'} adj={adj:+d}")
         except Exception as _mfe:
             print(f"[signals] master_filter error: {_mfe}")
+
+    # ── 30-SECOND SUB-CANDLE CONFIRMATION — 1 MIN / 2 MIN ONLY ──────────
+    # For 1-minute binary options the entry quality within the minute decides
+    # win vs loss. This gate confirms sub-minute momentum using 7 fast signals:
+    #   S1 momentum streak · S2 EMA(3) slope · S3 RSI(3) · S4 conviction body
+    #   S5 clean close · S6 2m bar · S7 MACD micro(3,8,3)
+    # PRIME/GOOD → confidence boost  |  WEAK/SKIP → confidence penalty
+    # Only runs for 1-minute/2-minute timeframes where sub-candle timing matters.
+    if _is_1m_tf and _30S_OK and _30s_confirm is not None and direction is not None:
+        try:
+            from live_prices import yf_ticker as _yft_30s
+            _30s_ticker = _yft_30s(pair)
+            _30s = _30s_confirm(pair=pair, direction=direction,
+                                is_otc=is_otc, ticker=_30s_ticker)
+            adj_30s = _30s.get("confidence_adj", 0)
+            if adj_30s != 0:
+                confidence = max(62, min(100, (confidence or 95) + adj_30s))
+            if _30s["entry_quality"] == "PRIME":
+                elite_confirmed = True
+            elif _30s["entry_quality"] == "SKIP" and not elite_confirmed:
+                # Sub-candle says skip — crush confidence, strip elite
+                confidence  = min(confidence or 95, 66)
+                elite_confirmed = False
+        except Exception as _30se_err:
+            print(f"[signals] 30s_engine error: {_30se_err}")
 
     # ── MULTI-TF LIQUIDITY REVERSE ZONE — smallest to largest TF ────────
     # Runs after all engines have voted on direction. Confirms the signal

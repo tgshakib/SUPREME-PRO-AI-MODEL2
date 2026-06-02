@@ -2011,15 +2011,37 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
     sell_wt = sum(weights.get(k, 1) for k, v in votes.items() if v > 0)
     buy_wt  = sum(weights.get(k, 1) for k, v in votes.items() if v < 0)
 
+    # ── SESSION + MONDAY GATE (LIVE only) ────────────────────────────────────
+    # Root cause of Monday losses: EMAs haven't adjusted to weekend gap by morning.
+    # Root cause of dead-session losses: Asian session (00-07 UTC) has no momentum.
+    # LIVE 1m signals are only valid during London/NY overlap or active sessions.
+    if not is_otc:
+        from datetime import datetime as _dt
+        _now_utc = _dt.utcnow()
+        _utc_h   = _now_utc.hour
+        _utc_dow = _now_utc.weekday()   # 0=Mon … 6=Sun
+        # Block Monday morning 00:00-10:00 UTC — gap misalignment
+        if _utc_dow == 0 and _utc_h < 10:
+            _1M_CACHE[ticker] = (now, None)
+            return None
+        # Block Sunday (gap zone) after 20:45 UTC
+        if _utc_dow == 6 and _utc_h >= 21:
+            _1M_CACHE[ticker] = (now, None)
+            return None
+        # Block dead-session hours: 22:00-07:00 UTC (no real liquidity for 1m binary)
+        if _utc_h >= 22 or _utc_h < 7:
+            _1M_CACHE[ticker] = (now, None)
+            return None
+
     if is_otc:
         # OTC Elite: threshold 7 — all signals now reversal-oriented, raise bar
-        # (was 6 — raised because M1/M2/M11 EMA signals removed; signals are purer)
         threshold     = 7
         max_opposing  = 2
     else:
-        # LIVE: GOD LEVEL — strict threshold 9, confirmed bars only
-        threshold     = 9
-        max_opposing  = 2
+        # LIVE: SUPREME threshold 12 — only the clearest setups fire
+        # Raised from 9 → 12 to eliminate weak Monday / chop signals
+        threshold     = 12
+        max_opposing  = 1   # zero tolerance for opposing signals on LIVE 1m
 
     direction: Optional[str] = None
     total_wt = 0
@@ -2032,18 +2054,15 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
         _1M_CACHE[ticker] = (now, None)
         return None
 
-    # LIVE pairs: M1 (5m trend) MUST agree, OR both M2 + M7 agree
+    # LIVE pairs: M1 (5m trend) MUST ALWAYS agree — no exceptions.
+    # Previous M2+M7 override allowed counter-trend signals → Monday losses.
+    # The 5m trend is the most reliable 1-minute direction filter; if it
+    # doesn't agree the signal is counter-trend and statistically loses.
     if not is_otc:
-        m1_agrees  = (direction == "BUY"  and m1_dir == -1) or \
-                     (direction == "SELL" and m1_dir == +1)
-        m2_agrees  = "m2_ema" in votes and \
-                     ((direction == "BUY"  and votes["m2_ema"] < 0) or
-                      (direction == "SELL" and votes["m2_ema"] > 0))
-        m7_agrees  = "m7_macd" in votes and \
-                     ((direction == "BUY"  and votes["m7_macd"] < 0) or
-                      (direction == "SELL" and votes["m7_macd"] > 0))
-        if not m1_agrees and not (m2_agrees and m7_agrees):
-            # Counter-trend signal without micro cross + MACD confirmation → skip
+        m1_agrees = (direction == "BUY"  and m1_dir == -1) or \
+                    (direction == "SELL" and m1_dir == +1)
+        if not m1_agrees:
+            # 5m trend doesn't agree → skip regardless of other signals
             _1M_CACHE[ticker] = (now, None)
             return None
 

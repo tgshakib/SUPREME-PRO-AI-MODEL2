@@ -112,8 +112,17 @@ def _is_friday_close() -> bool:
 
 
 def _is_monday_gap() -> bool:
+    """Block Sunday night (gap opens) AND Monday morning until 10:00 UTC.
+    After a weekend, EMAs haven't caught up to the gap price — 1m signals are unreliable.
+    """
     now = datetime.utcnow()
-    return now.weekday() == 6 and (now.hour * 60 + now.minute) >= (20 * 60 + 45)
+    # Sunday 20:45+ UTC — market just opened with gap
+    if now.weekday() == 6 and (now.hour * 60 + now.minute) >= (20 * 60 + 45):
+        return True
+    # Monday 00:00-10:00 UTC — EMAs still misaligned from weekend gap
+    if now.weekday() == 0 and now.hour < 10:
+        return True
+    return False
 
 
 # ══════════════════════════════════════════════════════════════════════
