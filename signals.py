@@ -165,6 +165,14 @@ except Exception as _30se:
     _30S_OK = False
 
 try:
+    from ultra_supreme_engine import ultra_check as _ultra_check
+    _ULTRA_OK = True
+except Exception as _uce:
+    print(f"[signals] ultra_supreme_engine import failed: {_uce}")
+    _ultra_check = None  # type: ignore
+    _ULTRA_OK = False
+
+try:
     from binary_tracker import (
         format_entry_time_instruction as _fmt_entry,
         get_streak_alert as _streak_alert,
@@ -890,6 +898,39 @@ def generate_signal(
                 elite_confirmed = False
         except Exception as _30se_err:
             print(f"[signals] 30s_engine error: {_30se_err}")
+
+    # ── ULTRA SUPREME ENGINE — deepest hidden quality layer ──────────────
+    # Final gold-seal check before signal fires.
+    # LIVE  : 6-gate triple-TF stack (EMA stack, RSI zone, HTF, volume,
+    #         runway, momentum candle). Needs ≥4/6 → HIGH/ELITE/GOD
+    # OTC   : 6-gate oscillator extremes (RSI(3), CCI deep, consecutive,
+    #         BB 2.5σ, Stoch(3), Williams %R). Needs ≥3/6 → HIGH/ELITE/GOD
+    if _ULTRA_OK and _ultra_check is not None and direction is not None:
+        try:
+            from live_prices import yf_ticker as _yft_us
+            _us_ticker = _yft_us(pair)
+            _us = _ultra_check(
+                pair      = pair,
+                direction = direction,
+                is_otc    = is_otc,
+                tf_label  = tf_label,
+                ticker    = _us_ticker,
+            )
+            if not _us["approved"]:
+                confidence    = min(confidence or 95, 64)
+                elite_confirmed = False
+                print(f"[signals] ⛔ ULTRA BLOCKED {pair} {'OTC' if is_otc else 'LIVE'} "
+                      f"{direction}: grade={_us['quality_grade']}")
+            else:
+                _us_adj = _us["confidence_adj"]
+                if _us_adj != 0:
+                    confidence = max(64, min(100, (confidence or 95) + _us_adj))
+                if _us["quality_grade"] in ("GOD", "ELITE"):
+                    elite_confirmed = True
+                print(f"[signals] ✅ ULTRA {_us['quality_grade']} {pair} "
+                      f"{'OTC' if is_otc else 'LIVE'} adj={_us_adj:+d}")
+        except Exception as _use:
+            print(f"[signals] ultra_supreme error: {_use}")
 
     # ── MULTI-TF LIQUIDITY REVERSE ZONE — smallest to largest TF ────────
     # Runs after all engines have voted on direction. Confirms the signal
