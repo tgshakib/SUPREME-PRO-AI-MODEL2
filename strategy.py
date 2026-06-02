@@ -1,32 +1,29 @@
 """SUPREME PRO Sniper Strategy — live-chart technical filter.
 
-Drop-in port of the proven EMA(9/21) crossover + RSI(14) confirmation
-system from the standalone `forex_signal_bot` reference (see
-`attached_assets/forex_signal_bot_*.py`). It pulls live 1-hour candles
-from Yahoo Finance, computes the indicators, and only returns a
-SNIPER setup when the most recent candle confirms a fresh EMA cross
-backed by RSI momentum.
+V10 CLEAN ENGINE: Uses only RSI(14) + EMA(50) as the two core indicators.
+  • RSI(14)  — measures trend strength, momentum and overbought/oversold
+  • EMA(50)  — single higher-timeframe trend filter (price above = bull,
+               price below = bear). No crossover lag.
+
+All price-action signals (stop hunts, order blocks, FVGs, volume,
+engulfing, exhaustion runs) are kept intact — they read raw candle
+microstructure with zero lag.
 
 Public API
 ----------
     analyze_pair(pair) -> dict | None
         {
           'direction':  'BUY' | 'SELL',
-          'entry':      float,           # live close on the trigger candle
+          'entry':      float,
           'rsi':        float,           # 0..100
-          'ema_fast':   float,
-          'ema_slow':   float,
+          'ema50':      float,
           'score':      int,             # 0..100 sniper-quality score
           'reason':     str,
-          'fresh_bars': int,             # 0 = cross happened on the last candle
         }
 
     pick_best_pair(pairs) -> tuple[str, dict] | None
         Scans every pair and returns the highest-scoring SNIPER setup,
         or None if no pair currently shows a clean entry.
-
-The result is cached per ticker for ~120 seconds so the engine can
-poll cheaply without hammering Yahoo Finance.
 """
 from __future__ import annotations
 
@@ -62,21 +59,21 @@ except Exception:
     _inst_vote = None  # type: ignore
     _INST_OK = False
 
-# ── Strategy parameters (matches the reference bot) ───────
-EMA_FAST    = 9
-EMA_SLOW    = 21
-EMA_TREND   = 50     # higher-TF trend filter (price above EMA50 = bull bias)
+# ── Strategy parameters (V10 CLEAN — RSI(14) + EMA(50) only) ────
+# Two core indicators:
+#   1. RSI(14)  — strength, momentum, overbought/oversold
+#   2. EMA(50)  — trend direction filter (price above = bull, below = bear)
+EMA_TREND   = 50     # single trend filter — NO crossover used
 RSI_PERIOD  = 14
-RSI_BUY_MIN = 57     # GOLD V8: BUY only when RSI shows strong bull conviction
-RSI_SELL_MAX = 43    # GOLD V8: SELL only when RSI shows strong bear conviction
-RSI_BUY_MAX  = 70    # avoid buying into overbought exhaustion
-RSI_SELL_MIN = 30    # avoid selling into oversold exhaustion
-TIMEFRAME   = "1h"   # 1H candles — proven, low-noise
-LOOKBACK    = 200    # bars (need >=50 for EMA50 trend filter)
-FRESH_BARS  = 1      # PRO V6: cross MUST be on the last candle (no stale)
-MIN_SCORE   = 95     # GOLD V8: ULTRA ELITE — highest-quality sniper setups only
-MIN_BODY_RATIO = 0.72  # GOLD V8: trigger candle body >= 72% — strong conviction
-MIN_ATR_PCT = 0.0020   # GOLD V8: strict dead-chop filter (skip low-volatility)
+RSI_BUY_MIN  = 55    # RSI must show genuine bull momentum
+RSI_SELL_MAX = 45    # RSI must show genuine bear momentum
+RSI_BUY_MAX  = 75    # block deeply overbought (reversal zone)
+RSI_SELL_MIN = 25    # block deeply oversold  (reversal zone)
+TIMEFRAME   = "1h"
+LOOKBACK    = 200
+MIN_SCORE   = 95
+MIN_BODY_RATIO = 0.60   # trigger candle body conviction
+MIN_ATR_PCT    = 0.0015 # ATR/price floor — skip dead chop
 
 _CACHE: dict[str, tuple[float, Optional[dict]]] = {}
 _TTL = 30.0   # Elite: refresh every 30s (was 120s)
@@ -94,48 +91,11 @@ def _rsi(series, period: int):
     return 100 - (100 / (1 + rs))
 
 
-def _macd(series, fast: int = 12, slow: int = 26, signal: int = 9):
-    """Return (macd_line, signal_line, histogram) as three Series."""
-    ml = _ema(series, fast) - _ema(series, slow)
-    sl = _ema(ml, signal)
-    return ml, sl, ml - sl
-
-
 def _bbands(series, period: int = 20, dev: float = 2.0):
-    """Bollinger Bands. Returns (upper, mid, lower) as three Series."""
+    """Bollinger Bands — kept for OTC reversal engine (BB outer touch)."""
     mid = series.rolling(period).mean()
     std = series.rolling(period).std(ddof=0)
     return mid + dev * std, mid, mid - dev * std
-
-
-def _adx(df, period: int = 14):
-    """Average Directional Index — returns a Series of ADX values.
-
-    ADX > 20 = trending; ADX > 25 = strong trend.
-    Uses Wilder smoothing (rolling mean approximation is close enough
-    for a filter, and avoids NA issues with the official Wilder EMA).
-    """
-    try:
-        h = df["high"].astype(float)
-        lo = df["low"].astype(float)
-        c  = df["close"].astype(float)
-        prev_h = h.shift(1)
-        prev_lo = lo.shift(1)
-        prev_c  = c.shift(1)
-        tr = (h - lo).combine((h - prev_c).abs(), max).combine(
-            (lo - prev_c).abs(), max)
-        # DM+ / DM- (zero when the other leg is larger)
-        up   = h - prev_h
-        down = prev_lo - lo
-        dm_p = up.where((up > down) & (up > 0), 0.0)
-        dm_m = down.where((down > up) & (down > 0), 0.0)
-        atr14  = tr.rolling(period).mean()
-        di_p = 100 * dm_p.rolling(period).mean() / atr14.replace(0, 1e-10)
-        di_m = 100 * dm_m.rolling(period).mean() / atr14.replace(0, 1e-10)
-        dx   = 100 * (di_p - di_m).abs() / (di_p + di_m).replace(0, 1e-10)
-        return dx.rolling(period).mean()   # ADX
-    except Exception:
-        return None
 
 
 def _fetch_candles(ticker: str):
@@ -150,7 +110,7 @@ def _fetch_candles(ticker: str):
             progress=False,
             auto_adjust=True,
         )
-        if df is None or df.empty or len(df) < EMA_SLOW + 5:
+        if df is None or df.empty or len(df) < EMA_TREND + 5:
             return None
         # yfinance can return MultiIndex columns when only one ticker
         # is requested — flatten to plain lower-case names.
@@ -165,38 +125,34 @@ def _fetch_candles(ticker: str):
         return None
 
 
-def _score_setup(direction: str, rsi_val: float, slope_pct: float,
-                 fresh_bars: int) -> int:
-    """Score 0..100. Higher = stronger sniper setup.
+def _score_setup(direction: str, rsi_val: float, rsi_momentum: float) -> int:
+    """Score 0..100 based on RSI strength and momentum.
 
-    * Fresh cross (the cleaner the better) → up to 40 pts
-    * RSI in trend zone but not exhausted   → up to 30 pts
-    * EMA slope (momentum strength)         → up to 30 pts
+    * RSI in strong trend zone    → up to 50 pts
+    * RSI momentum (acceleration) → up to 50 pts
     """
     score = 0
-    score += max(0, 40 - fresh_bars * 15)        # 40 / 25 / 10
     if direction == "BUY":
-        # Best zone: 50..70.  >75 = overbought (worse re-entry)
-        if 50 <= rsi_val <= 70: score += 30
-        elif RSI_BUY_MIN <= rsi_val < 50: score += 22
-        elif 70 < rsi_val <= 78: score += 18
-        else: score += 10
+        if 55 <= rsi_val <= 70: score += 50
+        elif 70 < rsi_val <= 75: score += 38
+        elif rsi_val > 50:       score += 25
+        else:                    score += 10
     else:
-        if 30 <= rsi_val <= 50: score += 30
-        elif 50 < rsi_val <= RSI_SELL_MAX: score += 22
-        elif 22 <= rsi_val < 30: score += 18
-        else: score += 10
-    # Slope is % move of fast EMA over the last 5 bars
-    score += min(30, int(abs(slope_pct) * 600))
+        if 30 <= rsi_val <= 45: score += 50
+        elif 25 <= rsi_val < 30: score += 38
+        elif rsi_val < 50:       score += 25
+        else:                    score += 10
+    score += min(50, int(abs(rsi_momentum) * 5))
     return min(100, score)
 
 
 def analyze_pair(pair: str) -> Optional[dict]:
-    """Run the EMA cross + RSI scan on the live 1H chart for `pair`.
+    """SUPREME PRO V10 — RSI(14) + EMA(50) clean sniper analysis.
 
-    Returns a setup dict if the latest candles show a fresh sniper
-    crossover, or None otherwise. Result is cached per ticker for
-    ~120 seconds.
+    Direction logic (zero lag):
+      BUY  — RSI(14) in bull momentum zone (55-75) AND price > EMA50
+      SELL — RSI(14) in bear momentum zone (25-45) AND price < EMA50
+    Additional filters: candle body conviction + ATR volatility floor.
     """
     ticker = yf_ticker(pair)
     if not ticker:
@@ -211,60 +167,29 @@ def analyze_pair(pair: str) -> Optional[dict]:
         _CACHE[ticker] = (now, None); return None
 
     close = df["close"].squeeze()
-    df["ema_fast"]  = _ema(close, EMA_FAST)
-    df["ema_slow"]  = _ema(close, EMA_SLOW)
-    df["ema_trend"] = _ema(close, EMA_TREND)
-    df["rsi"]       = _rsi(close, RSI_PERIOD)
+    df["ema50"] = _ema(close, EMA_TREND)
+    df["rsi"]   = _rsi(close, RSI_PERIOD)
     df = df.dropna()
-    if len(df) < FRESH_BARS + 3:
+    if len(df) < 10:
         _CACHE[ticker] = (now, None); return None
 
-    # Look for an EMA cross within the last FRESH_BARS candles.
+    last    = df.iloc[-1]
+    prev    = df.iloc[-2]
+    rsi_val = float(last["rsi"])
+    ema50   = float(last["ema50"])
+    entry   = float(last["close"])
+
+    # ── Primary direction: RSI zone + price vs EMA50 ──────────
     direction: Optional[str] = None
-    fresh_bars = -1
-    for back in range(FRESH_BARS):
-        idx_curr = -1 - back
-        idx_prev = idx_curr - 1
-        try:
-            curr = df.iloc[idx_curr]
-            prev = df.iloc[idx_prev]
-        except IndexError:
-            continue
-        cross_up = (float(prev["ema_fast"]) <= float(prev["ema_slow"])
-                    and float(curr["ema_fast"]) > float(curr["ema_slow"]))
-        cross_dn = (float(prev["ema_fast"]) >= float(prev["ema_slow"])
-                    and float(curr["ema_fast"]) < float(curr["ema_slow"]))
-        if cross_up:
-            direction = "BUY"; fresh_bars = back; break
-        if cross_dn:
-            direction = "SELL"; fresh_bars = back; break
+    if RSI_BUY_MIN <= rsi_val <= RSI_BUY_MAX and entry > ema50:
+        direction = "BUY"
+    elif RSI_SELL_MIN <= rsi_val <= RSI_SELL_MAX and entry < ema50:
+        direction = "SELL"
 
     if direction is None:
         _CACHE[ticker] = (now, None); return None
 
-    # RSI confirmation on the latest candle.
-    last = df.iloc[-1]
-    rsi_val   = float(last["rsi"])
-    ema_fast  = float(last["ema_fast"])
-    ema_slow  = float(last["ema_slow"])
-    entry     = float(last["close"])
-
-    if direction == "BUY" and not (RSI_BUY_MIN <= rsi_val <= RSI_BUY_MAX):
-        _CACHE[ticker] = (now, None); return None
-    if direction == "SELL" and not (RSI_SELL_MIN <= rsi_val <= RSI_SELL_MAX):
-        _CACHE[ticker] = (now, None); return None
-
-    # ── EMA50 trend filter: never fade the higher-TF trend.
-    try:
-        ema_trend = float(last["ema_trend"])
-        if direction == "BUY" and entry < ema_trend:
-            _CACHE[ticker] = (now, None); return None
-        if direction == "SELL" and entry > ema_trend:
-            _CACHE[ticker] = (now, None); return None
-    except Exception:
-        pass
-
-    # ── Candle body strength: weak indecision candles are skipped.
+    # ── Candle body conviction (bullish/bearish body matches direction)
     try:
         c_open  = float(last["open"])
         c_high  = float(last["high"])
@@ -274,7 +199,6 @@ def analyze_pair(pair: str) -> Optional[dict]:
         body    = abs(c_close - c_open)
         if body / c_range < MIN_BODY_RATIO:
             _CACHE[ticker] = (now, None); return None
-        # Body must be in the trade direction
         if direction == "BUY" and c_close < c_open:
             _CACHE[ticker] = (now, None); return None
         if direction == "SELL" and c_close > c_open:
@@ -282,55 +206,20 @@ def analyze_pair(pair: str) -> Optional[dict]:
     except Exception:
         pass
 
-    # ── PRO V3: ATR volatility floor — skip dead-chop pairs.
-    # Dead, low-volatility ranges generate the bulk of false signals
-    # because price wanders both sides of EMA without committing.
-    # Require at least MIN_ATR_PCT of price as the rolling 14-bar ATR.
+    # ── ATR volatility floor — skip dead-chop markets ──────────
     try:
         h = df["high"].astype(float)
         l = df["low"].astype(float)
         c = df["close"].astype(float)
-        prev_c = c.shift(1)
-        tr = (h - l).combine((h - prev_c).abs(), max).combine(
-            (l - prev_c).abs(), max
-        )
-        atr = tr.rolling(14).mean().iloc[-1]
-        if entry > 0 and (float(atr) / entry) < MIN_ATR_PCT:
+        tr = (h - l).combine((h - c.shift(1)).abs(), max).combine(
+            (l - c.shift(1)).abs(), max)
+        atr = float(tr.rolling(14).mean().iloc[-1])
+        if entry > 0 and (atr / entry) < MIN_ATR_PCT:
             _CACHE[ticker] = (now, None); return None
     except Exception:
         pass
 
-    # ── PRO V7: MACD histogram confirmation ──────────────────
-    # The MACD histogram (12/26/9) must agree with the direction:
-    # positive histogram → BUY momentum; negative → SELL momentum.
-    # We do NOT require the histogram to be growing — that filter
-    # was too strict and blocked valid re-entry setups.
-    try:
-        _, _, hist = _macd(close)
-        h_last = float(hist.iloc[-1])
-        if direction == "BUY" and h_last <= 0:
-            _CACHE[ticker] = (now, None); return None
-        if direction == "SELL" and h_last >= 0:
-            _CACHE[ticker] = (now, None); return None
-    except Exception:
-        pass
-
-    # ── PRO V7: ADX trend-strength gate ──────────────────────
-    # Kill all entries in ranging / consolidation markets.
-    # ADX < 18 = flat chop → skip. ADX ≥ 18 = directional move.
-    try:
-        adx_series = _adx(df)
-        if adx_series is not None:
-            adx_val = float(adx_series.iloc[-1])
-            if adx_val < 18:
-                _CACHE[ticker] = (now, None); return None
-    except Exception:
-        pass
-
-    # ── PRO V7: MASTERMIND GATE ───────────────────────────────
-    # Run the full institutional analysis (AMD, OTE, MSS, Kill Zone,
-    # PDH/PDL, EQL/EQH, weekly bias). A REJECT verdict from the
-    # mastermind is a hard block — never fade the institutional read.
+    # ── MASTERMIND institutional gate (keep — not an indicator) ──
     if _mastermind is not None:
         try:
             _mm = _mastermind(pair, direction)
@@ -339,24 +228,18 @@ def analyze_pair(pair: str) -> Optional[dict]:
         except Exception:
             pass
 
-    # EMA slope over the last 5 bars (momentum strength).
-    try:
-        slope_pct = (float(df["ema_fast"].iloc[-1])
-                     - float(df["ema_fast"].iloc[-6])) \
-                    / max(1e-9, float(df["ema_fast"].iloc[-6]))
-    except Exception:
-        slope_pct = 0.0
+    # ── RSI momentum (acceleration from prior bar) ─────────────
+    rsi_momentum = rsi_val - float(prev["rsi"])
 
-    score = _score_setup(direction, rsi_val, slope_pct, fresh_bars)
+    score = _score_setup(direction, rsi_val, rsi_momentum)
     setup = {
         "direction":  direction,
         "entry":      entry,
         "rsi":        round(rsi_val, 1),
-        "ema_fast":   ema_fast,
-        "ema_slow":   ema_slow,
+        "ema50":      round(ema50, 5),
         "score":      score,
-        "fresh_bars": fresh_bars,
-        "reason":     f"EMA{EMA_FAST}/{EMA_SLOW} cross + RSI {rsi_val:.0f}",
+        "fresh_bars": 0,
+        "reason":     "RSI {:.0f} + EMA50 {} price".format(rsi_val, "above" if direction=="BUY" else "below"),
     }
     _CACHE[ticker] = (now, setup)
     return setup
@@ -399,20 +282,20 @@ _MTF_TTL   = 25.0   # Elite: 25s (was 90s — biggest lag source in the system)
 
 
 def _bias_from_closes(closes) -> int:
-    """Return +1 (bull), -1 (bear), 0 (flat) from a closes series."""
-    if closes is None or len(closes) < EMA_SLOW + 2:
+    """Return +1 (bull), -1 (bear), 0 (flat) from a closes series.
+    V10: price vs EMA50 + RSI(14) zone — no EMA crossover lag.
+    """
+    if closes is None or len(closes) < EMA_TREND + 2:
         return 0
-    fast = _ema(closes, EMA_FAST).iloc[-1]
-    slow = _ema(closes, EMA_SLOW).iloc[-1]
-    rsi  = _rsi(closes, RSI_PERIOD).iloc[-1]
     try:
-        fast = float(fast); slow = float(slow); rsi = float(rsi)
+        ema50 = float(_ema(closes, EMA_TREND).iloc[-1])
+        rsi   = float(_rsi(closes, RSI_PERIOD).iloc[-1])
+        price = float(closes.iloc[-1])
     except Exception:
         return 0
-    # Bull when fast > slow AND RSI not exhausted; mirror for bear.
-    if fast > slow and rsi >= RSI_BUY_MIN:
+    if price > ema50 and rsi >= RSI_BUY_MIN:
         return 1
-    if fast < slow and rsi <= RSI_SELL_MAX:
+    if price < ema50 and rsi <= RSI_SELL_MAX:
         return -1
     return 0
 
@@ -632,77 +515,75 @@ def binary_sniper_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
     df_15m = _fetch_tf(ticker, "15m", "10d")
     df_30m = _fetch_tf(ticker, "30m", "20d")
 
-    # V1 + V2 + V3 — all from the 5m chart
-    if df_5m is not None and "close" in df_5m.columns and len(df_5m) >= 30:
+    # ── V1: 5m RSI(14) direction — primary trend strength ──────
+    if df_5m is not None and "close" in df_5m.columns and len(df_5m) >= 20:
         try:
             cl5  = df_5m["close"].squeeze().astype(float).dropna()
             op5  = df_5m["open"].squeeze().astype(float)
             hi5  = df_5m["high"].squeeze().astype(float)
             lo5  = df_5m["low"].squeeze().astype(float)
 
-            # V1: 5m EMA9 vs EMA21
-            ef = float(_ema(cl5, 9).iloc[-1])
-            es = float(_ema(cl5, 21).iloc[-1])
-            if ef > es:
-                votes["5m_ema"] = +1;  reasons.append("5m EMA bull")
-            elif ef < es:
-                votes["5m_ema"] = -1;  reasons.append("5m EMA bear")
-            else:
-                votes["5m_ema"] = 0
-
-            # V2: 5m RSI zone — tightened to 58/42 for higher conviction
+            # V1: 5m RSI(14) — core strength indicator
             rsi5 = float(_rsi(cl5, 14).iloc[-1])
-            if rsi5 >= 58:
-                votes["5m_rsi"] = +1;  reasons.append(f"5m RSI {rsi5:.0f} bull")
-            elif rsi5 <= 42:
-                votes["5m_rsi"] = -1;  reasons.append(f"5m RSI {rsi5:.0f} bear")
+            if rsi5 >= 55:
+                votes["5m_rsi"] = +1; reasons.append(f"5m RSI {rsi5:.0f} bull momentum")
+            elif rsi5 <= 45:
+                votes["5m_rsi"] = -1; reasons.append(f"5m RSI {rsi5:.0f} bear momentum")
             else:
-                votes["5m_rsi"] = 0    # neutral — abstain
+                votes["5m_rsi"] = 0
+
+            # V2: 5m price vs EMA50 — trend direction (no crossover lag)
+            ema50_5m = float(_ema(cl5, EMA_TREND).iloc[-1])
+            price_5m = float(cl5.iloc[-1])
+            if price_5m > ema50_5m:
+                votes["5m_ema50"] = +1; reasons.append("5m price > EMA50 (bull trend)")
+            elif price_5m < ema50_5m:
+                votes["5m_ema50"] = -1; reasons.append("5m price < EMA50 (bear trend)")
+            else:
+                votes["5m_ema50"] = 0
 
             # V3: last completed 5m candle body direction
-            # Use the bar BEFORE the current one — the current bar is still
-            # forming, making it unreliable. The previous CLOSED bar is final.
             c_close = float(cl5.iloc[-2])
             c_open  = float(op5.iloc[-2])
             c_range = max(1e-9, float(hi5.iloc[-2]) - float(lo5.iloc[-2]))
             c_body  = abs(c_close - c_open)
-            if c_body / c_range >= 0.45:   # meaningful body (≥45% of range)
+            if c_body / c_range >= 0.45:
                 if c_close > c_open:
                     votes["5m_body"] = +1; reasons.append("5m body bull")
                 else:
                     votes["5m_body"] = -1; reasons.append("5m body bear")
             else:
-                votes["5m_body"] = 0       # doji / indecision — abstain
+                votes["5m_body"] = 0
         except Exception:
             pass
 
-    # V4 + V5 — 15m chart
-    if df_15m is not None and "close" in df_15m.columns and len(df_15m) >= 25:
+    # ── V4 + V5: 15m RSI(14) + EMA50 ──────────────────────────
+    if df_15m is not None and "close" in df_15m.columns and len(df_15m) >= 55:
         try:
             cl15 = df_15m["close"].squeeze().astype(float).dropna()
 
-            # V4: 15m EMA9 vs EMA21
-            ef15 = float(_ema(cl15, 9).iloc[-1])
-            es15 = float(_ema(cl15, 21).iloc[-1])
-            if ef15 > es15:
-                votes["15m_ema"] = +1; reasons.append("15m EMA bull")
-            elif ef15 < es15:
-                votes["15m_ema"] = -1; reasons.append("15m EMA bear")
-            else:
-                votes["15m_ema"] = 0
-
-            # V5: 15m RSI zone — tightened to 58/42
+            # V4: 15m RSI(14) — medium-term strength
             rsi15 = float(_rsi(cl15, 14).iloc[-1])
-            if rsi15 >= 58:
+            if rsi15 >= 55:
                 votes["15m_rsi"] = +1; reasons.append(f"15m RSI {rsi15:.0f} bull")
-            elif rsi15 <= 42:
+            elif rsi15 <= 45:
                 votes["15m_rsi"] = -1; reasons.append(f"15m RSI {rsi15:.0f} bear")
             else:
                 votes["15m_rsi"] = 0
+
+            # V5: 15m price vs EMA50 — trend context
+            ema50_15m = float(_ema(cl15, EMA_TREND).iloc[-1])
+            price_15m = float(cl15.iloc[-1])
+            if price_15m > ema50_15m:
+                votes["15m_ema50"] = +1; reasons.append("15m price > EMA50 (bull)")
+            elif price_15m < ema50_15m:
+                votes["15m_ema50"] = -1; reasons.append("15m price < EMA50 (bear)")
+            else:
+                votes["15m_ema50"] = 0
         except Exception:
             pass
 
-    # V6 — 30m RSI
+    # ── V6: 30m RSI(14) — wider context ────────────────────────
     if df_30m is not None and "close" in df_30m.columns and len(df_30m) >= 25:
         try:
             cl30 = df_30m["close"].squeeze().astype(float).dropna()
@@ -716,42 +597,21 @@ def binary_sniper_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
         except Exception:
             pass
 
-    # ── V7 (NEW): 5m MACD(5/13/3) histogram — zero-lag momentum gate ───
-    # Positive hist = bullish momentum; negative = bearish. Fresh zero cross
-    # is the strongest variant. This eliminates waning-momentum entries.
-    if df_5m is not None and "close" in df_5m.columns and len(df_5m) >= 20:
-        try:
-            cl5_v7 = df_5m["close"].squeeze().astype(float).dropna()
-            _, _, bsh7 = _macd(cl5_v7, fast=5, slow=13, signal=3)
-            bsh7_now  = float(bsh7.iloc[-1])
-            bsh7_prev = float(bsh7.iloc[-2])
-            if bsh7_now > 0 and bsh7_prev <= 0:
-                votes["v7_macd"] = +1; reasons.append("5m MACD fresh BULL zero cross")
-            elif bsh7_now < 0 and bsh7_prev >= 0:
-                votes["v7_macd"] = -1; reasons.append("5m MACD fresh BEAR zero cross")
-            elif bsh7_now > 0:
-                votes["v7_macd"] = +1; reasons.append("5m MACD hist positive (bull momentum)")
-            elif bsh7_now < 0:
-                votes["v7_macd"] = -1; reasons.append("5m MACD hist negative (bear momentum)")
-        except Exception:
-            pass
-
-    # ── V8 (NEW): 5m ATR expansion — institutional surge filter ─────────
-    # Current 5m bar range > 1.3× the 14-bar ATR = real breakout, not chop.
+    # ── V7: 5m ATR surge — institutional breakout confirmation ─
     if df_5m is not None and "high" in df_5m.columns and len(df_5m) >= 18:
         try:
             h5v = df_5m["high"].squeeze().astype(float).dropna()
             l5v = df_5m["low"].squeeze().astype(float).dropna()
             c5v = df_5m["close"].squeeze().astype(float).dropna()
-            atr5v     = (h5v - l5v).rolling(14).mean()
-            last_rng  = float(h5v.iloc[-1]) - float(l5v.iloc[-1])
+            atr5v    = (h5v - l5v).rolling(14).mean()
+            last_rng = float(h5v.iloc[-1]) - float(l5v.iloc[-1])
             avg_atr5v = float(atr5v.iloc[-2]) if float(atr5v.iloc[-2]) > 0 else 1e-10
             if last_rng >= 1.3 * avg_atr5v:
                 last_bull5v = float(c5v.iloc[-1]) > float(c5v.iloc[-2])
                 if last_bull5v:
-                    votes["v8_atr"] = +1; reasons.append(f"5m ATR expansion {last_rng/avg_atr5v:.1f}× — BULL surge")
+                    votes["v7_atr"] = +1; reasons.append(f"5m ATR {last_rng/avg_atr5v:.1f}× surge BULL")
                 else:
-                    votes["v8_atr"] = -1; reasons.append(f"5m ATR expansion {last_rng/avg_atr5v:.1f}× — BEAR surge")
+                    votes["v7_atr"] = -1; reasons.append(f"5m ATR {last_rng/avg_atr5v:.1f}× surge BEAR")
         except Exception:
             pass
 
@@ -907,15 +767,15 @@ def quick_momentum_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
             else:
                 votes["5m_rsi7"] = 0
 
-            # V3: 5m EMA(5) vs EMA(13)
-            ef5  = float(_ema(cl5, 5).iloc[-1])
-            es13 = float(_ema(cl5, 13).iloc[-1])
-            if ef5 > es13:
-                votes["5m_ema5"] = +1; reasons.append("5m EMA5>13 bull")
-            elif ef5 < es13:
-                votes["5m_ema5"] = -1; reasons.append("5m EMA5<13 bear")
+            # V3: 5m price vs EMA50 — trend direction (no crossover lag)
+            ema50_v = float(_ema(cl5, EMA_TREND).iloc[-1])
+            price_v = float(cl5.iloc[-1])
+            if price_v > ema50_v:
+                votes["5m_ema50"] = +1; reasons.append("5m > EMA50 bull")
+            elif price_v < ema50_v:
+                votes["5m_ema50"] = -1; reasons.append("5m < EMA50 bear")
             else:
-                votes["5m_ema5"] = 0
+                votes["5m_ema50"] = 0
 
             # ATR-based ultra-volatility flag
             try:
@@ -929,44 +789,29 @@ def quick_momentum_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
         except Exception:
             pass
 
-    # ── V4 + V5 + V6  from 15m ────────────────────────────────
-    if df_15m is not None and "close" in df_15m.columns and len(df_15m) >= 25:
+    # ── V4 + V5 from 15m — RSI(14) + EMA50 ───────────────────
+    if df_15m is not None and "close" in df_15m.columns and len(df_15m) >= 55:
         try:
             cl15 = df_15m["close"].squeeze().astype(float).dropna()
 
-            # V4: 15m RSI(14) mid-line
+            # V4: 15m RSI(14) — medium-term strength
             rsi15 = float(_rsi(cl15, 14).iloc[-1])
-            if rsi15 > 50:
+            if rsi15 > 52:
                 votes["15m_rsi"] = +1; reasons.append(f"15m RSI {rsi15:.0f} bull")
-            elif rsi15 < 50:
+            elif rsi15 < 48:
                 votes["15m_rsi"] = -1; reasons.append(f"15m RSI {rsi15:.0f} bear")
             else:
                 votes["15m_rsi"] = 0
 
-            # V5: 15m EMA(9) vs EMA(21)
-            ef15 = float(_ema(cl15, 9).iloc[-1])
-            es15 = float(_ema(cl15, 21).iloc[-1])
-            if ef15 > es15:
-                votes["15m_ema"] = +1; reasons.append("15m EMA bull")
-            elif ef15 < es15:
-                votes["15m_ema"] = -1; reasons.append("15m EMA bear")
+            # V5: 15m price vs EMA50 — medium-trend direction
+            ema50_15 = float(_ema(cl15, EMA_TREND).iloc[-1])
+            price_15 = float(cl15.iloc[-1])
+            if price_15 > ema50_15:
+                votes["15m_ema50"] = +1; reasons.append("15m > EMA50 bull")
+            elif price_15 < ema50_15:
+                votes["15m_ema50"] = -1; reasons.append("15m < EMA50 bear")
             else:
-                votes["15m_ema"] = 0
-
-            # V6 (NEW): 5m MACD(5/13/3) histogram — zero-lag momentum
-            # Positive histogram = bullish momentum; negative = bearish.
-            # This is the fastest non-lagging momentum confirmation available.
-            try:
-                cl5_macd = df_5m["close"].squeeze().astype(float).dropna() if df_5m is not None else None
-                if cl5_macd is not None and len(cl5_macd) >= 20:
-                    _, _, macd_hist5 = _macd(cl5_macd, fast=5, slow=13, signal=3)
-                    h5 = float(macd_hist5.iloc[-1])
-                    if h5 > 0:
-                        votes["v6_macd"] = +1; reasons.append(f"5m MACD hist positive (bull momentum)")
-                    elif h5 < 0:
-                        votes["v6_macd"] = -1; reasons.append(f"5m MACD hist negative (bear momentum)")
-            except Exception:
-                pass
+                votes["15m_ema50"] = 0
 
         except Exception:
             pass
@@ -1588,31 +1433,31 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
     Uses ACTUAL 1m OHLCV data (not 5m or 15m approximations) combined with
     a 5m higher-timeframe trend filter to produce maximum-accuracy entries.
 
-    9 WEIGHTED SIGNALS
-    ──────────────────
-    M1  5m HTF alignment    wt 3  EMA9 vs EMA21 on 5m — the trend is your friend
-    M2  1m micro EMA cross  wt 3  EMA3 crosses EMA8 on 1m (fresh = last candle)
-    M3  1m RSI-7 momentum   wt 2  RSI7 > 58 bull / < 42 bear (ultra-fast)
-    M4  1m momentum candle  wt 3  body ≥ 70% of range — institutional conviction
-    M5  1m volume surge     wt 2  current bar > 1.8× avg — big player activity
-    M6  1m consecutive run  wt 1  2+ same-direction bars — sustained momentum
-    M7  1m MACD zero cross  wt 3  MACD hist just turned positive/negative
-    M8  1m micro OB retest  wt 3  price returns to last strong opposing candle
-    M9  1m stop hunt sweep  wt 3  ICT turtle soup — spike past swing + reversal
+    V10 CLEAN SIGNALS (RSI + EMA50 + Price Action — no lagging indicators)
+    ──────────────────────────────────────────────────────────────────────
+    M1  5m HTF: price vs EMA50 + RSI(14)  wt 3  trend direction (no cross lag)
+    M3  1m RSI(7) momentum                wt 2-3 strength/overbought/oversold
+    M4  1m momentum candle                wt 2-3 body ≥ 70% conviction
+    M5  1m volume surge                   wt 2   big player activity
+    M6  1m consecutive run                wt 1-2 sustained momentum
+    M8  1m micro order block retest       wt 3   institutional zone (price action)
+    M9  1m stop hunt sweep (ICT)          wt 3   liquidity grab reversal (price action)
+    M11 15m HTF: price vs EMA50 + RSI(14) wt 2   double HTF confirmation
+
+    Removed (lagging): M2 EMA cross, M7 MACD, M10 Stochastic, M12 WR, M13 CCI
+    Max possible weight: ~20 (LIVE) / ~17 (OTC, M1 skipped)
 
     THRESHOLDS
     ──────────
-    LIVE pairs  : weighted score ≥ 7, opposing ≤ 2. M1 (5m trend) MUST agree
-                  OR both M2 + M7 agree (micro cross + MACD = very strong).
-    OTC  pairs  : weighted score ≥ 5, opposing ≤ 2. Reversal logic — signals
-                  are interpreted in the OPPOSITE direction to the raw move.
+    LIVE pairs  : weighted score ≥ 8, opposing ≤ 1. M1 MUST agree.
+    OTC  pairs  : weighted score ≥ 5, opposing ≤ 2. Reversal logic.
 
     ACCURACY EDGE
     ─────────────
-    * All 1m data is the freshest data yfinance supplies — zero interpolation.
-    * M1 (5m trend) acts as a kill-switch for low-quality counter-trend signals.
-    * M9 (stop hunt) is the single highest-probability 1m binary signal known —
-      smart money sweeps retail stops at the swing high/low then reverses hard.
+    * RSI(14) on confirmed bars — no crossover lag whatsoever.
+    * M1 (5m EMA50+RSI) is the trend kill-switch; never counter-trend.
+    * M9 (stop hunt) is the highest-probability 1m signal — smart money
+      sweeps retail stops then reverses hard.
     """
     ticker = yf_ticker(pair)
     if not ticker:
@@ -1662,53 +1507,26 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
         # All candle-structure checks MUST use bar(-2) as the signal bar.
         c0 = bar1(-2);  c1 = bar1(-3);  c2 = bar1(-4)   # confirmed bars
 
-        # ── M1: 5m HTF alignment (wt 3) — LIVE trend filter only ──────────────
-        # EMA9 vs EMA21 on 5m. Used as kill-switch for LIVE pairs only.
-        # OTC: EMA trend following HURTS reversal accuracy — M1 is skipped for OTC.
-        # Instead OTC uses RSI extremes + exhaustion patterns for direction.
+        # ── M1: 5m HTF filter (wt 3) — price vs EMA50 + RSI(14) ────────────
+        # V10: replaced EMA9/21 crossover with the cleaner price-vs-EMA50 read.
+        # No crossover lag — if price is above EMA50 and RSI shows bull momentum,
+        # the higher-TF trend is bullish. Mirror for bearish.
+        # OTC: skipped (reversal engine, trend following hurts OTC accuracy).
         m1_dir = 0
-        if not is_otc and df_5m is not None and "close" in df_5m.columns and len(df_5m) >= 25:
+        if not is_otc and df_5m is not None and "close" in df_5m.columns and len(df_5m) >= 55:
             try:
-                cl5 = df_5m["close"].squeeze().astype(float).dropna()
-                ef5 = float(_ema(cl5, 9).iloc[-1])
-                es5 = float(_ema(cl5, 21).iloc[-1])
-                rsi5 = float(_rsi(cl5, 7).iloc[-1])
-                if ef5 > es5 and rsi5 > 50:
-                    m1_dir = -1       # 5m bullish → BUY signal (LIVE only)
+                cl5   = df_5m["close"].squeeze().astype(float).dropna()
+                ema50_5m = float(_ema(cl5, EMA_TREND).iloc[-1])
+                rsi14_5m = float(_rsi(cl5, RSI_PERIOD).iloc[-1])
+                price_5m = float(cl5.iloc[-1])
+                if price_5m > ema50_5m and rsi14_5m >= RSI_BUY_MIN:
+                    m1_dir = -1
                     votes["m1_htf"] = -1; weights["m1_htf"] = 3
-                    reasons.append(f"5m EMA9>{float(ef5):.4g} / EMA21={float(es5):.4g} BULL trend")
-                elif ef5 < es5 and rsi5 < 50:
-                    m1_dir = +1       # 5m bearish → SELL signal (LIVE only)
+                    reasons.append(f"5m > EMA50 + RSI {rsi14_5m:.0f} — BULL trend")
+                elif price_5m < ema50_5m and rsi14_5m <= RSI_SELL_MAX:
+                    m1_dir = +1
                     votes["m1_htf"] = +1; weights["m1_htf"] = 3
-                    reasons.append(f"5m EMA9<EMA21 BEAR trend")
-            except Exception:
-                pass
-
-        # ── M2: 1m micro EMA cross (wt 3) — LIVE only ───────────────────────
-        # EMA-3 crossed EMA-8 on the most recent confirmed 1m bar.
-        # OTC: EMA cross is trend-following — SKIPPED for OTC reversal engine.
-        # OTC reversal uses RSI, Stochastic, BB extremes instead.
-        if not is_otc:
-            try:
-                ema3 = _ema(cl1, 3)
-                ema8 = _ema(cl1, 8)
-                # GOD LEVEL FIX: use iloc[-2] (confirmed bar) for cross detection
-                e3_now  = float(ema3.iloc[-2]); e8_now  = float(ema8.iloc[-2])
-                e3_prev = float(ema3.iloc[-3]); e8_prev = float(ema8.iloc[-3])
-                fresh_bull_cross = (e3_prev <= e8_prev) and (e3_now >  e8_now)
-                fresh_bear_cross = (e3_prev >= e8_prev) and (e3_now <  e8_now)
-                if fresh_bull_cross:
-                    votes["m2_ema"] = -1; weights["m2_ema"] = 3
-                    reasons.append("1m EMA3 × EMA8 BULLISH cross (confirmed bar)")
-                elif fresh_bear_cross:
-                    votes["m2_ema"] = +1; weights["m2_ema"] = 3
-                    reasons.append("1m EMA3 × EMA8 BEARISH cross (confirmed bar)")
-                elif e3_now > e8_now:
-                    votes["m2_ema"] = -1; weights["m2_ema"] = 1
-                    reasons.append("1m EMA3>EMA8 bull bias (confirmed)")
-                else:
-                    votes["m2_ema"] = +1; weights["m2_ema"] = 1
-                    reasons.append("1m EMA3<EMA8 bear bias (confirmed)")
+                    reasons.append(f"5m < EMA50 + RSI {rsi14_5m:.0f} — BEAR trend")
             except Exception:
                 pass
 
@@ -1816,25 +1634,7 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
         except Exception:
             pass
 
-        # ── M7: 1m MACD histogram zero cross (wt 3) ──────────────────────
-        # MACD hist flipping sign on the 1m chart = momentum regime change.
-        try:
-            _, _, hist = _macd(cl1, fast=5, slow=13, signal=3)
-            # GOD LEVEL FIX: use iloc[-2] and iloc[-3] (confirmed bars)
-            h_now  = float(hist.iloc[-2])
-            h_prev = float(hist.iloc[-3])
-            if h_prev <= 0 and h_now > 0:
-                votes["m7_macd"] = -1; weights["m7_macd"] = 3
-                reasons.append("1m MACD histogram BULLISH zero cross (confirmed)")
-            elif h_prev >= 0 and h_now < 0:
-                votes["m7_macd"] = +1; weights["m7_macd"] = 3
-                reasons.append("1m MACD histogram BEARISH zero cross (confirmed)")
-            elif h_now > 0:
-                votes["m7_macd"] = -1; weights["m7_macd"] = 1
-            else:
-                votes["m7_macd"] = +1; weights["m7_macd"] = 1
-        except Exception:
-            pass
+        # M7 (MACD) removed — V10 clean engine uses RSI + EMA50 only.
 
         # ── M8: 1m micro order block retest (wt 3) ───────────────────────
         # Price enters the body range of the last STRONG opposing bar within
@@ -1893,115 +1693,37 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
         except Exception:
             pass
 
-        # ── M10 (NEW): Stochastic(5,3,3) K/D crossover on 1m (wt 2) ─────
-        # Stochastic is the fastest oscillator for 1m binary entries.
-        # K crossing above D in non-overbought zone = cleanest BUY trigger.
-        # K crossing below D in non-oversold zone = cleanest SELL trigger.
+        # M10 (Stochastic) removed — V10 clean engine uses RSI + EMA50 only.
+
+        # ── M11: 15m HTF filter — price vs EMA50 + RSI(14) ───────────────
+        # LIVE: 15m price vs EMA50 confirms the 5m trend (double HTF)
+        # OTC:  15m RSI(14) extremes only (reversal engine)
         try:
-            lo_min5 = lo1.rolling(5).min()
-            hi_max5 = hi1.rolling(5).max()
-            k_raw    = 100 * (cl1 - lo_min5) / (hi_max5 - lo_min5 + 1e-10)
-            k_line   = k_raw.rolling(3).mean()          # %K smoothed
-            d_line   = k_line.rolling(3).mean()          # %D signal
-            # GOD LEVEL FIX: use confirmed bar (-2) for stochastic
-            k_now    = float(k_line.iloc[-2])
-            k_prev   = float(k_line.iloc[-3])
-            d_now    = float(d_line.iloc[-2])
-            d_prev   = float(d_line.iloc[-3])
-            stoch_bull_cross = (k_prev <= d_prev) and (k_now > d_now) and k_now < 80
-            stoch_bear_cross = (k_prev >= d_prev) and (k_now < d_now) and k_now > 20
-            if stoch_bull_cross:
-                votes["m10_stoch"] = -1; weights["m10_stoch"] = 2
-                reasons.append(f"1m Stoch K({k_now:.0f}) cross above D → BUY signal")
-            elif stoch_bear_cross:
-                votes["m10_stoch"] = +1; weights["m10_stoch"] = 2
-                reasons.append(f"1m Stoch K({k_now:.0f}) cross below D → SELL signal")
-            elif k_now > d_now and k_now < 80:
-                votes["m10_stoch"] = -1; weights["m10_stoch"] = 1   # mild bull stoch
-            elif k_now < d_now and k_now > 20:
-                votes["m10_stoch"] = +1; weights["m10_stoch"] = 1   # mild bear stoch
+            df_15m_1m = _fetch_tf(ticker, "15m", "7d")
+            if df_15m_1m is not None and "close" in df_15m_1m.columns and len(df_15m_1m) >= 55:
+                cl15_1m  = df_15m_1m["close"].squeeze().astype(float).dropna()
+                rsi14_15 = float(_rsi(cl15_1m, RSI_PERIOD).iloc[-1])
+                if is_otc:
+                    if rsi14_15 > 80:
+                        votes["m11_15htf"] = +1; weights["m11_15htf"] = 2
+                        reasons.append(f"15m RSI {rsi14_15:.0f} OTC extreme OB → PUT")
+                    elif rsi14_15 < 20:
+                        votes["m11_15htf"] = -1; weights["m11_15htf"] = 2
+                        reasons.append(f"15m RSI {rsi14_15:.0f} OTC extreme OS → CALL")
+                else:
+                    ema50_15m = float(_ema(cl15_1m, EMA_TREND).iloc[-1])
+                    price_15m = float(cl15_1m.iloc[-1])
+                    if price_15m > ema50_15m and rsi14_15 >= RSI_BUY_MIN:
+                        votes["m11_15htf"] = -1; weights["m11_15htf"] = 2
+                        reasons.append(f"15m > EMA50 + RSI {rsi14_15:.0f} BULL (double HTF)")
+                    elif price_15m < ema50_15m and rsi14_15 <= RSI_SELL_MAX:
+                        votes["m11_15htf"] = +1; weights["m11_15htf"] = 2
+                        reasons.append(f"15m < EMA50 + RSI {rsi14_15:.0f} BEAR (double HTF)")
         except Exception:
             pass
 
-        # ── M11 (NEW): 15m HTF RSI filter (wt 2) — LIVE trend / OTC extreme ──
-        # LIVE: 15m EMA9/EMA21 double confirmation = near-zero noise
-        # OTC:  15m RSI extremes only (EMA trend-following skipped for OTC)
-        if df_5m is not None:
-            try:
-                df_15m_1m = _fetch_tf(ticker, "15m", "7d")
-                if df_15m_1m is not None and "close" in df_15m_1m.columns and len(df_15m_1m) >= 25:
-                    cl15_1m = df_15m_1m["close"].squeeze().astype(float).dropna()
-                    rsi15_1m = float(_rsi(cl15_1m, 7).iloc[-1])
-                    if is_otc:
-                        # OTC: 15m RSI at extreme adds reversal weight
-                        if rsi15_1m > 80:
-                            votes["m11_15htf"] = +1; weights["m11_15htf"] = 2
-                            reasons.append(f"15m RSI(7) {rsi15_1m:.0f} OTC extreme OB → PUT")
-                        elif rsi15_1m < 20:
-                            votes["m11_15htf"] = -1; weights["m11_15htf"] = 2
-                            reasons.append(f"15m RSI(7) {rsi15_1m:.0f} OTC extreme OS → CALL")
-                    else:
-                        ef15 = float(_ema(cl15_1m, 9).iloc[-1])
-                        es15 = float(_ema(cl15_1m, 21).iloc[-1])
-                        if ef15 > es15 and rsi15_1m > 50:
-                            votes["m11_15htf"] = -1; weights["m11_15htf"] = 2
-                            reasons.append(f"15m EMA9>EMA21 BULL alignment (double HTF)")
-                        elif ef15 < es15 and rsi15_1m < 50:
-                            votes["m11_15htf"] = +1; weights["m11_15htf"] = 2
-                            reasons.append(f"15m EMA9<EMA21 BEAR alignment (double HTF)")
-            except Exception:
-                pass
-
-        # ── M12: Williams %R (period 14) on 1m (wt 2) ────────────────────
-        # More responsive than RSI for short-timeframe binary entries.
-        # WR < -80 = deeply oversold → BUY; WR > -20 = overbought → SELL.
-        # Confirmed bar (-2) used per GOD LEVEL fix.
-        try:
-            hi_max14 = hi1.rolling(14).max()
-            lo_min14 = lo1.rolling(14).min()
-            wr = -100 * (hi_max14 - cl1) / (hi_max14 - lo_min14 + 1e-10)
-            wr_now  = float(wr.iloc[-2])
-            wr_prev = float(wr.iloc[-3])
-            if wr_now < -80:
-                votes["m12_wr"] = -1; weights["m12_wr"] = 2
-                reasons.append(f"Williams %R {wr_now:.0f} OVERSOLD → CALL (confirmed)")
-            elif wr_now > -20:
-                votes["m12_wr"] = +1; weights["m12_wr"] = 2
-                reasons.append(f"Williams %R {wr_now:.0f} OVERBOUGHT → PUT (confirmed)")
-            elif wr_now < -60 and wr_now > wr_prev:
-                votes["m12_wr"] = -1; weights["m12_wr"] = 1
-                reasons.append(f"Williams %R recovering from oversold — bull lean")
-            elif wr_now > -40 and wr_now < wr_prev:
-                votes["m12_wr"] = +1; weights["m12_wr"] = 1
-                reasons.append(f"Williams %R falling from overbought — bear lean")
-        except Exception:
-            pass
-
-        # ── M13: CCI(14) — Commodity Channel Index (wt 2) ────────────────
-        # CCI > +100 = bullish momentum breakout; < -100 = bearish breakout.
-        # CCI crossing zero from below = fresh bull signal; above = bear.
-        # Uses confirmed bar (-2) per GOD LEVEL standard.
-        try:
-            tp = (hi1 + lo1 + cl1) / 3.0   # typical price
-            tp_sma = tp.rolling(14).mean()
-            tp_mad = tp.rolling(14).apply(lambda x: abs(x - x.mean()).mean(), raw=True)
-            cci = (tp - tp_sma) / (0.015 * tp_mad.replace(0, 1e-10))
-            cci_now  = float(cci.iloc[-2])
-            cci_prev = float(cci.iloc[-3])
-            if cci_now > 100:
-                votes["m13_cci"] = -1; weights["m13_cci"] = 2
-                reasons.append(f"CCI {cci_now:.0f} BULL breakout momentum (confirmed)")
-            elif cci_now < -100:
-                votes["m13_cci"] = +1; weights["m13_cci"] = 2
-                reasons.append(f"CCI {cci_now:.0f} BEAR breakout momentum (confirmed)")
-            elif cci_prev < 0 < cci_now:
-                votes["m13_cci"] = -1; weights["m13_cci"] = 1
-                reasons.append(f"CCI zero-cross UP → bull lean")
-            elif cci_prev > 0 > cci_now:
-                votes["m13_cci"] = +1; weights["m13_cci"] = 1
-                reasons.append(f"CCI zero-cross DOWN → bear lean")
-        except Exception:
-            pass
+        # M12 (Williams %R) removed — V10 clean engine.
+        # M13 (CCI)         removed — V10 clean engine.
 
     except Exception:
         _1M_CACHE[ticker] = (now, None)
@@ -2034,13 +1756,12 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
             return None
 
     if is_otc:
-        # OTC Elite: threshold 7 — all signals now reversal-oriented, raise bar
-        threshold     = 7
+        # OTC V10: 5 of ~17 max weight required (same precision bar as before)
+        threshold     = 5
         max_opposing  = 2
     else:
-        # LIVE: SUPREME threshold 12 — only the clearest setups fire
-        # Raised from 9 → 12 to eliminate weak Monday / chop signals
-        threshold     = 12
+        # LIVE V10: 8 of ~20 max weight — clean high-quality setups only
+        threshold     = 8
         max_opposing  = 1   # zero tolerance for opposing signals on LIVE 1m
 
     direction: Optional[str] = None
@@ -2066,8 +1787,8 @@ def one_minute_sniper(pair: str, is_otc: bool = False) -> Optional[dict]:
             _1M_CACHE[ticker] = (now, None)
             return None
 
-    confidence = round(min(1.0, total_wt / 29.0), 3)   # max possible = 29 (M1-M13)
-    elite      = total_wt >= 14
+    confidence = round(min(1.0, total_wt / 20.0), 3)   # V10 max ~20 (8 signals)
+    elite      = total_wt >= 12
 
     result = {
         "direction":    direction,
