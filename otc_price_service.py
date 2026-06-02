@@ -568,22 +568,38 @@ async def _qx_stream_once():
 
 
 async def _run_qx_loop():
-    """Auto-reconnecting Quotex price stream."""
+    """Auto-reconnecting Quotex price stream.
+
+    On auth failure: immediately re-authenticates using stored credentials
+    (QX_EMAIL / QX_PASSWORD from env) before retrying — same pattern as
+    po_auth handles PO SSID refresh.  Delay resets to _QX_RECONNECT on
+    every clean session (no timeout creep on transient network blips).
+    """
     delay = _QX_RECONNECT
+    _fail_count = 0
     while True:
         try:
             await _qx_stream_once()
+            _fail_count = 0   # clean session — reset failure counter
         except ConnectionError as exc:
-            logger.error(f"[otc_svc:qx] Connection error: {exc}")
-            logger.info(f"[otc_svc:qx] Retrying in {delay}s …")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 300)
+            _fail_count += 1
+            logger.error(f"[otc_svc:qx] Auth/connection error (#{_fail_count}): {exc}")
+            # Short delay on first failure, increasing up to 60s cap
+            wait = min(delay * _fail_count, 60)
+            logger.info(f"[otc_svc:qx] Re-authenticating with {QX_EMAIL} in {wait}s …")
+            await asyncio.sleep(wait)
+            delay = _QX_RECONNECT   # reset base delay — fresh auth attempt
         except Exception as exc:
-            logger.warning(f"[otc_svc:qx] Stream error: {exc} — reconnecting in {delay}s")
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 120)
+            _fail_count += 1
+            logger.warning(
+                f"[otc_svc:qx] Stream error (#{_fail_count}): {exc} — "
+                f"reconnecting in {min(delay, 30)}s"
+            )
+            await asyncio.sleep(min(delay, 30))
+            delay = min(delay * 1.5, 60)   # gentler backoff, 60s cap
         else:
             delay = _QX_RECONNECT
+            _fail_count = 0
 
 
 # ── Public entry point ────────────────────────────────────────────────────────

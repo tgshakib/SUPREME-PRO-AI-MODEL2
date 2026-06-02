@@ -149,6 +149,14 @@ except Exception as _fxe:
     _FINORIX_OK = False
 
 try:
+    from finorix_mtf_engine import finorix_mtf_analyse as _finorix_mtf_analyse
+    _FINORIX_MTF_OK = True
+except Exception as _fmtfe:
+    print(f"[signals] finorix_mtf_engine import failed: {_fmtfe}")
+    _finorix_mtf_analyse = None  # type: ignore
+    _FINORIX_MTF_OK = False
+
+try:
     from binary_master_filter import binary_master_check as _master_check
     _MASTER_OK = True
 except Exception as _mfe:
@@ -676,6 +684,32 @@ def generate_signal(
                 # Veto: 12-model split consensus — slight confidence dip
                 if _fx_res.get("veto") and not elite_confirmed:
                     confidence = max(90, (confidence or 97) - 3)
+            except Exception:
+                pass
+
+        # ── FINORIX AI MTF CHANNEL ENGINE — silent extra vote ─────────────
+        # Regression channel (FINORIX-style yellow bands) + dynamic S/R +
+        # MTF consensus (M1/M5/M15/H1). Works for ALL asset classes including
+        # OTC crypto / commodities / stocks / indices.
+        # Contract: zero side-effects — never modifies signal text.
+        if _FINORIX_MTF_OK and _finorix_mtf_analyse is not None and direction is not None:
+            try:
+                _mx2 = ("QX OTC" if "QX" in (market or "") else
+                        "PO OTC" if "PO" in (market or "") else
+                        "OTC"    if is_otc else "LIVE")
+                _fmtf = _finorix_mtf_analyse(pair, _mx2)
+                if _fmtf["direction"] not in ("WAIT", None):
+                    _engine_votes.append(_fmtf["direction"])
+                    # MTF ELITE grade → second vote (strong channel + SR alignment)
+                    if _fmtf["grade"] in ("GOD", "ULTRA", "ELITE"):
+                        _engine_votes.append(_fmtf["direction"])
+                    # Trend confirmation boost
+                    if _fmtf["direction"] == direction and _fmtf["confidence"] >= 68:
+                        confidence = min(100, (confidence or 97) + 1)
+                # MTF channel trend contradicts direction → mild confidence dip
+                elif _fmtf["direction"] not in ("WAIT", None) and _fmtf["direction"] != direction:
+                    if not elite_confirmed:
+                        confidence = max(90, (confidence or 97) - 2)
             except Exception:
                 pass
 
