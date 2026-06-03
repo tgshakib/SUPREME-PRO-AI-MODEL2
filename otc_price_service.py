@@ -495,74 +495,147 @@ async def _run_po_loop():
             delay = _PO_RECONNECT
 
 
-# ── Quotex pyquotex stream ────────────────────────────────────────────────────
+# ── Quotex quotexpy stream ─────────────────────────────────────────────────────
+# Uses quotexpy (Python 3.11 compatible) — same credentials, all 66 OTC pairs.
+# API differences vs old pyquotex:
+#   connect()            → bool (not tuple)
+#   get_instruments()    → must call before check_asset
+#   check_asset(name)    → (id, name, is_open) or None — is_open at index 2
+#   start_candles_stream(asset, period) → sync (not async)
+#   client.api.realtime_price[asset]    → list of tick dicts
+#   close()              → sync
 
 async def _qx_stream_once():
-    """Single Quotex WebSocket session — subscribes all OTC pairs, reads ticks."""
+    """Single Quotex WebSocket session using quotexpy — all OTC pairs."""
     try:
-        from pyquotex.stable_api import Quotex
+        from quotexpy import Quotex
+        from quotexpy.constants import codes_asset as _qx_codes
     except ImportError:
+        # Legacy fallbacks
         try:
-            from quotexapi.stable_api import Quotex
+            from pyquotex.stable_api import Quotex
+            _qx_codes = {}
         except ImportError:
-            logger.error("[otc_svc:qx] pyquotex not installed — QX stream disabled")
-            await asyncio.sleep(3600)
-            return
+            try:
+                from quotexapi.stable_api import Quotex
+                _qx_codes = {}
+            except ImportError:
+                logger.error("[otc_svc:qx] No Quotex library found — QX stream disabled")
+                await asyncio.sleep(3600)
+                return
 
-    client = Quotex(email=QX_EMAIL, password=QX_PASSWORD, lang="en")
-    logger.info(f"[otc_svc:qx] Connecting as {QX_EMAIL} …")
-    connected, reason = await client.connect()
+    client = Quotex(email=QX_EMAIL, password=QX_PASSWORD)
+    logger.info(f"[otc_svc:qx] Connecting with quotexpy as {QX_EMAIL} …")
+
+    try:
+        connected = await client.connect()
+    except Exception as exc:
+        raise ConnectionError(f"QX connect() raised: {exc}")
+
     if not connected:
-        raise ConnectionError(f"QX connect failed: {reason}")
-    logger.info("[otc_svc:qx] Connected — subscribing pairs …")
+        raise ConnectionError("QX connect() returned False — auth failed")
 
-    asset_map: Dict[str, str] = {}
+    logger.info("[otc_svc:qx] ✅ Connected — loading instruments …")
+
+    # Load instrument list (required before check_asset)
+    try:
+        await client.get_instruments()
+        await asyncio.sleep(1.0)   # let WS populate the list
+    except Exception as exc:
+        logger.warning(f"[otc_svc:qx] get_instruments failed: {exc} — continuing")
+
+    # ── Subscribe all OTC pairs ───────────────────────────────────────────────
+    asset_map: Dict[str, str] = {}   # normalised pair key → asset name
+    subscribed = 0
+
     for i in range(0, len(_QX_OTC_PAIRS), _QX_BATCH):
         batch = _QX_OTC_PAIRS[i: i + _QX_BATCH]
         for pair in batch:
+            # quotexpy asset name = upper-cased pair key e.g. "EURUSD_otc"
+            asset_name = pair.upper()
             try:
-                asset, info = await client.get_available_asset(pair, force_open=True)
-                if info and info[2]:
-                    await client.start_candles_stream(asset, _CANDLE_PERIOD)
-                    asset_map[pair] = asset
+                # Check asset via instruments list (is_open = index 2)
+                info = client.check_asset(asset_name)
+                if info is None:
+                    # Not in instruments — try codes_asset direct lookup
+                    if asset_name in _qx_codes or asset_name.lower() in _qx_codes:
+                        info = (None, asset_name, True)  # assume open
+                    else:
+                        continue
+
+                if not info[2]:   # is_open False → market closed
+                    continue
+
+                # subscribe_realtime_candle is sync in quotexpy
+                client.start_candles_stream(asset_name, _CANDLE_PERIOD)
+                asset_map[pair] = asset_name
+                subscribed += 1
             except Exception:
                 pass
         await asyncio.sleep(_QX_BATCH_DELAY)
 
-    logger.info(f"[otc_svc:qx] Subscribed {len(asset_map)}/{len(_QX_OTC_PAIRS)} pairs — streaming")
+    logger.info(
+        f"[otc_svc:qx] Subscribed {subscribed}/{len(_QX_OTC_PAIRS)} QX OTC pairs — streaming"
+    )
 
+    if subscribed == 0:
+        # No pairs active — market may be closed; back off and retry
+        try:
+            client.close()
+        except Exception:
+            pass
+        logger.info("[otc_svc:qx] 0 pairs open — market may be closed, retrying in 60s")
+        await asyncio.sleep(60)
+        return
+
+    # ── Real-time price loop ──────────────────────────────────────────────────
+    _no_data_streak = 0
     try:
         while True:
-            await asyncio.sleep(0.25)   # poll 4× per second for real-time accuracy
+            await asyncio.sleep(0.25)   # 4× per second
+
             try:
                 rt = client.api.realtime_price
             except Exception:
-                break
+                break   # API disconnected → exit to reconnect loop
+
+            got_any = False
             for pair, asset in asset_map.items():
                 try:
                     ticks = rt.get(asset)
                     if not ticks:
                         continue
                     latest = ticks[-1]
-                    for k in ("price", "close", "bid", "ask"):
+                    for k in ("price", "close", "bid", "ask", "value"):
                         v = latest.get(k)
                         if v is not None:
                             fv = float(v)
                             if fv > 0:
                                 _write_price(asset, fv, "qx")
-                                # Also write normalised key for cross-lookup
                                 _write_price(_normalize_pair(asset), fv, "qx")
+                                got_any = True
                                 break
                 except Exception:
                     pass
+
+            # Stale detection: if no ticks for >60s the connection is dead
+            if got_any:
+                _no_data_streak = 0
+            else:
+                _no_data_streak += 1
+                if _no_data_streak > 240:   # 60s × 4 polls/s = 240 cycles
+                    logger.warning("[otc_svc:qx] No ticks for 60s — reconnecting")
+                    break
+
     finally:
+        # Clean shutdown
         try:
             for asset in asset_map.values():
-                await client.stop_candles_stream(asset)
+                client.stop_candles_stream(asset)
         except Exception:
             pass
         try:
-            await client.close()
+            client.close()
         except Exception:
             pass
 
