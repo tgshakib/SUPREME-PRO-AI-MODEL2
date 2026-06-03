@@ -113,6 +113,17 @@ async def main():
     except Exception as _po_err:
         logger.warning(f"PO auth manager failed to start: {_po_err}")
 
+    # Quotex auto-login — Chrome-free SSID manager (mirrors PO auth manager)
+    try:
+        from qx_auth import run_qx_auth_manager, get_current_ssid as _qx_get_ssid
+        _qx_ssid = _qx_get_ssid()
+        if _qx_ssid:
+            os.environ["QUOTEX_SSID"] = _qx_ssid
+        asyncio.create_task(run_qx_auth_manager())
+        logger.info("[bot] QX auth manager started")
+    except Exception as _qx_err:
+        logger.warning(f"QX auth manager failed to start: {_qx_err}")
+
     # OTC live price service — streams QX + PO WebSocket ticks for all OTC pairs
     try:
         from otc_price_service import run_otc_price_service

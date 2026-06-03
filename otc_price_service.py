@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from threading import Lock
 from typing import Dict, Optional, Tuple
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 # ── Credentials ──────────────────────────────────────────────────────────────
 QX_EMAIL    = os.environ.get("QUOTEX_EMAIL",    "hosnaranupur@gmail.com")
 QX_PASSWORD = os.environ.get("QUOTEX_PASSWORD", "hosnaranupur@")
+QX_SSID     = os.environ.get("QUOTEX_SSID",    "")   # set by qx_auth manager
 
 PO_SSID = os.environ.get(
     "PO_SSID",
@@ -506,34 +508,68 @@ async def _run_po_loop():
 #   close()              → sync
 
 async def _qx_stream_once():
-    """Single Quotex WebSocket session using quotexpy — all OTC pairs."""
+    """Single Quotex WebSocket session using quotexpy — all OTC pairs.
+
+    Uses SSID from qx_auth (Chrome-free).  quotexpy accepts ssid= kwarg and
+    skips its Selenium/Chrome login path entirely when an SSID is provided.
+    """
     try:
         from quotexpy import Quotex
         from quotexpy.constants import codes_asset as _qx_codes
     except ImportError:
-        # Legacy fallbacks
-        try:
-            from pyquotex.stable_api import Quotex
-            _qx_codes = {}
-        except ImportError:
-            try:
-                from quotexapi.stable_api import Quotex
-                _qx_codes = {}
-            except ImportError:
-                logger.error("[otc_svc:qx] No Quotex library found — QX stream disabled")
-                await asyncio.sleep(3600)
-                return
+        logger.error("[otc_svc:qx] quotexpy not installed — QX stream disabled")
+        await asyncio.sleep(3600)
+        return
 
-    client = Quotex(email=QX_EMAIL, password=QX_PASSWORD)
-    logger.info(f"[otc_svc:qx] Connecting with quotexpy as {QX_EMAIL} …")
+    # ── Resolve SSID (Chrome-free) ─────────────────────────────────────────
+    # Priority: module-level QX_SSID (set by qx_auth) → env var → cache file
+    ssid = QX_SSID or os.environ.get("QUOTEX_SSID", "").strip()
+    if not ssid:
+        try:
+            from qx_auth import get_current_ssid as _qx_get
+            ssid = _qx_get()
+        except Exception:
+            pass
+    if not ssid or len(ssid) < 20:
+        logger.info("[otc_svc:qx] No QX SSID yet — waiting 30s for qx_auth …")
+        await asyncio.sleep(30)
+        return   # _run_qx_loop will retry
+
+    # quotexpy deletes sessions.pkl on every rejection — re-seed it every time
+    # so it never falls through to Chrome.
+    try:
+        from qx_auth import _seed_qxpy_session as _seed
+        _seed(ssid)
+    except Exception:
+        pass
+
+    # Pass ssid= kwarg → quotexpy checks sessions.pkl first (now seeded),
+    # then sends 42["authorization",{"session":ssid}] without Chrome.
+    client = Quotex(email=QX_EMAIL, password=QX_PASSWORD, ssid=ssid)
+    logger.info("[otc_svc:qx] Connecting to QX WebSocket (Chrome-free SSID) …")
 
     try:
         connected = await client.connect()
     except Exception as exc:
+        err_str = str(exc)
+        if "authorization" in err_str.lower() or "reject" in err_str.lower() or "SSID" in err_str:
+            # Signal qx_auth that the token was rejected so it can renew
+            try:
+                import qx_auth as _qa
+                _qa.QX_SSID_REJECTED = True
+            except Exception:
+                pass
         raise ConnectionError(f"QX connect() raised: {exc}")
 
     if not connected:
-        raise ConnectionError("QX connect() returned False — auth failed")
+        # Rejection already handled by quotexpy (deletes sessions.pkl)
+        # Signal qx_auth to renew
+        try:
+            import qx_auth as _qa
+            _qa.QX_SSID_REJECTED = True
+        except Exception:
+            pass
+        raise ConnectionError("QX connect() returned False — SSID rejected or expired")
 
     logger.info("[otc_svc:qx] ✅ Connected — loading instruments …")
 
@@ -643,25 +679,29 @@ async def _qx_stream_once():
 async def _run_qx_loop():
     """Auto-reconnecting Quotex price stream.
 
-    On auth failure: immediately re-authenticates using stored credentials
-    (QX_EMAIL / QX_PASSWORD from env) before retrying — same pattern as
-    po_auth handles PO SSID refresh.  Delay resets to _QX_RECONNECT on
-    every clean session (no timeout creep on transient network blips).
+    Waits gracefully when SSID is not yet available (qx_auth is still
+    starting up or token has not been set yet).  On auth rejection, signals
+    qx_auth to renew the token, then retries after a backoff.
     """
     delay = _QX_RECONNECT
     _fail_count = 0
     while True:
         try:
             await _qx_stream_once()
-            _fail_count = 0   # clean session — reset failure counter
+            _fail_count = 0   # clean session
+            delay = _QX_RECONNECT
         except ConnectionError as exc:
+            err_str = str(exc)
             _fail_count += 1
+            if "No QX SSID" in err_str or "waiting" in err_str:
+                # Not a real failure — SSID just not ready yet
+                await asyncio.sleep(30)
+                continue
             logger.error(f"[otc_svc:qx] Auth/connection error (#{_fail_count}): {exc}")
-            # Short delay on first failure, increasing up to 60s cap
-            wait = min(delay * _fail_count, 60)
-            logger.info(f"[otc_svc:qx] Re-authenticating with {QX_EMAIL} in {wait}s …")
+            wait = min(15 * _fail_count, 120)
+            logger.info(f"[otc_svc:qx] Retrying QX stream in {wait}s …")
             await asyncio.sleep(wait)
-            delay = _QX_RECONNECT   # reset base delay — fresh auth attempt
+            delay = _QX_RECONNECT
         except Exception as exc:
             _fail_count += 1
             logger.warning(
@@ -669,10 +709,7 @@ async def _run_qx_loop():
                 f"reconnecting in {min(delay, 30)}s"
             )
             await asyncio.sleep(min(delay, 30))
-            delay = min(delay * 1.5, 60)   # gentler backoff, 60s cap
-        else:
-            delay = _QX_RECONNECT
-            _fail_count = 0
+            delay = min(delay * 1.5, 60)
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -863,11 +900,22 @@ async def _yf_otc_poll_loop():
 async def run_otc_price_service():
     """Start both OTC price streams as concurrent tasks.
     Call once from bot.py:  asyncio.create_task(run_otc_price_service())
+
+    Each stream runs in its own task so a QX crash never kills PO/yf.
     """
     logger.info("[otc_svc] Starting unified OTC price service …")
     logger.info(f"[otc_svc] QX pairs: {len(_QX_OTC_PAIRS)}  |  PO pairs: {len(_PO_OTC_PAIRS)}")
 
-    qx_task   = asyncio.create_task(_run_qx_loop(),          name="otc-qx-stream")
+    # ── Isolated QX wrapper — never propagates exceptions upward ──────────────
+    async def _qx_safe():
+        while True:
+            try:
+                await _run_qx_loop()
+            except Exception as exc:
+                logger.error(f"[otc_svc:qx] Fatal error — restarting in 30s: {exc}")
+                await asyncio.sleep(30)
+
+    qx_task   = asyncio.create_task(_qx_safe(),              name="otc-qx-stream")
     po_task   = asyncio.create_task(_run_po_loop(),          name="otc-po-stream")
     sync_task = asyncio.create_task(_sync_from_po_candles(), name="otc-po-candle-sync")
     yf_task   = asyncio.create_task(_yf_otc_poll_loop(),     name="otc-yf-fallback")
@@ -892,5 +940,5 @@ async def run_otc_price_service():
 
     asyncio.create_task(_status_loop(), name="otc-status")
 
-    # Wait for all (they run forever / auto-reconnect)
-    await asyncio.gather(qx_task, po_task, sync_task, yf_task)
+    # PO/yf/sync are the critical paths — QX is already isolated above
+    await asyncio.gather(po_task, sync_task, yf_task)
