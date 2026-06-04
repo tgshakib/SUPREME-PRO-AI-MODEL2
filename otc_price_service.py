@@ -28,9 +28,10 @@ from typing import Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ── Credentials ──────────────────────────────────────────────────────────────
-QX_EMAIL    = os.environ.get("QUOTEX_EMAIL",    "hosnaranupur@gmail.com")
-QX_PASSWORD = os.environ.get("QUOTEX_PASSWORD", "hosnaranupur@")
-QX_SSID     = os.environ.get("QUOTEX_SSID",    "")   # set by qx_auth manager
+# pyquotex uses email+password directly — no SSID / Chrome needed
+QX_EMAIL    = os.environ.get("QX_EMAIL",    "falgunijakiyakhanom@gmail.com")
+QX_PASSWORD = os.environ.get("QX_PASSWORD", "falgunijakiyakhanom@")
+QX_SSID     = ""   # kept for compatibility — not used by pyquotex stream
 
 PO_SSID = os.environ.get(
     "PO_SSID",
@@ -497,113 +498,116 @@ async def _run_po_loop():
             delay = _PO_RECONNECT
 
 
-# ── Quotex quotexpy stream ─────────────────────────────────────────────────────
-# Uses quotexpy (Python 3.11 compatible) — same credentials, all 66 OTC pairs.
-# API differences vs old pyquotex:
-#   connect()            → bool (not tuple)
-#   get_instruments()    → must call before check_asset
-#   check_asset(name)    → (id, name, is_open) or None — is_open at index 2
-#   start_candles_stream(asset, period) → sync (not async)
-#   client.api.realtime_price[asset]    → list of tick dicts
-#   close()              → sync
+# ── Quotex pyquotex stream ─────────────────────────────────────────────────────
+# Uses pyquotex (iahmedani fork, Python 3.11 compatible via --ignore-requires-python)
+# Pure WebSocket auth — email + password only, no Chrome, no SSID needed.
+# API summary:
+#   connect()                        → (bool, str) — (success, reason)
+#   check_connect()                  → async bool
+#   start_candles_stream(asset, period) → async, subscribes WS ticks
+#   get_realtime_price(asset)        → async list[dict] from internal buffer
+#   close()                          → async
 
-async def _qx_stream_once():
-    """Single Quotex WebSocket session using quotexpy — all OTC pairs.
+def _seed_pyquotex_session(token: str) -> None:
+    """Pre-write session.json so pyquotex skips HTTP login entirely.
 
-    Uses SSID from qx_auth (Chrome-free).  quotexpy accepts ssid= kwarg and
-    skips its Selenium/Chrome login path entirely when an SSID is provided.
+    pyquotex checks session_data["token"] in _connect_unlocked():
+    if it is set, api.authenticate() (the Cloudflare-blocked HTTP step)
+    is completely bypassed and pyquotex goes straight to WebSocket.
     """
     try:
-        from quotexpy import Quotex
-        from quotexpy.constants import codes_asset as _qx_codes
+        import json as _json
+        from pathlib import Path
+        session_file = Path("session.json")
+        try:
+            all_sess = _json.loads(session_file.read_text()) if session_file.exists() else {}
+        except Exception:
+            all_sess = {}
+        all_sess[QX_EMAIL] = {
+            "cookies": f"token={token}",
+            "token":   token,
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        }
+        session_file.write_text(_json.dumps(all_sess, indent=4))
+        logger.debug("[otc_svc:qx] session.json seeded — HTTP auth will be skipped")
+    except Exception as exc:
+        logger.debug(f"[otc_svc:qx] session.json seed error: {exc}")
+
+
+async def _qx_stream_once():
+    """Single Quotex WebSocket session using pyquotex.
+
+    Two-path auth strategy:
+      1. If QUOTEX_SSID is set: seed session.json → pyquotex skips
+         Cloudflare-blocked HTTP login and goes straight to WebSocket.
+      2. No SSID: pyquotex attempts HTTP login with curl_cffi
+         (Chrome TLS fingerprint) — works on non-datacenter IPs.
+
+    Auto-subscribes all 66 OTC pairs and streams real-time tick prices
+    into the shared price buffer.
+    """
+    try:
+        from pyquotex.stable_api import Quotex, ProxyConfig
     except ImportError:
-        logger.error("[otc_svc:qx] quotexpy not installed — QX stream disabled")
+        logger.error("[otc_svc:qx] pyquotex not installed — run: "
+                     "pip install git+https://github.com/iahmedani/pyquotex.git "
+                     "--ignore-requires-python")
         await asyncio.sleep(3600)
         return
 
-    # ── Resolve SSID (Chrome-free) ─────────────────────────────────────────
-    # Priority: module-level QX_SSID (set by qx_auth) → env var → cache file
-    ssid = QX_SSID or os.environ.get("QUOTEX_SSID", "").strip()
-    if not ssid:
+    # ── Token bypass: skip Cloudflare HTTP auth ────────────────────────────
+    token = os.environ.get("QUOTEX_SSID", "").strip()
+    if not token:
         try:
-            from qx_auth import get_current_ssid as _qx_get
-            ssid = _qx_get()
+            from qx_auth import get_current_ssid as _gcs
+            token = _gcs() or ""
         except Exception:
             pass
-    if not ssid or len(ssid) < 20:
-        logger.info("[otc_svc:qx] No QX SSID yet — waiting 30s for qx_auth …")
-        await asyncio.sleep(30)
-        return   # _run_qx_loop will retry
 
-    # quotexpy deletes sessions.pkl on every rejection — re-seed it every time
-    # so it never falls through to Chrome.
+    if token and len(token) > 10:
+        _seed_pyquotex_session(token)
+        logger.info("[otc_svc:qx] SSID seeded → skipping Cloudflare HTTP auth")
+        _proxy_cfg = None   # WS doesn't need curl_cffi
+    else:
+        # No token — try HTTP login with curl_cffi TLS fingerprint
+        logger.info("[otc_svc:qx] No SSID — attempting HTTP login (curl_cffi) …")
+        try:
+            _proxy_cfg = ProxyConfig(use_browser_tls=True)
+        except Exception:
+            _proxy_cfg = None
+
+    client = Quotex(
+        email=QX_EMAIL,
+        password=QX_PASSWORD,
+        lang="en",
+        proxy_config=_proxy_cfg,
+    )
+    logger.info(f"[otc_svc:qx] Connecting via pyquotex ({QX_EMAIL}) …")
+
     try:
-        from qx_auth import _seed_qxpy_session as _seed
-        _seed(ssid)
-    except Exception:
-        pass
-
-    # Pass ssid= kwarg → quotexpy checks sessions.pkl first (now seeded),
-    # then sends 42["authorization",{"session":ssid}] without Chrome.
-    client = Quotex(email=QX_EMAIL, password=QX_PASSWORD, ssid=ssid)
-    logger.info("[otc_svc:qx] Connecting to QX WebSocket (Chrome-free SSID) …")
-
-    try:
-        connected = await client.connect()
+        check, reason = await client.connect()
     except Exception as exc:
-        err_str = str(exc)
-        if "authorization" in err_str.lower() or "reject" in err_str.lower() or "SSID" in err_str:
-            # Signal qx_auth that the token was rejected so it can renew
-            try:
-                import qx_auth as _qa
-                _qa.QX_SSID_REJECTED = True
-            except Exception:
-                pass
         raise ConnectionError(f"QX connect() raised: {exc}")
 
-    if not connected:
-        # Rejection already handled by quotexpy (deletes sessions.pkl)
-        # Signal qx_auth to renew
-        try:
-            import qx_auth as _qa
-            _qa.QX_SSID_REJECTED = True
-        except Exception:
-            pass
-        raise ConnectionError("QX connect() returned False — SSID rejected or expired")
+    if not check:
+        raise ConnectionError(f"QX connect() failed: {reason}")
 
-    logger.info("[otc_svc:qx] ✅ Connected — loading instruments …")
-
-    # Load instrument list (required before check_asset)
-    try:
-        await client.get_instruments()
-        await asyncio.sleep(1.0)   # let WS populate the list
-    except Exception as exc:
-        logger.warning(f"[otc_svc:qx] get_instruments failed: {exc} — continuing")
+    logger.info("[otc_svc:qx] ✅ Connected — subscribing OTC pairs …")
 
     # ── Subscribe all OTC pairs ───────────────────────────────────────────────
-    asset_map: Dict[str, str] = {}   # normalised pair key → asset name
+    asset_map: Dict[str, str] = {}   # normalised pair key → asset name (UPPER_OTC)
     subscribed = 0
 
     for i in range(0, len(_QX_OTC_PAIRS), _QX_BATCH):
         batch = _QX_OTC_PAIRS[i: i + _QX_BATCH]
         for pair in batch:
-            # quotexpy asset name = upper-cased pair key e.g. "EURUSD_otc"
-            asset_name = pair.upper()
+            asset_name = pair.upper()   # e.g. "EURUSD_OTC"
             try:
-                # Check asset via instruments list (is_open = index 2)
-                info = client.check_asset(asset_name)
-                if info is None:
-                    # Not in instruments — try codes_asset direct lookup
-                    if asset_name in _qx_codes or asset_name.lower() in _qx_codes:
-                        info = (None, asset_name, True)  # assume open
-                    else:
-                        continue
-
-                if not info[2]:   # is_open False → market closed
-                    continue
-
-                # subscribe_realtime_candle is sync in quotexpy
-                client.start_candles_stream(asset_name, _CANDLE_PERIOD)
+                await client.start_candles_stream(asset_name, _CANDLE_PERIOD)
                 asset_map[pair] = asset_name
                 subscribed += 1
             except Exception:
@@ -615,12 +619,8 @@ async def _qx_stream_once():
     )
 
     if subscribed == 0:
-        # No pairs active — market may be closed; back off and retry
-        try:
-            client.close()
-        except Exception:
-            pass
-        logger.info("[otc_svc:qx] 0 pairs open — market may be closed, retrying in 60s")
+        await client.close()
+        logger.info("[otc_svc:qx] 0 pairs subscribed — market may be closed, retrying in 60s")
         await asyncio.sleep(60)
         return
 
@@ -628,17 +628,21 @@ async def _qx_stream_once():
     _no_data_streak = 0
     try:
         while True:
-            await asyncio.sleep(0.25)   # 4× per second
+            await asyncio.sleep(0.5)   # 2× per second
 
+            # Verify connection is still alive
             try:
-                rt = client.api.realtime_price
+                still_up = await client.check_connect()
             except Exception:
-                break   # API disconnected → exit to reconnect loop
+                still_up = False
+            if not still_up:
+                logger.warning("[otc_svc:qx] Connection dropped — reconnecting")
+                break
 
             got_any = False
             for pair, asset in asset_map.items():
                 try:
-                    ticks = rt.get(asset)
+                    ticks = await client.get_realtime_price(asset)
                     if not ticks:
                         continue
                     latest = ticks[-1]
@@ -654,34 +658,27 @@ async def _qx_stream_once():
                 except Exception:
                     pass
 
-            # Stale detection: if no ticks for >60s the connection is dead
+            # Stale detection: 60s of no ticks → connection is silently dead
             if got_any:
                 _no_data_streak = 0
             else:
                 _no_data_streak += 1
-                if _no_data_streak > 240:   # 60s × 4 polls/s = 240 cycles
+                if _no_data_streak > 120:   # 60s × 2 polls/s = 120 cycles
                     logger.warning("[otc_svc:qx] No ticks for 60s — reconnecting")
                     break
 
     finally:
-        # Clean shutdown
         try:
-            for asset in asset_map.values():
-                client.stop_candles_stream(asset)
-        except Exception:
-            pass
-        try:
-            client.close()
+            await client.close()
         except Exception:
             pass
 
 
 async def _run_qx_loop():
-    """Auto-reconnecting Quotex price stream.
+    """Auto-reconnecting Quotex price stream (pyquotex — email/password auth).
 
-    Waits gracefully when SSID is not yet available (qx_auth is still
-    starting up or token has not been set yet).  On auth rejection, signals
-    qx_auth to renew the token, then retries after a backoff.
+    Connects directly via WebSocket — no SSID, no Chrome.
+    Retries with exponential backoff on any failure.
     """
     delay = _QX_RECONNECT
     _fail_count = 0
@@ -691,12 +688,7 @@ async def _run_qx_loop():
             _fail_count = 0   # clean session
             delay = _QX_RECONNECT
         except ConnectionError as exc:
-            err_str = str(exc)
             _fail_count += 1
-            if "No QX SSID" in err_str or "waiting" in err_str:
-                # Not a real failure — SSID just not ready yet
-                await asyncio.sleep(30)
-                continue
             logger.error(f"[otc_svc:qx] Auth/connection error (#{_fail_count}): {exc}")
             wait = min(15 * _fail_count, 120)
             logger.info(f"[otc_svc:qx] Retrying QX stream in {wait}s …")

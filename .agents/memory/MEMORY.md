@@ -2,3 +2,4 @@
 - [OTC Signal Direction Fixes](otc-signal-fixes.md) — binary sniper + vol sniper blocked from OTC (trend-following on synthetic prices = systematic losses); chart-conditions also blocked for OTC fallback
 - [Binary Master Filter](binary-master-filter.md) — supreme quality gate wired into signals.py after all engines vote; hard-blocks news/Friday/ATR spikes; OTC requires oscillator extremes; LIVE requires trend+ATR+conviction; BLOCKED crushes confidence to ≤62 (signal text unchanged)
 - [FINORIX MTF Channel Engine](finorix-mtf-engine.md) — new finorix_mtf_engine.py; regression channels + S/R + MTF consensus; signal text never modified; wired into signals.py as silent vote alongside existing finorix_engine
+- [QX pyquotex Cloudflare bypass](qx-pyquotex-cf-bypass.md) — Cloudflare blocks ALL HTTP login from Replit datacenter IPs; bypass = pre-seed session.json with real token; pyquotex skips HTTP auth when session_data["token"] is set
