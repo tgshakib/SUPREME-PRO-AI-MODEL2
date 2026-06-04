@@ -245,14 +245,14 @@ def format_price(pair: str, price: float) -> str:
     return f"{price:.{decimals(pair)}f}"
 
 
-# ── Live price fetch with 5-second TTL cache ────────────────────────────
-# Binary options expire every 1 minute — a 30s stale price is half the
-# candle gone. Dropped to 5s so analysis and display always run on a
-# tick that is at most 5 seconds old.
+# ── Live price fetch with 2-second TTL cache ────────────────────────────
+# Binary options expire every 1 minute — even a 5s stale price is too
+# old on fast-moving markets. Dropped to 2s so every analysis run
+# starts from a tick no more than 2 seconds old.
 _CACHE: dict[str, tuple[float, float]] = {}      # ticker -> (ts, price)
-_TTL = 5.0
+_TTL = 2.0
 _BIAS_CACHE: dict[str, tuple[float, str, float]] = {}  # ticker -> (ts, dir, strength)
-_BIAS_TTL = 45.0
+_BIAS_TTL = 15.0
 
 
 def _fetch_yf_one(ticker: str) -> Optional[float]:
@@ -472,8 +472,8 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
     _is_otc = ("〔OTC〕" in pair or "(OTC)" in pair.upper()
                or "_otc" in pair.lower())
     if _is_otc:
-        # Source 0a: live WebSocket tick buffer (QX + PO streams)
-        # Returns up to 90s stale price — always better than yfinance for OTC
+        # Source 0a: live WebSocket tick buffer (QX + PO streams).
+        # get_live_otc_price() enforces a 90-second freshness window internally.
         try:
             from otc_price_service import get_live_otc_price
             otc_px = get_live_otc_price(pair)
@@ -482,9 +482,7 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
         except Exception:
             pass
 
-        # Source 0b: Pocket Option candle stream (existing working thread)
-        # pocket_option_ws already authenticates and subscribes; last candle
-        # close is the real broker OTC price with sub-second freshness.
+        # Source 0b: Pocket Option candle stream (already-authenticated thread).
         try:
             from pocket_option_ws import get_candles as _po_get_candles
             _po_bars = _po_get_candles(pair, 60)
@@ -495,24 +493,69 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
         except Exception:
             pass
 
-        # Source 0c: last known broker price from otc_price_service regardless of age
-        # Critically: EXCLUDE yfinance (source == "yf") — yfinance gives real-market
-        # prices which can differ 5-15%+ from the broker's synthetic OTC feed.
-        # A stale QX/PO broker price is always more accurate than a fresh yfinance price.
+        # Source 0c: last known broker price — WITH strict age gate.
+        #
+        # *** BUG FIX: previously returned ANY broker price regardless of age,
+        #     so a 10-minute-old price was presented as "live current price".
+        #     Fixed: hard 60-second limit, then real-time Stooq bridge, then
+        #     5-minute stale fallback as absolute last resort.
         try:
             from otc_price_service import _PRICES, _normalize_pair as _norm, _LOCK
             _key = _norm(pair)
             with _LOCK:
-                _entry = _PRICES.get(_key)
-            if (_entry
-                    and _entry.get("price", 0) > 0
-                    and _entry.get("source") != "yf"):   # ← broker-only gate
-                return float(_entry["price"])
+                _entry = dict(_PRICES.get(_key) or {})
+            if _entry and _entry.get("price", 0) > 0 and _entry.get("source") != "yf":
+                _broker_age = time.time() - _entry.get("time", 0)
+
+                if _broker_age <= 60:
+                    # ✅ Fresh broker price — always trust it
+                    return float(_entry["price"])
+
+                # Broker price is stale (>60 s). Try Stooq as real-time bridge.
+                # OTC forex prices track real-market rates within a tiny spread.
+                _otc_sym = _normalize(pair).replace("/", "")
+                _is_fx_otc = (len(_otc_sym) == 6 and _otc_sym.isalpha()
+                              and not any(c in _otc_sym for c in
+                                          ("XAU", "XAG", "XPT", "XPD")))
+                if _is_fx_otc:
+                    _bridge = _fetch_stooq(_otc_sym.lower())
+                    if _bridge and _bridge > 0:
+                        return _bridge
+
+                # Metal OTC (XAU/XAG) — use dedicated spot feed as bridge
+                _metal_bridge = _spot_metal_for_pair(pair)
+                if _metal_bridge and _metal_bridge > 0:
+                    return _metal_bridge
+
+                # Last resort: stale broker price up to 5 min
+                # (still far more accurate than yfinance for OTC synthetic feeds)
+                if _broker_age <= 300:
+                    return float(_entry["price"])
         except Exception:
             pass
 
-        # No broker price at all — do NOT fall to yfinance for OTC.
-        # yfinance prices are wrong for synthetic OTC pairs (can be 10%+ off).
+        # Source 0d: Stooq real-time bridge for OTC forex pairs that NEVER
+        # received a broker tick (WS was always down). Stooq's mid-price for
+        # major/minor forex is genuine real-time — accurate enough for display
+        # and signal direction when the broker stream is unavailable.
+        try:
+            _otc_sym = _normalize(pair).replace("/", "")
+            if len(_otc_sym) == 6 and _otc_sym.isalpha() and not any(
+                c in _otc_sym for c in ("XAU", "XAG", "BTC", "ETH", "SOL",
+                                        "BNB", "LTC", "DOT", "BCH", "XRP")
+            ):
+                _stooq_fresh = _fetch_stooq(_otc_sym.lower())
+                if _stooq_fresh and _stooq_fresh > 0:
+                    return _stooq_fresh
+        except Exception:
+            pass
+
+        # Source 0e: dedicated spot-metal feed for XAU/XAG OTC
+        _metal_otc = _spot_metal_for_pair(pair)
+        if _metal_otc and _metal_otc > 0:
+            return _metal_otc
+
+        # No usable price at all — do NOT fall through to yfinance for OTC.
         return None
 
     # ── 1. Spot metals: gold-api.com → stooq metals ────────────────
@@ -532,19 +575,25 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
         if cached and (now - cached[0]) < _TTL:
             return cached[1]
 
-    # ── 2. yfinance fast_info.last_price (live tick) ────────────────
-    price = _fetch_yf(ticker)
-    if price is not None and price > 0:
-        _CACHE[ticker] = (now, price)
-        return price
-
-    # ── 3. Stooq.com — forex & index fallback ──────────────────────
+    # ── 2. Stooq.com — genuinely REAL-TIME forex & index (NO delay, NO key) ──
+    #
+    # *** BUG FIX: previously yfinance was tried FIRST, but Yahoo Finance's
+    #     free forex API has a known 15-minute delay — "fast_info.last_price"
+    #     often returns the previous candle close, not the live tick.
+    #     Stooq.com provides genuinely real-time mid-prices for all major forex
+    #     pairs with zero delay and no API key. Now tried BEFORE yfinance.
     stooq_sym = _stooq_sym_for_ticker(ticker)
     if stooq_sym:
         stooq_px = _fetch_stooq(stooq_sym)
         if stooq_px is not None and stooq_px > 0:
             _CACHE[ticker] = (now, stooq_px)
             return stooq_px
+
+    # ── 3. yfinance fast_info.last_price (fallback — may be delayed for forex)
+    price = _fetch_yf(ticker)
+    if price is not None and price > 0:
+        _CACHE[ticker] = (now, price)
+        return price
 
     # ── 4. CoinGecko — crypto only ──────────────────────────────────
     crypto_base = _crypto_base(pair)

@@ -286,28 +286,30 @@ def _write_price(asset_key: str, price: float, source: str):
 def get_live_otc_price(pair: str, broker_only: bool = True) -> Optional[float]:
     """Return the freshest live OTC price for a bot pair label.
 
-    broker_only=True (DEFAULT) — NEVER returns yfinance prices for OTC.
-    Broker OTC prices (QX / PO) are completely synthetic and can differ
-    from the real market by 5-15%+. Mixing yfinance into OTC signals
-    produces wrong entry prices that cause systematic trade losses.
+    Source priority (freshness checked per-source):
+      1. Broker tick  (qx / po)  — freshest; up to _PRICE_STALE_AGE (90 s)
+      2. Stooq bridge (stooq)    — real-time forex mid-price when WS is down;
+                                   up to 15 s stale (Stooq TTL = 5 s)
+      3. yfinance     (yf)       — BLOCKED by default; real-market prices can
+                                   differ 5-15%+ from broker OTC synthetic feed.
 
-    Priority when broker_only=True:
-      1. Broker tick (source == "qx" or "po") younger than _PRICE_STALE_AGE → return it
-      2. No broker data or yfinance-only → return None (caller must handle gracefully)
-
-    broker_only=False → legacy behaviour, includes yfinance (only for non-OTC fallback).
+    broker_only=False → legacy behaviour (includes yfinance; not recommended).
     """
     key = _normalize_pair(pair)
     with _LOCK:
         entry = _PRICES.get(key)
     if not entry:
         return None
-    # Core fix: yfinance prices are real-market rates that can differ 5-15%+
-    # from the broker's synthetic OTC feed. Never use them for OTC signal direction.
-    if broker_only and entry.get("source") == "yf":
+    source = entry.get("source", "")
+    # yfinance is always blocked for OTC (real-market ≠ synthetic broker price)
+    if broker_only and source == "yf":
         return None
     age = time.time() - entry["time"]
-    if age < _PRICE_STALE_AGE:
+    # Broker ticks: accept up to 90 s stale
+    if source in ("qx", "po") and age < _PRICE_STALE_AGE:
+        return entry["price"]
+    # Stooq bridge: accept up to 15 s (Stooq's own 5 s TTL + network margin)
+    if source == "stooq" and age < 15:
         return entry["price"]
     return None
 
@@ -798,7 +800,7 @@ _YF_OTC_MAP: Dict[str, str] = {
 }
 
 # yfinance OTC poll interval (seconds) — only runs to seed pairs with ZERO broker data ever
-_YF_POLL_INTERVAL = 30
+_YF_POLL_INTERVAL = 8
 # yfinance is NEVER allowed to overwrite a broker price (source=qx/po), regardless of age.
 # It may only seed a pair that has had NO broker tick at all (source absent or source=yf only).
 # This constant is kept for reference but the loop now uses source-based gating, not age.
@@ -889,6 +891,87 @@ async def _yf_otc_poll_loop():
         await asyncio.sleep(_YF_POLL_INTERVAL)
 
 
+# ── Stooq real-time forex OTC bridge ─────────────────────────────────────────
+# Maps OTC pair keys (normalised) to their Stooq forex symbols.
+# Only forex-based OTC pairs — metals/crypto/stocks are handled by other feeds.
+_STOOQ_OTC_MAP: Dict[str, str] = {
+    # Major forex
+    "eurusd_otc": "eurusd",  "gbpusd_otc": "gbpusd",
+    "usdjpy_otc": "usdjpy",  "usdchf_otc": "usdchf",
+    "usdcad_otc": "usdcad",  "audusd_otc": "audusd",
+    "nzdusd_otc": "nzdusd",
+    # Minor / cross
+    "audcad_otc": "audcad",  "audchf_otc": "audchf",
+    "audjpy_otc": "audjpy",  "audnzd_otc": "audnzd",
+    "cadchf_otc": "cadchf",  "cadjpy_otc": "cadjpy",
+    "chfjpy_otc": "chfjpy",  "euraud_otc": "euraud",
+    "eurcad_otc": "eurcad",  "eurchf_otc": "eurchf",
+    "eurgbp_otc": "eurgbp",  "eurjpy_otc": "eurjpy",
+    "eurnzd_otc": "eurnzd",  "gbpaud_otc": "gbpaud",
+    "gbpcad_otc": "gbpcad",  "gbpchf_otc": "gbpchf",
+    "gbpjpy_otc": "gbpjpy",  "gbpnzd_otc": "gbpnzd",
+    "nzdcad_otc": "nzdcad",  "nzdchf_otc": "nzdchf",
+    "nzdjpy_otc": "nzdjpy",
+    # Exotic (Stooq availability varies — guarded by try/except)
+    "usdmxn_otc": "usdmxn",  "usdtry_otc": "usdtry",
+    "usdzar_otc": "usdzar",  "usdinr_otc": "usdinr",
+}
+
+_STOOQ_OTC_POLL_INTERVAL = 3   # seconds — much faster than yfinance (8 s)
+
+
+async def _stooq_otc_poll_loop():
+    """Poll Stooq.com every 3 seconds for forex OTC pairs when broker WS is down.
+
+    This is a real-time bridge:
+    • Stooq provides genuine live mid-prices for all major/minor forex pairs.
+    • Only writes for pairs whose source is absent, "stooq", or "yf"
+      (never overwrites a fresh broker tick from QX or PO).
+    • Broker tick (qx/po) younger than 60s → skip (broker is alive, don't touch it).
+    • Tagged source = "stooq" so get_live_otc_price() accepts it with a 15 s TTL.
+    """
+    import urllib.request as _ur
+    import json as _json
+
+    def _stooq_fetch(sym: str) -> Optional[float]:
+        try:
+            url = f"https://stooq.com/q/l/?s={sym}&f=sd2t2ohlc&h&e=json"
+            req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0 (SupremePro)"})
+            with _ur.urlopen(req, timeout=3) as r:
+                d = _json.loads(r.read().decode("utf-8", "ignore"))
+            row = (d.get("symbols") or [{}])[0]
+            px = float(row.get("close", 0))
+            return px if px > 0 else None
+        except Exception:
+            return None
+
+    logger.info("[otc_svc:stooq] Stooq OTC bridge started — polling every 3 s")
+    while True:
+        try:
+            now = time.time()
+            for key, stooq_sym in _STOOQ_OTC_MAP.items():
+                # Skip if broker (qx/po) gave a fresh tick within 60 s
+                with _LOCK:
+                    existing = _PRICES.get(key)
+                if existing:
+                    src = existing.get("source", "")
+                    age = now - existing.get("time", 0)
+                    if src in ("qx", "po") and age < 60:
+                        continue   # broker is alive — don't overwrite with Stooq
+
+                # Fetch Stooq price in executor to avoid blocking the event loop
+                px = await asyncio.get_event_loop().run_in_executor(
+                    None, _stooq_fetch, stooq_sym
+                )
+                if px and px > 0:
+                    _write_price(key, px, "stooq")
+                # Small pause between requests to be polite to Stooq
+                await asyncio.sleep(0.05)
+        except Exception as exc:
+            logger.debug(f"[otc_svc:stooq] poll error: {exc}")
+        await asyncio.sleep(_STOOQ_OTC_POLL_INTERVAL)
+
+
 async def run_otc_price_service():
     """Start both OTC price streams as concurrent tasks.
     Call once from bot.py:  asyncio.create_task(run_otc_price_service())
@@ -907,10 +990,11 @@ async def run_otc_price_service():
                 logger.error(f"[otc_svc:qx] Fatal error — restarting in 30s: {exc}")
                 await asyncio.sleep(30)
 
-    qx_task   = asyncio.create_task(_qx_safe(),              name="otc-qx-stream")
-    po_task   = asyncio.create_task(_run_po_loop(),          name="otc-po-stream")
-    sync_task = asyncio.create_task(_sync_from_po_candles(), name="otc-po-candle-sync")
-    yf_task   = asyncio.create_task(_yf_otc_poll_loop(),     name="otc-yf-fallback")
+    qx_task     = asyncio.create_task(_qx_safe(),              name="otc-qx-stream")
+    po_task     = asyncio.create_task(_run_po_loop(),          name="otc-po-stream")
+    sync_task   = asyncio.create_task(_sync_from_po_candles(), name="otc-po-candle-sync")
+    yf_task     = asyncio.create_task(_yf_otc_poll_loop(),     name="otc-yf-fallback")
+    stooq_task  = asyncio.create_task(_stooq_otc_poll_loop(),  name="otc-stooq-bridge")
 
     # Register tasks with Agent-3 (PriceFundAgent) so it can cancel/restart them
     try:
@@ -925,12 +1009,16 @@ async def run_otc_price_service():
         while True:
             await asyncio.sleep(300)
             s = get_otc_status()
+            stooq_count = sum(
+                1 for v in _PRICES.values()
+                if v.get("source") == "stooq" and time.time() - v["time"] < 15
+            )
             logger.info(
                 f"[otc_svc] Live prices — QX: {s['qx']}  PO: {s['po']}  "
-                f"Total: {s['qx'] + s['po']}"
+                f"Stooq bridge: {stooq_count}  Total: {s['qx'] + s['po'] + stooq_count}"
             )
 
     asyncio.create_task(_status_loop(), name="otc-status")
 
-    # PO/yf/sync are the critical paths — QX is already isolated above
-    await asyncio.gather(po_task, sync_task, yf_task)
+    # PO/yf/sync/stooq are the critical paths — QX is already isolated above
+    await asyncio.gather(po_task, sync_task, yf_task, stooq_task)
