@@ -14,5 +14,4 @@ certifi>=2025.1.31
 pyfiglet>=1.0.2
 flask>=3.0
 anthropic>=0.25.0
-pyquotex>=1.0.0
 pyzipper>=0.4.0

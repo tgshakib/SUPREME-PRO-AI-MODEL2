@@ -39,8 +39,8 @@ OTC_PAIRS = [
 
 # ── Binary LIVE pairs ─────────────────────────────────────
 LIVE_PAIRS = [
-    "AUD/CAD", "AUD/CHF", "AUD/JPY", "CAD/JPY", "CHF/JPY",
-    "SP/ASX 200", "CAD/CHF", "EUR/AUD", "EUR/CAD", "EUR/CHF",
+    "AUD/CAD", "AUD/CHF", "AUD/JPY", "AUD/USD", "CAD/JPY", "CHF/JPY",
+    "CAD/CHF", "EUR/AUD", "EUR/CAD", "EUR/CHF",
     "EUR/GBP", "EUR/JPY", "EUR/USD", "GBP/AUD", "GBP/CAD",
     "GBP/CHF", "GBP/JPY", "GBP/USD", "USD/CAD", "USD/CHF",
     "USD/JPY",

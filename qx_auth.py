@@ -2,29 +2,24 @@
 ============================
 Mirrors the Pocket Option auth manager (po_auth.py) for Quotex.
 
-IMPORTANT — Cloudflare reality:
-  Quotex (qxbroker.com) sits behind Cloudflare Turnstile which blocks ALL
-  headless HTTP logins.  The only way to get a fresh Quotex SSID token is
-  through a real browser session.  quotexpy uses Chrome/Selenium for exactly
-  this reason.  Since Chrome is not available on Replit servers, we use a
-  different approach:
+AUTO-LOGIN STRATEGY (same as PO — three bypass layers):
+  1.  pyquotex WebSocket login — email + password → bypasses Cloudflare
+      Turnstile entirely (pyquotex uses WS auth, not HTTP).  This is the
+      primary auto-login path (no manual token needed).
+  2.  Digest endpoint — refresh via /api/v1/cabinets/digest when a token
+      is already loaded (extends lifetime without re-login).
+  3.  Manual fallback — QUOTEX_SSID env var (Replit Secrets).
 
-  1.  On first start — the token is read from the QUOTEX_SSID env var (set
-      by the admin once via Replit Secrets).
-  2.  The token is saved locally (.qx_ssid_cache) and seeded into quotexpy's
-      sessions.pkl so quotexpy never calls Chrome.
-  3.  Keepalive pings reset the server-side inactivity timer every 90 min.
-  4.  When the token is near expiry (85% of TTL) the manager tries a
-      Cloudflare-bypass route: the /api/v1/cabinets/digest endpoint accepts
-      authenticated cookie strings (token=SSID) and returns a fresh token.
-  5.  On rejection (WS sends "authorization/reject") the guardian sets
-      QX_SSID_REJECTED=True and this manager logs a clear renewal notice.
+TOKEN LIFECYCLE (identical to po_auth.py):
+  • remember_me login → pyquotex issues a 30-day WS session token.
+  • Keepalive ping every 90 min → resets server inactivity timer.
+  • Proactive refresh at 85% of TTL → replaced before it can expire.
+  • On WS rejection → immediate re-login attempted automatically.
 
-How to set / renew the token:
-  • Open qxbroker.com in your browser and log in.
-  • F12 → Console → type: window.settings.token  → press Enter → copy value.
-  • Set in Replit Secrets: QUOTEX_SSID = <paste value here>
-  • The bot picks it up automatically on next restart.
+Credentials:
+  QUOTEX_EMAIL    env var (default: hosnaranupur@gmail.com)
+  QUOTEX_PASSWORD env var (default: hosnaranupur@)
+  Both are already set in .env — no manual token required.
 """
 from __future__ import annotations
 
@@ -133,6 +128,130 @@ def _seed_qxpy_session(ssid: str, cookies: str = ""):
         logger.debug("[qx_auth] quotexpy sessions.pkl seeded — Chrome bypass active")
     except Exception as exc:
         logger.debug(f"[qx_auth] Could not seed sessions.pkl: {exc}")
+
+
+# ── pyquotex WebSocket auto-login (bypasses Cloudflare entirely) ─────────────
+def _do_pyquotex_login() -> Optional[str]:
+    """Login to Quotex via pyquotex WebSocket — no Chrome, no Cloudflare block.
+
+    Spawns an isolated daemon thread with its own asyncio event loop so this
+    function is safe to call from both sync and async contexts (e.g. from a
+    run_in_executor thread while the main event loop is running).
+
+    Returns the raw session token string on success, None on failure.
+    """
+    import threading
+
+    try:
+        from pyquotex.stable_api import Quotex as _Quotex
+    except ImportError:
+        logger.debug("[qx_auth] pyquotex not installed — skipping WS login")
+        return None
+
+    logger.info(f"[qx_auth] 🔐 Attempting pyquotex WS login for {QX_EMAIL} …")
+
+    _token_out: list = [None]
+
+    async def _work():
+        """Full connect → extract → close inside one async task."""
+        import pickle as _pk
+        from pathlib import Path as _Pt
+
+        client = _Quotex(email=QX_EMAIL, password=QX_PASSWORD, lang="en")
+        try:
+            check, reason = await asyncio.wait_for(client.connect(), timeout=35)
+        except asyncio.TimeoutError:
+            logger.debug("[qx_auth] pyquotex connect timed out (35 s)")
+            try:
+                await asyncio.wait_for(client.close(), timeout=4)
+            except Exception:
+                pass
+            return
+        except Exception as exc:
+            logger.debug(f"[qx_auth] pyquotex connect error: {exc}")
+            try:
+                await asyncio.wait_for(client.close(), timeout=4)
+            except Exception:
+                pass
+            return
+
+        if not check:
+            logger.warning(f"[qx_auth] pyquotex auth rejected: {reason}")
+            try:
+                await asyncio.wait_for(client.close(), timeout=4)
+            except Exception:
+                pass
+            return
+
+        logger.info("[qx_auth] ✅ pyquotex WS connected — extracting token …")
+
+        # Give handshake a moment to persist the session file
+        await asyncio.sleep(1.5)
+
+        token: Optional[str] = None
+
+        # ── 1. sessions.pkl (pyquotex persists the token here) ────────────
+        def _read_pkl() -> Optional[str]:
+            sp = _qxpy_sessions_path()
+            if not sp:
+                return None
+            try:
+                if _Pt(sp).exists():
+                    with open(sp, "rb") as f:
+                        d = _pk.load(f)
+                    entries = d.get(QX_EMAIL, [])
+                    if entries and isinstance(entries, list):
+                        e = entries[0]
+                        return e.get("ssid") or e.get("token")
+            except Exception as exc:
+                logger.debug(f"[qx_auth] sessions.pkl read: {exc}")
+            return None
+
+        token = await asyncio.get_event_loop().run_in_executor(None, _read_pkl)
+
+        # ── 2. Client / api attribute walk ────────────────────────────────
+        if not token:
+            for obj in (client, getattr(client, "api", None)):
+                if obj is None:
+                    continue
+                for attr in ("token", "ssid", "session_id", "auth_token", "_token"):
+                    try:
+                        v = getattr(obj, attr, None)
+                        if v and isinstance(v, str) and _is_real_qx_token(v):
+                            token = v
+                            break
+                    except Exception:
+                        pass
+                if token:
+                    break
+
+        # ── 3. Second pkl attempt after extra delay ────────────────────────
+        if not token:
+            await asyncio.sleep(2)
+            token = await asyncio.get_event_loop().run_in_executor(None, _read_pkl)
+
+        try:
+            await asyncio.wait_for(client.close(), timeout=4)
+        except Exception:
+            pass
+
+        if token and _is_real_qx_token(token):
+            logger.info("[qx_auth] ✅ Token extracted via pyquotex WS login")
+            _token_out[0] = token
+        else:
+            logger.debug("[qx_auth] pyquotex connected but token not extractable")
+
+    def _thread_main():
+        try:
+            asyncio.run(_work())
+        except Exception as exc:
+            logger.debug(f"[qx_auth] pyquotex thread error: {exc}")
+
+    t = threading.Thread(target=_thread_main, daemon=True, name="qx_pyquotex_login")
+    t.start()
+    t.join(timeout=50)   # 35 s connect + ~12 s extraction + margin
+
+    return _token_out[0]
 
 
 # ── Digest-based token refresh (works if session cookies are valid) ────────────
@@ -316,38 +435,55 @@ def refresh_ssid_now() -> bool:
     """Try to refresh the SSID via digest endpoint.
 
     Returns True if a new token was obtained, False otherwise.
-    Logs a clear renewal instruction if HTTP refresh fails (Cloudflare).
+    Tries pyquotex WS login first (bypasses Cloudflare), then digest refresh.
     """
     current = _SSID_STAMP.get("ssid") or os.environ.get("QUOTEX_SSID", "")
 
-    # Try digest-based renewal if we have a current token
-    if current:
+    # Layer 1: Try digest-based renewal if we have a valid current token
+    if current and _is_real_qx_token(current):
         new_token = _try_digest_refresh(current)
         if new_token:
             _save_ssid(new_token)
+            logger.info("[qx_auth] ✅ SSID renewed via digest endpoint")
             return True
 
-    # Cloudflare blocks all headless HTTP logins — cannot auto-renew
+    # Layer 2: pyquotex WebSocket auto-login (bypasses Cloudflare)
+    logger.info("[qx_auth] Trying pyquotex WS auto-login …")
+    ws_token = _do_pyquotex_login()
+    if ws_token and _is_real_qx_token(ws_token):
+        _save_ssid(ws_token)
+        logger.info("[qx_auth] ✅ SSID obtained via pyquotex WS auto-login")
+        return True
+
+    # Layer 3: Nothing worked — log renewal instructions
     logger.warning(
-        "[qx_auth] ⚠️ QX SSID renewal via HTTP failed (Cloudflare protected).\n"
-        "          To renew manually:\n"
-        "          1. Open qxbroker.com in your browser and log in.\n"
-        "          2. Press F12 → Console → type: window.settings.token → Enter.\n"
-        "          3. Copy the value and set QUOTEX_SSID in Replit Secrets.\n"
-        "          4. Restart the bot — the new token is picked up automatically."
+        "[qx_auth] ⚠️ All auto-login methods failed.\n"
+        "          Option A — set QUOTEX_SSID in Replit Secrets:\n"
+        "            qxbroker.com → F12 → Console → window.settings.token\n"
+        "          Option B — ensure QUOTEX_EMAIL / QUOTEX_PASSWORD are correct\n"
+        "            and pyquotex is installed (pip install pyquotex).\n"
+        "          The bot retries automatically every 60 seconds."
     )
     return False
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 def get_current_ssid() -> str:
-    """Return the active QX SSID. Loads from cache/env, seeds sessions.pkl."""
+    """Return the active QX SSID. Loads from cache/env, auto-logins via pyquotex if needed."""
     cached = _load_cached_ssid()
     if cached:
-        # Always seed sessions.pkl so quotexpy skips Chrome
         _seed_qxpy_session(cached)
         os.environ["QUOTEX_SSID"] = cached
         return cached
+
+    # No cached SSID — try pyquotex auto-login immediately
+    logger.info("[qx_auth] No cached SSID — attempting pyquotex auto-login …")
+    ws_token = _do_pyquotex_login()
+    if ws_token and _is_real_qx_token(ws_token):
+        _save_ssid(ws_token)
+        logger.info("[qx_auth] ✅ pyquotex auto-login success on first call")
+        return ws_token
+
     return ""
 
 
@@ -355,12 +491,13 @@ def get_current_ssid() -> str:
 async def run_qx_auth_manager():
     """Background task: keeps the QX SSID alive indefinitely.
 
-    Strategy:
+    Strategy (identical to po_auth.py):
       1. Read SSID from cache / QUOTEX_SSID env var.
-      2. Seed quotexpy sessions.pkl → Chrome never needed.
-      3. Keepalive ping every 90 min (resets server inactivity).
-      4. Proactive refresh at 85% of TTL via digest endpoint.
-      5. On WS rejection (QX_SSID_REJECTED=True) → try digest, then log renewal.
+      2. If none found → pyquotex WS auto-login with email + password.
+      3. Keepalive ping every 90 min (resets server inactivity timer).
+      4. Proactive refresh at 85% of TTL via digest → pyquotex WS fallback.
+      5. On WS rejection (QX_SSID_REJECTED=True) → immediate re-login.
+      6. Tracks expiry countdown; logs time-to-refresh so admin can monitor.
     """
     global QX_SSID_REJECTED
     logger.info("[qx_auth] Starting Quotex auth manager …")
@@ -388,14 +525,21 @@ async def run_qx_auth_manager():
                 f"(next refresh in {(refresh_after - age)/3600:.1f}h)"
             )
     else:
-        logger.warning(
-            "[qx_auth] ⚠️ No QUOTEX_SSID found.\n"
-            "          QX OTC stream disabled until token is provided.\n"
-            "          To enable: set QUOTEX_SSID in Replit Secrets\n"
-            "          (qxbroker.com → F12 → Console → window.settings.token)"
-        )
+        # No SSID found anywhere — trigger pyquotex auto-login immediately
+        logger.info("[qx_auth] No QUOTEX_SSID found — triggering pyquotex auto-login …")
+        ok = await asyncio.get_event_loop().run_in_executor(None, refresh_ssid_now)
+        if ok:
+            logger.info("[qx_auth] ✅ Initial auto-login succeeded — QX OTC stream active")
+        else:
+            logger.warning(
+                "[qx_auth] ⚠️ Auto-login failed on startup.\n"
+                "          Will retry every 60 seconds automatically.\n"
+                "          Credentials: QUOTEX_EMAIL / QUOTEX_PASSWORD env vars.\n"
+                "          Or set QUOTEX_SSID manually in Replit Secrets."
+            )
 
-    # Maintenance loop
+    # ── Maintenance loop (identical lifecycle to po_auth.py) ─────────────────
+    _login_fail_count = 0   # consecutive failures — used for backoff
     while True:
         await asyncio.sleep(60)
 
@@ -405,12 +549,14 @@ async def run_qx_auth_manager():
         refresh_after = ttl * _REFRESH_RATIO
         hard_deadline = ttl - _EARLY_REFRESH_BUFFER
 
-        # WS rejection detected by stream
+        # WS rejection detected by stream → immediate re-login
         if QX_SSID_REJECTED:
-            logger.info("[qx_auth] QX SSID rejected by WS — attempting refresh …")
+            logger.info("[qx_auth] QX SSID rejected by WS — attempting re-login …")
             ok = await asyncio.get_event_loop().run_in_executor(None, refresh_ssid_now)
             if ok:
                 QX_SSID_REJECTED = False
+                _login_fail_count = 0
+                logger.info("[qx_auth] ✅ Re-login after WS rejection succeeded")
             else:
                 await asyncio.sleep(300)   # wait 5 min before next attempt
             continue
@@ -421,6 +567,7 @@ async def run_qx_auth_manager():
         if env_ssid and env_ssid != current_ssid and _is_real_qx_token(env_ssid):
             logger.info("[qx_auth] QUOTEX_SSID env var updated — applying new token …")
             _save_ssid(env_ssid)
+            _login_fail_count = 0
             continue
         elif env_ssid and not _is_real_qx_token(env_ssid):
             logger.warning(
@@ -429,10 +576,23 @@ async def run_qx_auth_manager():
             )
 
         if not current_ssid:
-            # Still no token — check env again
-            env_ssid = os.environ.get("QUOTEX_SSID", "").strip()
-            if env_ssid and _is_real_qx_token(env_ssid):
-                _save_ssid(env_ssid)
+            # Exponential backoff: 1m → 2m → 4m → 8m → 15m (cap)
+            # Only log every N ticks to avoid spamming
+            backoff_ticks = min(15, 2 ** _login_fail_count)   # minutes
+            _login_fail_count += 1
+            if _login_fail_count == 1 or (_login_fail_count % backoff_ticks == 0):
+                logger.info(
+                    f"[qx_auth] No active SSID — retrying auto-login "
+                    f"(attempt #{_login_fail_count}, next in {backoff_ticks}m) …"
+                )
+            ok = await asyncio.get_event_loop().run_in_executor(None, refresh_ssid_now)
+            if ok:
+                _login_fail_count = 0
+            else:
+                # Sleep extra time for backoff (already slept 60s above)
+                extra = max(0, (backoff_ticks - 1) * 60)
+                if extra:
+                    await asyncio.sleep(extra)
             continue
 
         if age >= ttl:

@@ -173,6 +173,14 @@ except Exception as _30se:
     _30S_OK = False
 
 try:
+    from candle_master_engine import candle_master_analyze as _cm_analyze
+    _CM_OK = True
+except Exception as _cme:
+    print(f"[signals] candle_master_engine import failed: {_cme}")
+    _cm_analyze = None  # type: ignore
+    _CM_OK = False
+
+try:
     from ultra_supreme_engine import ultra_check as _ultra_check
     _ULTRA_OK = True
 except Exception as _uce:
@@ -625,6 +633,45 @@ def generate_signal(
                 direction = bias_dir
                 confidence = int(round(90 + 8 * bias_strength))
 
+    # ── CANDLE MASTER ENGINE — elite candle-by-candle reading ────────────
+    # 12 independent candle structure checks: engulfing sequences, pin bar
+    # clusters, three soldiers/crows, inside bar breakouts, morning/evening
+    # star, wick rejection cascades, momentum locks. Reads confirmed bars
+    # only (non-reprint). Requires ≥18 votes to fire. Acts as primary
+    # direction driver when higher-priority engines didn't fire, and as a
+    # strong confirmer / elite booster when they did.
+    _cm_result    = None
+    _cm_dir       = None
+    _cm_grade     = 0
+    _cm_mode      = False
+    if _CM_OK and _cm_analyze is not None:
+        try:
+            _cm_result = _cm_analyze(pair, is_otc=is_otc)
+            if _cm_result is not None:
+                _cm_dir   = _cm_result["direction"]
+                _cm_grade = _cm_result["grade"]
+        except Exception:
+            _cm_result = None
+
+    # Candle Master as a primary driver (when no higher engine fired)
+    if direction is None and _cm_result is not None and _cm_dir is not None:
+        direction = _cm_dir
+        confidence = int(round(96 + 4 * min(1.0, _cm_grade / 100)))
+        _cm_mode = True
+        elite_confirmed = _cm_result.get("elite", False)
+
+    # Candle Master as a confirmer: if it agrees → boost confidence + elite
+    elif direction is not None and _cm_result is not None and _cm_dir == direction:
+        _cm_mode = True
+        confidence = min(100, (confidence or 97) + int(_cm_grade / 20))
+        if _cm_result.get("elite", False):
+            elite_confirmed = True
+
+    # Candle Master conviction gate: if it strongly disagrees → reduce confidence
+    elif direction is not None and _cm_result is not None and _cm_dir != direction:
+        if _cm_grade >= 75 and not elite_confirmed:
+            confidence = max(90, (confidence or 97) - 5)
+
     # ── SUPREME BINARY GATE (consensus check, does NOT block — uses CC fallback) ──
     # Collect every engine's direction vote and run the consensus gate.
     # Requires 2+ engines to agree. If they conflict, the Chart Conditions
@@ -659,6 +706,11 @@ def generate_signal(
         if qx_sniper  is not None: _engine_votes.append(qx_sniper.get("direction"))
         if mtf        is not None: _engine_votes.append(mtf.get("direction"))
         if sniper     is not None: _engine_votes.append(sniper.get("direction"))
+        # Candle Master Engine — elite structure vote; double vote when elite grade
+        if _cm_result is not None and _cm_dir is not None:
+            _engine_votes.append(_cm_dir)
+            if _cm_result.get("elite", False) or _cm_grade >= 80:
+                _engine_votes.append(_cm_dir)  # double vote for ultra-high grade
         # Institutional flow — trap/absorption detected = 2 votes (strong signal)
         if _inst_dir is not None:
             _engine_votes.append(_inst_dir)
@@ -1083,6 +1135,7 @@ def generate_signal(
         (vol_sniper or {}).get("direction") if vol_sniper is not None   else None,
         (qx_sniper  or {}).get("direction") if qx_sniper  is not None  else None,
         _mtf_dir                           if mtf is not None           else None,
+        _cm_dir                            if _cm_result is not None    else None,
     ] if v is not None]
     _agree_n  = sum(1 for v in _real_votes if v == direction)
     _oppose_n = sum(1 for v in _real_votes if v != direction)
