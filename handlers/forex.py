@@ -600,3 +600,151 @@ async def cb_fx_close_view(call: CallbackQuery, bot: Bot):
     from handlers.main_menu import render_home
     await delete_active(bot, call.message.chat.id)
     await render_home(bot, call.message.chat.id, call.from_user)
+
+
+# ── ⚡ Instance SIGNAL — fast pure-PA scan, fires in 5-8 s ───────────────────
+@router.callback_query(F.data == "fx:instant")
+async def cb_fx_instant(call: CallbackQuery, bot: Bot):
+    """User tapped ⚡ Instance SIGNAL.
+
+    Runs a fast (5-8 s) pure price-action scan across session-ranked pairs,
+    picks the best current setup and sends a formatted signal card immediately.
+    No waiting for the 24/7 engine loop — fires right now.
+    Free users: subject to daily forex limit.  Premium: unlimited.
+    """
+    import os
+    from instant_signal_engine import instant_scan, format_instant_signal
+    from aiogram.types import FSInputFile
+
+    user_id = call.from_user.id
+
+    if not db.is_verified(user_id):
+        await call.answer("Verify first via /start", show_alert=True)
+        return
+
+    # ── Free trial limit (same cap as NEW SIGNAL) ─────────────────────────
+    if not _is_premium(user_id):
+        setup = db.get_forex_setup(user_id)
+        if setup and setup.get("day") == db.today_str():
+            import database as _db2
+            bonus = _db2.get_referral_bonus(user_id)
+            effective_limit = FREE_FOREX_DAILY_LIMIT + bonus["bonus_forex"]
+            if (setup.get("sent_today") or 0) >= effective_limit:
+                bonus_note = (
+                    f" (+{bonus['bonus_forex']} referral bonus)"
+                    if bonus["bonus_forex"] else ""
+                )
+                await call.answer(
+                    f"Free trial = {effective_limit} signal/day{bonus_note}. "
+                    "Buy access for unlimited.",
+                    show_alert=True,
+                )
+                return
+
+    await call.answer("⚡ Scanning market… signal ready in 5-8 sec", show_alert=False)
+
+    # ── Scanning placeholder message ──────────────────────────────────────
+    scan_text = (
+        "⚡ <b>INSTANCE SIGNAL — AI SCANNING</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "🔍 <b>Scanning session-ranked pairs…</b>\n"
+        "📊 Pure Price Action · BoS · CHoCH · OB · FVG\n"
+        "💧 Liquidity Sweeps · Hidden S&R · Fake-Out Zones\n"
+        "⏳ <i>Signal ready in ~5-8 seconds…</i>"
+    )
+    scan_msg = None
+    try:
+        scan_msg = await call.message.answer(scan_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+    # ── Run the analysis (await gives event loop time while fetch runs) ───
+    await asyncio.sleep(1.0)   # let the scanning message show first
+
+    loop = asyncio.get_event_loop()
+    try:
+        # Run blocking yfinance fetch in a thread so bot stays responsive
+        sig = await loop.run_in_executor(None, lambda: instant_scan(
+            _user_pair_list(user_id)
+        ))
+    except Exception as e:
+        if scan_msg:
+            try:
+                await scan_msg.edit_text(
+                    "⚠️ <b>Scan failed</b> — market data temporarily unavailable.\n"
+                    "Please try again in a moment.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        return
+
+    # ── Add realistic analysis delay (5-8 s total) ────────────────────────
+    await asyncio.sleep(4.5)
+
+    # ── Format signal text ────────────────────────────────────────────────
+    caption = format_instant_signal(sig)
+
+    # ── Choose banner photo ───────────────────────────────────────────────
+    _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    banner_buy  = os.path.join(_base, "assets", "forex_buy.jpg")
+    banner_sell = os.path.join(_base, "assets", "forex_sell.jpg")
+    photo_path  = banner_buy if sig["direction"] == "BUY" else banner_sell
+
+    # Delete the scanning placeholder
+    if scan_msg:
+        try:
+            await scan_msg.delete()
+        except Exception:
+            pass
+
+    # ── Send signal card ──────────────────────────────────────────────────
+    from keyboards import forex_more_signal_kb
+    try:
+        if os.path.exists(photo_path):
+            await bot.send_photo(
+                chat_id=call.message.chat.id,
+                photo=FSInputFile(photo_path),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=_instant_signal_kb(),
+            )
+        else:
+            await call.message.answer(
+                caption, parse_mode="HTML",
+                reply_markup=_instant_signal_kb(),
+            )
+    except Exception as e:
+        try:
+            await call.message.answer(caption, parse_mode="HTML")
+        except Exception:
+            pass
+
+
+def _user_pair_list(user_id: int) -> list[str]:
+    """Return the pairs the user configured for their forex setup, or None."""
+    try:
+        setup = db.get_forex_setup(user_id)
+        if setup and setup.get("pairs"):
+            import json as _json
+            raw = setup["pairs"]
+            pairs = _json.loads(raw) if isinstance(raw, str) else raw
+            return [str(p) for p in pairs if p] if pairs else []
+    except Exception:
+        pass
+    return []
+
+
+def _instant_signal_kb():
+    """Compact keyboard shown under the instant signal card."""
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⚡ New Instance", callback_data="fx:instant"),
+            InlineKeyboardButton(text="🎯 AI Sniper",    callback_data="fx:new"),
+        ],
+        [
+            InlineKeyboardButton(text="🟢 Active Signals", callback_data="fx:active_view"),
+            InlineKeyboardButton(text="🏢 WORKPLACE",      callback_data="m:home"),
+        ],
+    ])
