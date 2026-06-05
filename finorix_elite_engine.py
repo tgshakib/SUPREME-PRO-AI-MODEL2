@@ -243,15 +243,18 @@ def _synthetic_candles(pair: str, count: int) -> list[dict]:
 class _BigToSmallCascade:
     """Identifies the dominant trend from H1 down to M1.
 
-    At each timeframe we compute:
-      • EMA-8 vs EMA-21 crossover direction
-      • Price position relative to EMA-50
-      • Normalized slope of EMA-21 (velocity)
+    REMOVED: EMA-8 vs EMA-21 crossover (lagging — fires after price has moved).
+    WHY: On fast TFs (M1/M5) EMA crossovers are always 2-5 bars late, turning
+         clean entries into chasing losses.
 
-    A timeframe "votes" BUY when all three agree bullish, SELL for bearish.
-    Cascade agreement = # of TFs voting the same direction (0-4).
+    REPLACED WITH: Pure price structure analysis at each timeframe:
+      • Swing structure direction  — most recent swing high vs prior (HH/LH)
+      • Price vs 20-bar range mid  — upper half = bullish pressure, lower = bearish
+      • BoS detection              — did price break above/below a recent swing?
+      • EMA-50 zone filter (kept)  — used only as a dynamic zone, NOT a crossover
 
-    Reversal detection: H1 trend ≠ M5/M1 trend → potential reversal forming.
+    A timeframe votes BUY when ≥2 of these 3 structural signals agree bullish.
+    Cascade score = # of TFs voting same direction (0-4).
     """
 
     _TF_MAP = [
@@ -263,28 +266,54 @@ class _BigToSmallCascade:
     _TF_WEIGHT = {"H1": 4.0, "M15": 3.0, "M5": 2.0, "M1": 1.0}
 
     def _tf_direction(self, candles: list[dict]) -> str:
-        if len(candles) < 22:
+        if len(candles) < 15:
             return "NEUTRAL"
         closes = [c["close"] for c in candles]
-        e8  = _ema(closes, 8)
-        e21 = _ema(closes, 21)
-        e50 = _ema(closes, 50) if len(closes) >= 50 else closes
-        price = closes[-1]
-        cross = "BUY" if e8[-1] > e21[-1] else "SELL" if e8[-1] < e21[-1] else "NEUTRAL"
+        highs  = [c["high"]  for c in candles]
+        lows   = [c["low"]   for c in candles]
+        price  = closes[-1]
+
+        # Signal 1: Swing structure — HH = bull, LH = bear
+        # Compare most recent local high to the one before it
+        # (sampled every 4 bars to get clean pivots)
+        pivot_highs = highs[::4][-4:]
+        pivot_lows  = lows[::4][-4:]
+        if len(pivot_highs) >= 3:
+            swing_bull = pivot_highs[-1] > pivot_highs[-2] and pivot_lows[-1] > pivot_lows[-2]
+            swing_bear = pivot_highs[-1] < pivot_highs[-2] and pivot_lows[-1] < pivot_lows[-2]
+            swing_dir  = "BUY" if swing_bull else ("SELL" if swing_bear else "NEUTRAL")
+        else:
+            swing_dir = "NEUTRAL"
+
+        # Signal 2: Price vs 20-bar range midpoint
+        range_high = max(highs[-20:])
+        range_low  = min(lows[-20:])
+        range_mid  = (range_high + range_low) / 2
+        position   = "BUY" if price > range_mid else "SELL"
+
+        # Signal 3: BoS — did price recently close beyond a prior swing level?
+        # (compares current close vs 12-bar-back high/low)
+        lookback_high = max(highs[-14:-2])
+        lookback_low  = min(lows[-14:-2])
+        bos_bull = price > lookback_high   # broke above prior structure
+        bos_bear = price < lookback_low    # broke below prior structure
+        bos_dir  = "BUY" if bos_bull else ("SELL" if bos_bear else "NEUTRAL")
+
+        # Optional zone filter: EMA-50 as a dynamic zone (NOT as a crossover signal)
+        # Used only to break ties when the other signals are 1-1
+        e50 = _ema(closes, min(50, len(closes) - 1))
         macro = "BUY" if price > e50[-1] else "SELL"
-        # Slope: normalized by ATR
-        atr_v = _atr(candles, 14) or 0.0001
-        slope = (e21[-1] - e21[-5]) / (atr_v * 5) if len(e21) >= 6 else 0
-        slope_dir = "BUY" if slope > 0.05 else "SELL" if slope < -0.05 else "NEUTRAL"
-        # All three must agree for a clear vote
-        votes = [cross, macro, slope_dir]
+
+        # Vote: need ≥2 of 3 structural signals to agree
+        votes = [swing_dir, position, bos_dir]
         buy_ct  = votes.count("BUY")
         sell_ct = votes.count("SELL")
         if buy_ct >= 2:
             return "BUY"
         if sell_ct >= 2:
             return "SELL"
-        return "NEUTRAL"
+        # Tiebreak: use EMA-50 macro zone as tiebreaker (zone, not signal)
+        return macro
 
     def analyse(self, ticker: str) -> dict:
         tf_directions: dict[str, str] = {}
@@ -526,35 +555,20 @@ class _EliteSREngine:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class _HiddenReversalDetector:
-    """Detects non-obvious reversal signals:
+    """Detects non-obvious reversal signals — pure price action only.
 
-      1. RSI  hidden divergence — price HL but RSI LL = hidden bull
-                                — price LH but RSI HH = hidden bear
-      2. MACD hidden divergence — histogram momentum vs price
-      3. Wick exhaustion       — very long wick opposite trend direction
-      4. ATR compression       — volatility squeeze → exhaustion zone
-      5. Stochastic crossover at extreme (hidden continuation/reversal)
+    REMOVED: MACD hidden divergence (lagging), Stochastic crossover (lagging).
+    WHY: Both react AFTER price has already committed direction on fast TFs.
+
+    KEPT & STRENGTHENED:
+      1. RSI hidden divergence — price HL but RSI LL = hidden bull continuation
+                                — price LH but RSI HH = hidden bear continuation
+      2. Classic RSI divergence — price new low but RSI higher low = reversal
+      3. Wick exhaustion       — institutional rejection wicks (≥52% of bar)
+      4. ATR compression       — volatility squeeze → breakout loading
+      5. Consecutive failed attempts at a level = exhaustion
+      6. Candle body momentum shift — average body flipping direction
     """
-
-    def _macd(self, closes: list[float]) -> tuple[float, float]:
-        """Returns (macd_line, signal_line) for last bar."""
-        if len(closes) < 26:
-            return 0.0, 0.0
-        e12 = _ema(closes, 12)
-        e26 = _ema(closes, 26)
-        macd_line = [m - s for m, s in zip(e12, e26)]
-        signal    = _ema(macd_line, 9)
-        return macd_line[-1], signal[-1]
-
-    def _stochastic(self, candles: list[dict], k: int = 14) -> float:
-        """Fast %K stochastic (0-100)."""
-        tail = candles[-k:] if len(candles) >= k else candles
-        hh = max(c["high"] for c in tail)
-        ll = min(c["low"]  for c in tail)
-        cur = tail[-1]["close"]
-        if hh == ll:
-            return 50.0
-        return 100.0 * (cur - ll) / (hh - ll)
 
     def _rsi_swing(self, closes: list[float], lookback: int = 20) -> tuple[float, float]:
         """Highest and lowest RSI in last `lookback` bars."""
@@ -562,6 +576,38 @@ class _HiddenReversalDetector:
             return 50.0, 50.0
         rsis = [_rsi(closes[:i + 1], 14) for i in range(len(closes) - lookback, len(closes))]
         return max(rsis), min(rsis)
+
+    def _consecutive_rejections(self, candles: list[dict], atr_v: float) -> tuple[bool, bool]:
+        """Detects 3+ consecutive candles failing to close past the same level.
+        Returns (bull_rejection, bear_rejection)."""
+        if len(candles) < 5:
+            return False, False
+        recent = candles[-5:]
+        # Bear rejection: multiple bars wicking up but closing lower = sellers absorbing
+        upper_level = max(c["high"] for c in recent)
+        fails_high  = sum(1 for c in recent
+                          if c["high"] > upper_level - atr_v * 0.3
+                          and c["close"] < upper_level - atr_v * 0.1)
+        # Bull rejection: multiple bars wicking down but closing higher = buyers absorbing
+        lower_level = min(c["low"] for c in recent)
+        fails_low   = sum(1 for c in recent
+                          if c["low"] < lower_level + atr_v * 0.3
+                          and c["close"] > lower_level + atr_v * 0.1)
+        return fails_low >= 3, fails_high >= 3
+
+    def _momentum_shift(self, candles: list[dict]) -> str:
+        """Compare average candle body direction of recent 3 vs prior 5 bars.
+        Returns 'BUY', 'SELL', or 'NEUTRAL'."""
+        if len(candles) < 8:
+            return "NEUTRAL"
+        prior  = sum(c["close"] - c["open"] for c in candles[-8:-3]) / 5
+        recent = sum(c["close"] - c["open"] for c in candles[-3:])   / 3
+        # Shift from negative to positive (or vice versa) = momentum flip
+        if prior < 0 and recent > 0:
+            return "BUY"
+        if prior > 0 and recent < 0:
+            return "SELL"
+        return "NEUTRAL"
 
     def analyse(self, ticker: str) -> dict:
         candles = _fetch_candles(ticker, "5m", 80)
@@ -573,59 +619,68 @@ class _HiddenReversalDetector:
         price  = closes[-1]
         atr_v  = _atr(candles, 14) or (price * 0.0005)
 
-        # 1. RSI hidden divergence
+        # 1. RSI-based divergence (only indicator-based signal — RSI only)
         rsi_now   = _rsi(closes, 14)
-        rsi_prev  = _rsi(closes[:-5], 14)
+        rsi_prev  = _rsi(closes[:-5], 14) if len(closes) > 5 else rsi_now
         price_now  = closes[-1]
         price_prev = closes[-5] if len(closes) > 5 else closes[-1]
 
-        hidden_bull_div = (price_now  > price_prev and rsi_now  < rsi_prev and rsi_now  < 55)
-        hidden_bear_div = (price_now  < price_prev and rsi_now  > rsi_prev and rsi_now  > 45)
+        # Hidden divergence: price higher but RSI lower = continuation signal
+        hidden_bull_div = (price_now > price_prev and rsi_now < rsi_prev and rsi_now < 55)
+        hidden_bear_div = (price_now < price_prev and rsi_now > rsi_prev and rsi_now > 45)
+        # Classic reversal divergence: price new extreme, RSI contradicts
+        lows_slice  = [c["low"]  for c in candles]
+        highs_slice = [c["high"] for c in candles]
+        classic_bull = (lows_slice[-1] < min(lows_slice[-6:-1], default=lows_slice[-1])
+                        and rsi_now > rsi_prev)
+        classic_bear = (highs_slice[-1] > max(highs_slice[-6:-1], default=highs_slice[-1])
+                        and rsi_now < rsi_prev)
 
-        # 2. MACD hidden divergence
-        macd_now,  sig_now  = self._macd(closes)
-        macd_prev, sig_prev = self._macd(closes[:-5])
-        macd_hidden_bull = (price_now > price_prev and macd_now < macd_prev and macd_now < 0)
-        macd_hidden_bear = (price_now < price_prev and macd_now > macd_prev and macd_now > 0)
-
-        # 3. Wick exhaustion — check last 3 candles
+        # 2. Wick exhaustion — institutional rejection (strengthened: ≥52%)
         exhaustion_bull = False
         exhaustion_bear = False
-        for c in candles[-3:]:
-            body = abs(c["close"] - c["open"])
+        for c in candles[-4:]:
+            body      = abs(c["close"] - c["open"])
             bar_range = c["high"] - c["low"]
             if bar_range < 1e-10:
                 continue
             up_wick   = c["high"] - max(c["open"], c["close"])
             down_wick = min(c["open"], c["close"]) - c["low"]
-            # Long lower wick (≥55% of bar) = bullish exhaustion / rejection
-            if down_wick / bar_range >= 0.55 and up_wick / bar_range <= 0.20:
-                exhaustion_bull = True
-            # Long upper wick (≥55% of bar) = bearish exhaustion / rejection
-            if up_wick / bar_range >= 0.55 and down_wick / bar_range <= 0.20:
-                exhaustion_bear = True
+            if down_wick / bar_range >= 0.52 and up_wick / bar_range <= 0.22:
+                exhaustion_bull = True   # buyers absorbing sellers' wicks
+            if up_wick / bar_range >= 0.52 and down_wick / bar_range <= 0.22:
+                exhaustion_bear = True   # sellers absorbing buyers' wicks
 
-        # 4. ATR compression (volatility squeeze)
+        # 3. ATR compression (volatility squeeze → coiling before breakout)
         atr_fast = _atr(candles[-8:],  6) if len(candles) >= 8  else atr_v
         atr_slow = _atr(candles[-25:], 20) if len(candles) >= 25 else atr_v
-        compressed = atr_fast < atr_slow * 0.55
+        compressed = atr_fast < atr_slow * 0.52
 
-        # 5. Stochastic extreme crossover
-        stoch = self._stochastic(candles)
-        stoch_oversold  = stoch < 22
-        stoch_overbought = stoch > 78
+        # 4. Consecutive rejection at a level (pure price action)
+        consec_bull, consec_bear = self._consecutive_rejections(candles, atr_v)
 
-        # Aggregate hidden signals
+        # 5. Candle body momentum shift (pure price action)
+        momentum_shift = self._momentum_shift(candles)
+
+        # Aggregate — weighted by signal reliability
         bull_signals = sum([
-            hidden_bull_div, macd_hidden_bull, exhaustion_bull,
-            compressed and stoch_oversold,
+            hidden_bull_div * 2,    # highest weight: RSI hidden div
+            classic_bull    * 2,    # high weight: classic divergence = reversal
+            exhaustion_bull * 1,
+            consec_bull     * 1,
+            momentum_shift == "BUY",
+            compressed and rsi_now < 35,   # squeeze + RSI extreme = coil before bull
         ])
         bear_signals = sum([
-            hidden_bear_div, macd_hidden_bear, exhaustion_bear,
-            compressed and stoch_overbought,
+            hidden_bear_div * 2,
+            classic_bear    * 2,
+            exhaustion_bear * 1,
+            consec_bear     * 1,
+            momentum_shift == "SELL",
+            compressed and rsi_now > 65,
         ])
 
-        hidden_div = hidden_bull_div or hidden_bear_div or macd_hidden_bull or macd_hidden_bear
+        hidden_div = hidden_bull_div or hidden_bear_div or classic_bull or classic_bear
 
         if bull_signals > bear_signals and bull_signals >= 1:
             direction = "BUY"
@@ -634,7 +689,10 @@ class _HiddenReversalDetector:
         else:
             direction = "NEUTRAL"
 
-        signal_type = "HIDDEN_DIV" if hidden_div else ("EXHAUSTION" if (exhaustion_bull or exhaustion_bear) else "NONE")
+        signal_type = ("HIDDEN_DIV"  if hidden_div else
+                       "EXHAUSTION"  if (exhaustion_bull or exhaustion_bear) else
+                       "CONSEC_REJ"  if (consec_bull or consec_bear) else
+                       "MOMENTUM_SHIFT" if momentum_shift != "NEUTRAL" else "NONE")
 
         return {
             "direction":      direction,
@@ -642,7 +700,6 @@ class _HiddenReversalDetector:
             "hidden_div":     hidden_div,
             "exhaustion":     exhaustion_bull or exhaustion_bear,
             "compressed":     compressed,
-            "stoch":          stoch,
             "bull_signals":   bull_signals,
             "bear_signals":   bear_signals,
         }
@@ -655,73 +712,106 @@ class _HiddenReversalDetector:
 class _TrendStrengthClassifier:
     """Grades trend strength and classifies market phase.
 
-    Inputs:
-      • ADX-14 (>40 = ELITE, >25 = STRONG, >15 = MODERATE, else WEAK)
-      • 5-EMA stack alignment (8/13/21/50/89)
-      • ATR-normalized slope of EMA-21
-      • Recent candle momentum (close vs open ratio)
+    REMOVED: 5-EMA stack alignment (8/13/21/50/89) — lagging indicator signals.
+    WHY: EMA crossovers always lag the actual move; on fast TFs they fire AFTER
+         the entry window has already closed.
+
+    REPLACED WITH: Pure price structure strength measures:
+      • ADX-14 (structural trend strength — kept, it's a measurement)
+      • Swing structure quality (HH/HL or LH/LL strength)
+      • Price rate-of-change (momentum normalized by ATR)
+      • Trending bar ratio (what % of recent bars close in trend direction)
+      • ATR-normalized price displacement (how far price has moved vs volatility)
     """
 
-    def _ema_stack_score(self, closes: list[float]) -> int:
-        """Returns 0-5 for how many EMAs are aligned bullishly (or bearishly negated)."""
-        if len(closes) < 90:
-            return 0
-        periods = [8, 13, 21, 50, 89]
-        emas = {n: _ema(closes, n)[-1] for n in periods}
-        # Bull stack: 8 > 13 > 21 > 50 > 89
-        bull_score = sum(1 for i in range(len(periods) - 1)
-                         if emas[periods[i]] > emas[periods[i + 1]])
-        # Bear stack: 8 < 13 < 21 < 50 < 89
-        bear_score = sum(1 for i in range(len(periods) - 1)
-                         if emas[periods[i]] < emas[periods[i + 1]])
-        return max(bull_score, bear_score)
+    def _swing_structure_score(self, candles: list[dict], atr_v: float) -> tuple[int, str]:
+        """Scores quality of swing structure (0-4) and direction.
+        Higher score = cleaner HH/HL or LH/LL = stronger trend."""
+        if len(candles) < 20:
+            return 0, "NEUTRAL"
+        highs = [c["high"]  for c in candles]
+        lows  = [c["low"]   for c in candles]
+        # Sample 4 swing points every 5 bars
+        ph = highs[::5][-4:]
+        pl = lows[::5][-4:]
+        if len(ph) < 3:
+            return 0, "NEUTRAL"
+        # Score HH progression
+        hh_score = sum(1 for i in range(1, len(ph)) if ph[i] > ph[i-1])
+        hl_score = sum(1 for i in range(1, len(pl)) if pl[i] > pl[i-1])
+        lh_score = sum(1 for i in range(1, len(ph)) if ph[i] < ph[i-1])
+        ll_score = sum(1 for i in range(1, len(pl)) if pl[i] < pl[i-1])
+        bull_structure = hh_score + hl_score
+        bear_structure = lh_score + ll_score
+        if bull_structure > bear_structure:
+            return bull_structure, "BUY"
+        if bear_structure > bull_structure:
+            return bear_structure, "SELL"
+        return 0, "NEUTRAL"
+
+    def _trending_bar_ratio(self, candles: list[dict], direction: str, n: int = 10) -> float:
+        """Ratio of bars that closed in trend direction over last n bars."""
+        if not candles or direction == "NEUTRAL":
+            return 0.0
+        recent = candles[-n:]
+        if direction == "BUY":
+            trend_bars = sum(1 for c in recent if c["close"] > c["open"])
+        else:
+            trend_bars = sum(1 for c in recent if c["close"] < c["open"])
+        return trend_bars / len(recent)
 
     def analyse(self, ticker: str) -> dict:
         candles = _fetch_candles(ticker, "5m", 100)
         if len(candles) < 30:
             return {"strength": "WEAK", "phase": "RANGING", "adx": 20.0,
-                    "stack_score": 0, "direction": "NEUTRAL"}
+                    "swing_score": 0, "direction": "NEUTRAL"}
 
         closes = [c["close"] for c in candles]
         adx, pdi, ndi = _adx(candles, 14)
         atr_v = _atr(candles, 14) or (closes[-1] * 0.0005)
 
-        # EMA stack alignment
-        stack_score = self._ema_stack_score(closes)
+        # Direction from ADX DI lines
+        di_direction = "BUY" if pdi > ndi else "SELL" if ndi > pdi else "NEUTRAL"
 
-        # EMA-21 slope normalized by ATR (over 5 bars)
-        e21 = _ema(closes, 21)
-        slope_5 = (e21[-1] - e21[-6]) / (atr_v * 5) if len(e21) >= 6 else 0.0
+        # Swing structure quality (pure price action)
+        swing_score, struct_direction = self._swing_structure_score(candles, atr_v)
 
-        # Candle momentum: average body direction of last 5 bars
-        momentum = sum(c["close"] - c["open"] for c in candles[-5:]) / 5
+        # Price rate-of-change normalized by ATR (over 5 and 10 bars)
+        roc_5  = (closes[-1] - closes[-6])  / (atr_v * 5)  if len(closes) >= 6  else 0.0
+        roc_10 = (closes[-1] - closes[-11]) / (atr_v * 10) if len(closes) >= 11 else 0.0
 
-        # Composite strength score (0-10)
+        # Trending bar ratio (% of bars closing in direction)
+        trend_ratio = self._trending_bar_ratio(candles, di_direction, n=10)
+
+        # ATR-normalized displacement (how far price has moved relative to volatility)
+        displacement = abs(closes[-1] - closes[-10]) / atr_v if len(closes) >= 10 else 0.0
+
+        # Composite strength score (0-10, no EMA-based component)
         score = 0
-        if adx > 40:  score += 4
-        elif adx > 25: score += 3
-        elif adx > 15: score += 1
-        score += min(stack_score, 3)
-        score += 2 if abs(slope_5) > 0.15 else (1 if abs(slope_5) > 0.07 else 0)
-        score += 1 if abs(momentum) > atr_v * 0.10 else 0
+        if adx > 40:    score += 4
+        elif adx > 28:  score += 3
+        elif adx > 18:  score += 1
+        score += min(swing_score, 3)                                     # swing quality
+        score += 2 if abs(roc_5) > 0.18 else (1 if abs(roc_5) > 0.08 else 0)
+        score += 1 if trend_ratio > 0.65 else 0
+        score += 1 if displacement > 1.5 else 0                          # strong displacement
 
         if score >= 8:   strength = "ELITE"
         elif score >= 6: strength = "STRONG"
         elif score >= 4: strength = "MODERATE"
         else:            strength = "WEAK"
 
-        # Phase classification
-        adx_trend    = adx > 22 and stack_score >= 3
-        adx_ranging  = adx < 18
+        # Phase classification (ADX + pure structure, no EMA stack)
+        adx_trending = adx > 22 and swing_score >= 2
+        adx_ranging  = adx < 18 and swing_score <= 1
         if adx_ranging:
             phase = "RANGING"
-        elif adx_trend:
+        elif adx_trending:
             phase = "CONTINUATION"
         else:
-            phase = "TRANSITION"   # may precede reversal
+            phase = "TRANSITION"
 
-        # Direction from DI comparison
-        direction = "BUY" if pdi > ndi else "SELL" if ndi > pdi else "NEUTRAL"
+        direction = di_direction if di_direction != "NEUTRAL" else struct_direction
 
         return {
             "strength":    strength,
@@ -729,8 +819,9 @@ class _TrendStrengthClassifier:
             "adx":         round(adx, 1),
             "pdi":         round(pdi, 1),
             "ndi":         round(ndi, 1),
-            "stack_score": stack_score,
-            "slope":       round(slope_5, 3),
+            "swing_score": swing_score,
+            "roc_5":       round(roc_5, 3),
+            "trend_ratio": round(trend_ratio, 2),
             "direction":   direction,
             "score":       score,
         }

@@ -243,12 +243,21 @@ class _SMCEngine:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# MODULE B  —  INDICATOR SUITE  (EXPANDED: 12 indicators)
+# MODULE B  —  PURE ANALYSIS  (RSI + ATR + ADX only — all lagging indicators removed)
 # ═════════════════════════════════════════════════════════════════════════════
+# REMOVED: EMA stacks, MACD, Bollinger Bands, Stochastic, CCI, Williams%R,
+#          MFI (Money Flow Index), Ichimoku Cloud.
+# WHY: All are lagging — they react AFTER the price has already moved,
+#      causing "chasing" entries that systematically lose on fast binary TFs.
+# KEPT: RSI-14 (OB/OS identification + divergence), ATR-14 (volatility
+#       measurement), ADX-14 (trend strength structural filter).
 
-class _IndicatorSuite:
-    """EMA · MACD · Bollinger · Stochastic · ATR · ADX · CCI ·
-       RSI · Williams%R · MFI · Ichimoku · Divergence"""
+class _PureAnalysis:
+    """Lean measurement layer — only non-lagging structural tools:
+      • RSI-14 : overbought / oversold zone identification + divergence
+      • ATR-14 : volatility measurement (structural filter, never a signal)
+      • ADX-14 : trend strength measurement (structural filter, never a signal)
+    """
 
     def _ema(self, data: list[float], period: int) -> list[float]:
         k = 2 / (period + 1)
@@ -260,117 +269,7 @@ class _IndicatorSuite:
     def _sma(self, data: list[float], period: int) -> float:
         return sum(data[-period:]) / period if len(data) >= period else sum(data) / len(data)
 
-    # ── EMA Stack ────────────────────────────────────────────────────────────
-    def ema_stack(self, candles: list[dict]) -> dict:
-        closes = [c["close"] for c in candles]
-        e8  = self._ema(closes, 8)[-1]
-        e13 = self._ema(closes, 13)[-1]
-        e21 = self._ema(closes, 21)[-1]
-        e50 = self._ema(closes, 50)[-1] if len(closes) >= 50 else closes[-1]
-        e89 = self._ema(closes, 89)[-1] if len(closes) >= 89 else closes[-1]
-        cur = closes[-1]
-        # Full 5-level stack check
-        full_bull = cur > e8 > e13 > e21 > e50
-        full_bear = cur < e8 < e13 < e21 < e50
-        part_bull = (cur > e8 and cur > e21) and not full_bull
-        part_bear = (cur < e8 and cur < e21) and not full_bear
-        if full_bull:
-            bias, strength = "BUY", 1.0
-        elif full_bear:
-            bias, strength = "SELL", 1.0
-        elif part_bull:
-            bias, strength = "BUY", 0.6
-        elif part_bear:
-            bias, strength = "SELL", 0.6
-        else:
-            bias, strength = "NEUTRAL", 0.0
-        return {"ema_bias": bias, "ema_strength": strength,
-                "e8": e8, "e21": e21, "e50": e50, "e89": e89}
-
-    # ── MACD (12/26/9) + Histogram Slope ─────────────────────────────────────
-    def macd(self, candles: list[dict]) -> dict:
-        closes = [c["close"] for c in candles]
-        e12 = self._ema(closes, 12)
-        e26 = self._ema(closes, 26) if len(closes) >= 26 else e12
-        macd_line   = [a - b for a, b in zip(e12, e26)]
-        signal_line = self._ema(macd_line, 9)
-        hist  = [m - s for m, s in zip(macd_line, signal_line)]
-        cm, cs, ch = macd_line[-1], signal_line[-1], hist[-1]
-        ph = hist[-2] if len(hist) > 1 else 0
-        pph = hist[-3] if len(hist) > 2 else 0
-        cross_up   = cm > cs and (len(macd_line) < 2 or macd_line[-2] <= signal_line[-2])
-        cross_down = cm < cs and (len(macd_line) < 2 or macd_line[-2] >= signal_line[-2])
-        hist_slope = ch - ph
-        hist_accel = (ch - ph) - (ph - pph)
-        if cross_up or (cm > cs and ch > ph > 0):
-            bias = "BUY"
-        elif cross_down or (cm < cs and ch < ph < 0):
-            bias = "SELL"
-        else:
-            bias = "NEUTRAL"
-        return {
-            "macd": round(cm, 7), "signal": round(cs, 7), "histogram": round(ch, 7),
-            "hist_slope": hist_slope, "hist_accel": hist_accel,
-            "macd_bias": bias, "cross_up": cross_up, "cross_down": cross_down,
-        }
-
-    # ── Bollinger Bands (20, 2σ) + Squeeze + %B ──────────────────────────────
-    def bollinger(self, candles: list[dict], period: int = 20, sd: float = 2.0) -> dict:
-        closes = [c["close"] for c in candles[-period:]]
-        sma = sum(closes) / len(closes)
-        std = math.sqrt(sum((p - sma) ** 2 for p in closes) / len(closes)) or 1e-9
-        upper = sma + sd * std
-        lower = sma - sd * std
-        cur   = closes[-1]
-        bw    = (upper - lower) / sma * 100 if sma else 0
-        pct_b = (cur - lower) / (upper - lower) if upper != lower else 0.5
-        squeeze = bw < 0.4
-        # Keltner channel for squeeze confirmation
-        atr_v = self.atr(candles, period=10)
-        kc_upper = sma + 1.5 * atr_v
-        kc_lower = sma - 1.5 * atr_v
-        kc_squeeze = lower > kc_lower and upper < kc_upper
-        return {
-            "upper": upper, "middle": sma, "lower": lower,
-            "bandwidth": bw, "percent_b": pct_b,
-            "squeeze": squeeze, "kc_squeeze": kc_squeeze,
-            "bb_bias": "BUY" if cur <= lower else ("SELL" if cur >= upper else "NEUTRAL"),
-        }
-
-    # ── Stochastic (14, 3, 3) ─────────────────────────────────────────────────
-    def stochastic(self, candles: list[dict], k_period: int = 14, d_period: int = 3) -> dict:
-        recent = candles[-k_period:]
-        hh = max(c["high"] for c in recent)
-        ll = min(c["low"]  for c in recent)
-        cur = recent[-1]["close"]
-        k = ((cur - ll) / (hh - ll) * 100) if hh != ll else 50.0
-        k_series = []
-        for i in range(min(d_period + 2, len(candles))):
-            r = candles[-(k_period + i): (-i if i > 0 else len(candles))]
-            if not r:
-                continue
-            _hh = max(c["high"] for c in r)
-            _ll = min(c["low"]  for c in r)
-            _cl = r[-1]["close"]
-            k_series.append((_cl - _ll) / (_hh - _ll) * 100 if _hh != _ll else 50.0)
-        d = sum(k_series[:d_period]) / d_period if len(k_series) >= d_period else k
-        prev_k = k_series[1] if len(k_series) > 1 else k
-        cross_up   = k > d and prev_k <= d
-        cross_down = k < d and prev_k >= d
-        if k < 20 or (cross_up and k < 40):
-            bias = "BUY"
-        elif k > 80 or (cross_down and k > 60):
-            bias = "SELL"
-        else:
-            bias = "NEUTRAL"
-        return {
-            "k": round(k, 2), "d": round(d, 2),
-            "overbought": k > 80, "oversold": k < 20,
-            "cross_up": cross_up, "cross_down": cross_down,
-            "stoch_bias": bias,
-        }
-
-    # ── ATR ───────────────────────────────────────────────────────────────────
+    # ── ATR-14 (volatility measurement — structural filter, not a signal) ────
     def atr(self, candles: list[dict], period: int = 14) -> float:
         trs = []
         for i in range(1, min(period + 1, len(candles))):
@@ -408,290 +307,208 @@ class _IndicatorSuite:
             "adx_bias": "BUY" if di_p > di_m else "SELL",
         }
 
-    # ── CCI (20) ─────────────────────────────────────────────────────────────
-    def cci(self, candles: list[dict], period: int = 20) -> dict:
-        recent = candles[-period:]
-        tps    = [(c["high"] + c["low"] + c["close"]) / 3 for c in recent]
-        mean   = sum(tps) / len(tps)
-        dev    = sum(abs(t - mean) for t in tps) / len(tps) or 1e-9
-        val    = (tps[-1] - mean) / (0.015 * dev)
-        return {
-            "cci": round(val, 2),
-            "overbought": val > 100, "oversold": val < -100,
-            "extreme_ob": val > 200, "extreme_os": val < -200,
-            "cci_bias": "BUY" if val < -100 else ("SELL" if val > 100 else "NEUTRAL"),
-        }
-
-    # ── RSI (14) ─────────────────────────────────────────────────────────────
+    # ── RSI-14 (OB/OS zones + divergence — the ONLY indicator signal kept) ────
     def rsi(self, closes: list[float], period: int = 14) -> float:
         if len(closes) < period + 1:
             return 50.0
         gains, losses = [], []
-        for i in range(1, period + 1):
-            d = closes[-period + i] - closes[-period + i - 1]
-            gains.append(d if d > 0 else 0.0)
-            losses.append(-d if d < 0 else 0.0)
-        ag = sum(gains) / period
-        al = sum(losses) / period
-        return round(100 - 100 / (1 + ag / al), 2) if al else 100.0
+        for i in range(1, len(closes)):
+            d = closes[i] - closes[i - 1]
+            gains.append(max(d, 0.0))
+            losses.append(max(-d, 0.0))
+        ag = sum(gains[-period:]) / period
+        al = sum(losses[-period:]) / period
+        return round(100.0 - 100.0 / (1 + ag / al), 2) if al else 100.0
 
-    # ── Williams %R (14) ─────────────────────────────────────────────────────
-    def williams_r(self, candles: list[dict], period: int = 14) -> dict:
-        recent = candles[-period:]
-        hh = max(c["high"]  for c in recent)
-        ll = min(c["low"]   for c in recent)
-        cur = recent[-1]["close"]
-        wr = ((hh - cur) / (hh - ll) * -100) if hh != ll else -50.0
-        return {
-            "wr": round(wr, 2),
-            "overbought": wr >= -20,
-            "oversold":   wr <= -80,
-            "wr_bias": "BUY" if wr <= -80 else ("SELL" if wr >= -20 else "NEUTRAL"),
-        }
-
-    # ── MFI — Money Flow Index (14) ───────────────────────────────────────────
-    def mfi(self, candles: list[dict], period: int = 14) -> dict:
-        pos_flow, neg_flow = 0.0, 0.0
-        for i in range(max(1, len(candles) - period), len(candles)):
-            c  = candles[i]
-            p  = candles[i - 1]
-            tp = (c["high"] + c["low"] + c["close"]) / 3
-            pp = (p["high"] + p["low"] + p["close"]) / 3
-            mf = tp * c.get("volume", 1)
-            if tp > pp:
-                pos_flow += mf
-            else:
-                neg_flow += mf
-        mfi_val = 100 - (100 / (1 + pos_flow / neg_flow)) if neg_flow else 100.0
-        return {
-            "mfi": round(mfi_val, 2),
-            "overbought": mfi_val > 80, "oversold": mfi_val < 20,
-            "mfi_bias": "BUY" if mfi_val < 20 else ("SELL" if mfi_val > 80 else "NEUTRAL"),
-        }
-
-    # ── Ichimoku Cloud (9/26/52) ──────────────────────────────────────────────
-    def ichimoku(self, candles: list[dict]) -> dict:
-        if len(candles) < 52:
-            return {"ichi_bias": "NEUTRAL", "above_cloud": False, "below_cloud": False}
-        highs  = [c["high"]  for c in candles]
-        lows   = [c["low"]   for c in candles]
-        closes = [c["close"] for c in candles]
-        tenkan  = (max(highs[-9:])  + min(lows[-9:]))  / 2
-        kijun   = (max(highs[-26:]) + min(lows[-26:])) / 2
-        span_a  = (tenkan + kijun) / 2
-        span_b  = (max(highs[-52:]) + min(lows[-52:])) / 2
-        cloud_top = max(span_a, span_b)
-        cloud_bot = min(span_a, span_b)
-        cur = closes[-1]
-        above_cloud = cur > cloud_top
-        below_cloud = cur < cloud_bot
-        tk_cross_bull = tenkan > kijun
-        tk_cross_bear = tenkan < kijun
-        if above_cloud and tk_cross_bull:
-            bias = "BUY"
-        elif below_cloud and tk_cross_bear:
-            bias = "SELL"
-        else:
-            bias = "NEUTRAL"
-        return {
-            "tenkan": tenkan, "kijun": kijun,
-            "cloud_top": cloud_top, "cloud_bot": cloud_bot,
-            "above_cloud": above_cloud, "below_cloud": below_cloud,
-            "ichi_bias": bias,
-        }
-
-    # ── RSI Divergence ────────────────────────────────────────────────────────
+    # ── RSI Divergence (classic + hidden) ────────────────────────────────────
     def rsi_divergence(self, candles: list[dict]) -> dict:
         closes = [c["close"] for c in candles]
         lows   = [c["low"]   for c in candles]
         highs  = [c["high"]  for c in candles]
         if len(closes) < 20:
             return {"div_type": "NONE", "div_bias": "NEUTRAL"}
-        rsi_series = [self.rsi(closes[:i+1]) for i in range(len(closes) - 5, len(closes))]
-        price_lows  = lows[-5:]
-        price_highs = highs[-5:]
-        bull_div = price_lows[-1] < price_lows[0]  and rsi_series[-1] > rsi_series[0]
-        bear_div = price_highs[-1] > price_highs[0] and rsi_series[-1] < rsi_series[0]
-        if bull_div:
-            return {"div_type": "BULLISH DIV", "div_bias": "BUY"}
-        if bear_div:
-            return {"div_type": "BEARISH DIV", "div_bias": "SELL"}
+        rsi_now  = self.rsi(closes)
+        rsi_prev = self.rsi(closes[:-5]) if len(closes) > 5 else rsi_now
+        price_now, price_prev = closes[-1], closes[-5] if len(closes) > 5 else closes[-1]
+        # Classic divergence: price makes new extreme but RSI doesn't confirm
+        classic_bull = (lows[-1] < min(lows[-6:-1], default=lows[-1])
+                        and rsi_now > rsi_prev)
+        classic_bear = (highs[-1] > max(highs[-6:-1], default=highs[-1])
+                        and rsi_now < rsi_prev)
+        # Hidden divergence: continuation — price HL but RSI LL
+        hidden_bull  = price_now > price_prev and rsi_now < rsi_prev and rsi_now < 55
+        hidden_bear  = price_now < price_prev and rsi_now > rsi_prev and rsi_now > 45
+        if classic_bull:
+            return {"div_type": "BULLISH DIV",        "div_bias": "BUY"}
+        if classic_bear:
+            return {"div_type": "BEARISH DIV",        "div_bias": "SELL"}
+        if hidden_bull:
+            return {"div_type": "HIDDEN BULL DIV",    "div_bias": "BUY"}
+        if hidden_bear:
+            return {"div_type": "HIDDEN BEAR DIV",    "div_bias": "SELL"}
         return {"div_type": "NONE", "div_bias": "NEUTRAL"}
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# MODULE C  —  AI MULTI-MODEL VOTING  (12 models, up from 8)
+# MODULE C  —  PURE PRICE ACTION VOTING  (8 models — zero lagging indicators)
 # ═════════════════════════════════════════════════════════════════════════════
+# REMOVED models: TrendFollower-AI (EMA stack), MeanReversion-AI (Stoch/BB/CCI),
+#   Momentum-AI (MACD), Volatility-AI (BB squeeze), MultiIndicator-AI (WR/MFI/Ichi)
+# ALL indicator-based voting is gone. Only pure price action + structural
+# measurements (RSI for extremes only, ADX for trend strength only).
 
 class _AIVotingLayer:
-    """12 sub-models, each with tuned weight. Weighted consensus → direction."""
+    """8 pure price-action sub-models, each with tuned weight.
+    RSI is used ONLY for overbought/oversold zone detection.
+    ADX is used ONLY as a structural trend-strength measurement.
+    No other indicators remain.
+    """
 
     MODELS = [
-        ("TrendFollower-AI",     1.6),   # EMA stack + ADX trend
-        ("MeanReversion-AI",     1.3),   # RSI + Stoch + BB + CCI extremes
-        ("BreakoutDetect-AI",    1.4),   # BB squeeze + BoS
-        ("SMC-AI",               2.0),   # OB + FVG + Sweep + CHoCH  ← highest weight
-        ("Momentum-AI",          1.5),   # MACD + RSI mid-zone + ADX
-        ("Volatility-AI",        1.2),   # BB squeeze + ATR expansion
-        ("PatternRecog-AI",      1.7),   # Candlestick patterns
-        ("LiquidityMap-AI",      1.8),   # Sweep + S/R distance
-        ("Wyckoff-AI",           1.4),   # Wyckoff phase alignment
-        ("MarketStructure-AI",   1.6),   # HH/HL or LH/LL
-        ("MultiIndicator-AI",    1.3),   # Williams%R + MFI + Ichimoku
-        ("Divergence-AI",        1.5),   # RSI divergence
+        ("SMC-AI",               3.0),  # OB + FVG + Sweep + CHoCH — institutional prints
+        ("LiquidityMap-AI",      2.8),  # Sweep depth + S/R pool proximity + BoS confirm
+        ("MarketStructure-AI",   2.5),  # HH/HL or LH/LL pure structure
+        ("Wyckoff-AI",           2.2),  # Wyckoff accumulation / distribution phase
+        ("PatternRecog-AI",      2.0),  # Candlestick: engulfing, pin bar, tweezer
+        ("RSI-Extreme-AI",       1.8),  # RSI deep extremes (<28 / >72) + divergence
+        ("BreakoutStructure-AI", 1.8),  # BoS strength + ATR expansion confirmation
+        ("TrendStrength-AI",     1.5),  # ADX structural measurement only
     ]
-
-    def _v_trend(self, d: dict) -> float:
-        v = 0.0
-        ema_map = {"BUY": 1, "SELL": -1}
-        v += ema_map.get(d["ema_bias"], 0) * d.get("ema_strength", 1.0)
-        adx = d["adx"]
-        if adx["trend_strong"]:
-            v += 1.2 if adx["adx_bias"] == "BUY" else -1.2
-        if adx.get("very_strong"):
-            v += 0.5 if adx["adx_bias"] == "BUY" else -0.5
-        return v
-
-    def _v_mean(self, d: dict) -> float:
-        v = 0.0
-        rsi = d["rsi"]
-        if rsi < 25:      v += 2.5
-        elif rsi < 35:    v += 1.5
-        elif rsi > 75:    v -= 2.5
-        elif rsi > 65:    v -= 1.5
-        stoch = d["stoch"]
-        if stoch["oversold"]:       v += 1.5
-        elif stoch["overbought"]:   v -= 1.5
-        elif stoch["cross_up"]:     v += 0.8
-        elif stoch["cross_down"]:   v -= 0.8
-        bb = d["bb"]
-        if bb["bb_bias"] == "BUY":    v += 1.0
-        elif bb["bb_bias"] == "SELL": v -= 1.0
-        cci = d["cci"]
-        if cci["extreme_os"]:  v += 2.0
-        elif cci["oversold"]:  v += 1.0
-        elif cci["extreme_ob"]: v -= 2.0
-        elif cci["overbought"]: v -= 1.0
-        return v
-
-    def _v_breakout(self, d: dict) -> float:
-        v = 0.0
-        bb = d["bb"]
-        bos = d["bos"]
-        if bb["kc_squeeze"]:  v += 1.5  # stronger: Keltner squeeze
-        elif bb["squeeze"]:   v += 0.8
-        if bos["bos_bullish"]:
-            v += 2.0 + min(bos["bos_strength"] / 50, 1.0)
-        elif bos["bos_bearish"]:
-            v -= 2.0 + min(bos["bos_strength"] / 50, 1.0)
-        return v
 
     def _v_smc(self, d: dict) -> float:
         v = 0.0
-        ob = d["ob"];  fvg = d["fvg"];  sweep = d["sweep"];  choch = d["choch"]
+        ob = d["ob"]; fvg = d["fvg"]; sweep = d["sweep"]; choch = d["choch"]
+        # Order Block at current price
         if "BULLISH" in ob.get("ob_bias", ""):     v += 2.5
         elif "BEARISH" in ob.get("ob_bias", ""):   v -= 2.5
-        if "BULLISH" in fvg.get("fvg_bias", ""):   v += 1.2
-        elif "BEARISH" in fvg.get("fvg_bias", ""): v -= 1.2
+        # Freshness multiplier — more recent OB = stronger signal
+        if ob.get("active_ob"):
+            freshness = ob["active_ob"].get("freshness", 0.5)
+            v += (freshness - 0.5) * 1.0 if "BULLISH" in ob.get("ob_bias", "") else \
+                 -(freshness - 0.5) * 1.0
+        # Fair Value Gap
+        if "BULLISH" in fvg.get("fvg_bias", ""):   v += 1.3
+        elif "BEARISH" in fvg.get("fvg_bias", ""): v -= 1.3
+        # Liquidity Sweep (stop hunt confirms reversal)
         if sweep["sweep_bias"] == "BUY":
-            v += 2.0 + min(sweep["sweep_depth_pct"] * 10, 1.5)
+            v += 2.2 + min(sweep["sweep_depth_pct"] * 12, 1.5)
         elif sweep["sweep_bias"] == "SELL":
-            v -= 2.0 + min(sweep["sweep_depth_pct"] * 10, 1.5)
+            v -= 2.2 + min(sweep["sweep_depth_pct"] * 12, 1.5)
+        # Change of Character
         if choch["choch_detected"]:
-            choch_v = 1.5 if "BULLISH" in choch["choch_direction"] else -1.5
+            choch_v = 1.8 if "BULLISH" in choch["choch_direction"] else -1.8
             if choch.get("vol_confirm"):
-                choch_v *= 1.3
+                choch_v *= 1.4   # volume confirmation amplifies CHoCH strength
             v += choch_v
         return v
 
-    def _v_momentum(self, d: dict) -> float:
+    def _v_liquidity(self, d: dict) -> float:
         v = 0.0
-        macd = d["macd"]; rsi = d["rsi"]; adx = d["adx"]
-        if macd["macd_bias"] == "BUY":
-            v += 2.0
-            if macd["hist_slope"] > 0 and macd["hist_accel"] > 0:
-                v += 0.5  # accelerating histogram
-        elif macd["macd_bias"] == "SELL":
-            v -= 2.0
-            if macd["hist_slope"] < 0 and macd["hist_accel"] < 0:
-                v -= 0.5
-        if 50 < rsi < 65:    v += 0.8
-        elif 35 < rsi < 50:  v -= 0.8
-        if adx["trend_strong"]:
-            v += 0.8 if adx["adx_bias"] == "BUY" else -0.8
+        sweep = d["sweep"]; sr = d["sr_zones"]; bos = d["bos"]
+        # Sweep is the primary signal — retail stops run = institutional entry
+        if sweep["sweep_bias"] == "BUY":   v += 3.0
+        elif sweep["sweep_bias"] == "SELL": v -= 3.0
+        # S/R proximity: price near support = buy, near resistance = sell
+        ds = sr.get("distance_to_support",    999)
+        dr = sr.get("distance_to_resistance", 999)
+        if ds < dr * 0.12:    v += 1.8
+        elif dr < ds * 0.12:  v -= 1.8
+        elif ds < dr * 0.25:  v += 0.8
+        elif dr < ds * 0.25:  v -= 0.8
+        # BoS in direction of S/R bias amplifies
+        if bos["bos_bullish"] and ds < dr: v += 1.0
+        elif bos["bos_bearish"] and dr < ds: v -= 1.0
         return v
 
-    def _v_volatility(self, d: dict) -> float:
-        bb = d["bb"]
-        if bb["kc_squeeze"]:  return 1.2
-        if bb["squeeze"]:     return 0.6
-        return 0.0
+    def _v_market_structure(self, d: dict) -> float:
+        ms = d["ms"]; bos = d["bos"]
+        v = 2.5 if ms["ms_bias"] == "BUY" else (-2.5 if ms["ms_bias"] == "SELL" else 0.0)
+        # BoS alignment with market structure = extra conviction
+        if bos["bos_bullish"] and ms["ms_bias"] == "BUY":   v += 1.2
+        elif bos["bos_bearish"] and ms["ms_bias"] == "SELL": v -= 1.2
+        # BoS strength
+        if bos["bos_strength"] > 0.2:
+            v += 0.8 if bos["bos_bullish"] else -0.8
+        return v
+
+    def _v_wyckoff(self, d: dict) -> float:
+        bias = d["wyckoff"]["bias"]; phase = d["wyckoff"].get("phase", "")
+        if bias == "BUY":
+            v = 2.5
+            if "MARKUP" in phase:  v += 0.5   # strongest Wyckoff bullish phase
+        elif bias == "SELL":
+            v = -2.5
+            if "MARKDOWN" in phase: v -= 0.5
+        else:
+            v = 0.0
+        return v
 
     def _v_pattern(self, d: dict) -> float:
         v = 0.0
         for p in d["patterns"]:
             p_up = p.upper()
-            if "BULLISH ENGULFING" in p_up:  v += 3.0
-            elif "BEARISH ENGULFING" in p_up: v -= 3.0
-            elif "HAMMER" in p_up:            v += 2.0
-            elif "SHOOTING STAR" in p_up:     v -= 2.0
-            elif "DOJI" in p_up:              v += 0.3  # slight indecision
+            if "BULLISH ENGULFING" in p_up:  v += 3.2
+            elif "BEARISH ENGULFING" in p_up: v -= 3.2
+            elif "HAMMER" in p_up:            v += 2.5
+            elif "SHOOTING STAR" in p_up:     v -= 2.5
+            elif "TWEEZER BOTTOM" in p_up:    v += 1.8
+            elif "TWEEZER TOP" in p_up:       v -= 1.8
+            elif "DOJI" in p_up:              v += 0.2  # mild indecision only
         return v
 
-    def _v_liquidity(self, d: dict) -> float:
+    def _v_rsi_extreme(self, d: dict) -> float:
+        """RSI used ONLY for deep extreme zones + divergence.
+        Mid-zone RSI (35-65) carries NO weight — it is lagging noise there."""
         v = 0.0
-        sweep = d["sweep"];  sr = d["sr_zones"]
-        if sweep["sweep_bias"] == "BUY":   v += 2.5
-        elif sweep["sweep_bias"] == "SELL": v -= 2.5
-        ds = sr.get("distance_to_support",    999)
-        dr = sr.get("distance_to_resistance", 999)
-        if ds < dr * 0.2:   v += 1.2
-        elif dr < ds * 0.2: v -= 1.2
+        rsi = d["rsi"]
+        # Deep extreme zones (highest weight)
+        if rsi < 18:        v += 3.5
+        elif rsi < 25:      v += 2.5
+        elif rsi < 32:      v += 1.2
+        elif rsi > 82:      v -= 3.5
+        elif rsi > 75:      v -= 2.5
+        elif rsi > 68:      v -= 1.2
+        # RSI divergence (classic + hidden both valid)
+        div = d.get("div", {})
+        if div.get("div_bias") == "BUY":    v += 2.2
+        elif div.get("div_bias") == "SELL": v -= 2.2
         return v
 
-    def _v_wyckoff(self, d: dict) -> float:
-        bias = d["wyckoff"]["bias"]
-        if bias == "BUY":   return 2.0
-        if bias == "SELL":  return -2.0
-        return 0.0
-
-    def _v_market_structure(self, d: dict) -> float:
-        ms = d["ms"]["ms_bias"]
-        if ms == "BUY":   return 2.0
-        if ms == "SELL":  return -2.0
-        return 0.0
-
-    def _v_multi_indicator(self, d: dict) -> float:
+    def _v_breakout(self, d: dict) -> float:
+        """BoS strength + ATR expansion — no Bollinger Bands, no BB squeeze."""
         v = 0.0
-        wr = d["wr"];  mfi_r = d["mfi_r"];  ichi = d["ichi"]
-        if wr["wr_bias"] == "BUY":   v += 1.5
-        elif wr["wr_bias"] == "SELL": v -= 1.5
-        if mfi_r["mfi_bias"] == "BUY":   v += 1.5
-        elif mfi_r["mfi_bias"] == "SELL": v -= 1.5
-        if ichi["ichi_bias"] == "BUY":   v += 2.0
-        elif ichi["ichi_bias"] == "SELL": v -= 2.0
+        bos = d["bos"]
+        # BoS with strength confirmation
+        if bos["bos_bullish"]:
+            v += 2.2 + min(bos["bos_strength"] / 45, 1.5)
+        elif bos["bos_bearish"]:
+            v -= 2.2 + min(bos["bos_strength"] / 45, 1.5)
+        # ATR expansion: increasing volatility at breakout = conviction
+        atr_now  = d.get("atr_val", 0)
+        atr_base = d.get("atr_base", atr_now)
+        if atr_base > 0 and atr_now > atr_base * 1.25:
+            v += 1.0 if bos["bos_bullish"] else (-1.0 if bos["bos_bearish"] else 0.0)
         return v
 
-    def _v_divergence(self, d: dict) -> float:
-        bias = d["div"]["div_bias"]
-        if bias == "BUY":   return 2.5
-        if bias == "SELL":  return -2.5
+    def _v_trend_strength(self, d: dict) -> float:
+        """ADX used only as a structural measurement — not a crossover signal."""
+        adx = d["adx"]
+        if adx.get("very_strong"):
+            return 1.5 if adx["adx_bias"] == "BUY" else -1.5
+        if adx["trend_strong"]:
+            return 1.0 if adx["adx_bias"] == "BUY" else -1.0
         return 0.0
 
     def vote(self, d: dict) -> dict:
         raw_votes = [
-            self._v_trend(d),
-            self._v_mean(d),
-            self._v_breakout(d),
             self._v_smc(d),
-            self._v_momentum(d),
-            self._v_volatility(d),
-            self._v_pattern(d),
             self._v_liquidity(d),
-            self._v_wyckoff(d),
             self._v_market_structure(d),
-            self._v_multi_indicator(d),
-            self._v_divergence(d),
+            self._v_wyckoff(d),
+            self._v_pattern(d),
+            self._v_rsi_extreme(d),
+            self._v_breakout(d),
+            self._v_trend_strength(d),
         ]
         total_w  = sum(w for _, w in self.MODELS)
         weighted = sum(v * w for v, (_, w) in zip(raw_votes, self.MODELS))
@@ -701,20 +518,19 @@ class _AIVotingLayer:
         sell_c = sum(1 for v in raw_votes if v < 0)
         agree  = round(max(buy_c, sell_c) / len(self.MODELS) * 100, 1)
 
-        # Consensus: need ≥ 58% agreement for a non-SPLIT call
         consensus = ("STRONG"   if agree >= 75  else
-                     "MODERATE" if agree >= 58  else "SPLIT")
-        decision  = "BUY" if norm > 0.6 else ("SELL" if norm < -0.6 else "WAIT")
+                     "MODERATE" if agree >= 62  else "SPLIT")
+        decision  = "BUY" if norm > 0.55 else ("SELL" if norm < -0.55 else "WAIT")
         conf      = min(abs(norm) * 18 + 50, 99.9)
 
         return {
-            "ai_decision":    decision,
-            "ai_confidence":  round(conf, 1),
+            "ai_decision":      decision,
+            "ai_confidence":    round(conf, 1),
             "normalized_score": round(norm, 4),
-            "buy_models":     buy_c,
-            "sell_models":    sell_c,
-            "model_agreement": agree,
-            "ai_consensus":   consensus,
+            "buy_models":       buy_c,
+            "sell_models":      sell_c,
+            "model_agreement":  agree,
+            "ai_consensus":     consensus,
         }
 
 
@@ -822,7 +638,7 @@ def _synthetic_candles(pair: str, count: int = 80) -> list[dict]:
 class _EliteMaster:
     def __init__(self) -> None:
         self.smc  = _SMCEngine()
-        self.ind  = _IndicatorSuite()
+        self.ind  = _PureAnalysis()
         self.ai   = _AIVotingLayer()
         self.prof = _MarketProfiler()
 
@@ -884,7 +700,7 @@ class _EliteMaster:
             }
         closes = [c["close"] for c in candles]
 
-        # ── SMC layer ─────────────────────────────────────────────────────────
+        # ── SMC layer (pure price action — unchanged) ─────────────────────────
         bos   = self.smc.detect_bos(candles)
         choch = self.smc.detect_choch(candles)
         ob    = self.smc.find_order_blocks(candles)
@@ -893,30 +709,28 @@ class _EliteMaster:
         wyck  = self.smc.detect_wyckoff(candles)
         ms    = self.smc.market_structure(candles)
 
-        # ── Indicator layer ───────────────────────────────────────────────────
-        ema   = self.ind.ema_stack(candles)
-        macd  = self.ind.macd(candles)
-        bb    = self.ind.bollinger(candles)
-        stoch = self.ind.stochastic(candles)
-        atr_v = self.ind.atr(candles)
-        adx   = self.ind.adx(candles)
-        cci_r = self.ind.cci(candles)
-        rsi_v = self.ind.rsi(closes)
-        wr    = self.ind.williams_r(candles)
-        mfi_r = self.ind.mfi(candles)
-        ichi  = self.ind.ichimoku(candles)
-        div   = self.ind.rsi_divergence(candles)
-        pats  = self._patterns(candles)
-        sr    = self._sr_zones(candles)
+        # ── Structural measurements (RSI + ATR + ADX only) ────────────────────
+        # All lagging indicators removed. These three are measurement tools,
+        # not signal generators.
+        atr_v  = self.ind.atr(candles)
+        adx    = self.ind.adx(candles)
+        rsi_v  = self.ind.rsi(closes)
+        div    = self.ind.rsi_divergence(candles)
+        pats   = self._patterns(candles)
+        sr     = self._sr_zones(candles)
 
-        # ── AI vote ───────────────────────────────────────────────────────────
+        # ATR comparison (recent vs baseline) for breakout conviction check
+        atr_recent = self.ind.atr(candles[-8:],  6) if len(candles) >= 8  else atr_v
+        atr_base   = self.ind.atr(candles[-30:], 20) if len(candles) >= 30 else atr_v
+
+        # ── AI vote (pure PA models) ──────────────────────────────────────────
         ai_result = self.ai.vote({
-            "ema_bias": ema["ema_bias"], "ema_strength": ema["ema_strength"],
-            "adx": adx, "rsi": rsi_v, "stoch": stoch, "bb": bb,
-            "cci": cci_r, "bos": bos, "fvg": fvg, "ob": ob,
-            "sweep": sweep, "choch": choch, "macd": macd, "atr": atr_v,
+            "adx": adx, "rsi": rsi_v,
+            "bos": bos, "fvg": fvg, "ob": ob,
+            "sweep": sweep, "choch": choch,
             "patterns": pats, "sr_zones": sr, "wyckoff": wyck,
-            "ms": ms, "wr": wr, "mfi_r": mfi_r, "ichi": ichi, "div": div,
+            "ms": ms, "div": div,
+            "atr_val": atr_recent, "atr_base": atr_base,
         })
 
         # ── Market profile filter ─────────────────────────────────────────────
@@ -928,20 +742,21 @@ class _EliteMaster:
             sweep["sweep_detected"],
         )
 
-        # ── Elite composite score ─────────────────────────────────────────────
+        # ── Elite composite score (pure PA — no indicator bonuses) ─────────────
         score = ai_result["normalized_score"] * 100
-        if adx["trend_strong"]:                  score += 5.0
-        if adx.get("very_strong"):               score += 3.0
-        if sweep["sweep_detected"]:              score += 8.0
-        if ob["active_ob"]:                      score += 6.0
-        if ai_result["model_agreement"] >= 75:   score += 10.0
-        if ai_result["model_agreement"] >= 90:   score += 5.0   # extra for near-unanimous
-        if profile["passed"]:                    score += 5.0
-        else:                                    score -= 10.0
-        if bos["bos_strength"] > 0.1:            score += min(bos["bos_strength"] * 10, 5.0)
-        if wyck["bias"] == ai_result["ai_decision"]: score += 4.0
-        if ms["ms_bias"] == ai_result["ai_decision"]: score += 4.0
-        if div["div_bias"] == ai_result["ai_decision"]: score += 6.0
+        # Structural bonuses (all price-action based)
+        if adx["trend_strong"]:                     score += 5.0
+        if adx.get("very_strong"):                  score += 3.0
+        if sweep["sweep_detected"]:                 score += 10.0  # sweep = key SMC signal
+        if ob["active_ob"]:                         score += 7.0
+        if ai_result["model_agreement"] >= 75:      score += 10.0
+        if ai_result["model_agreement"] >= 90:      score += 5.0
+        if profile["passed"]:                       score += 5.0
+        else:                                       score -= 10.0
+        if bos["bos_strength"] > 0.1:               score += min(bos["bos_strength"] * 12, 6.0)
+        if wyck["bias"] == ai_result["ai_decision"]:  score += 5.0  # Wyckoff alignment
+        if ms["ms_bias"] == ai_result["ai_decision"]: score += 5.0  # structure alignment
+        if div["div_bias"] == ai_result["ai_decision"]: score += 7.0  # RSI divergence bonus
 
         elite_conf = min(abs(score) * 0.75 + 45, 99.9)
 
