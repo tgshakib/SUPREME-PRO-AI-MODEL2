@@ -157,6 +157,14 @@ except Exception as _fmtfe:
     _FINORIX_MTF_OK = False
 
 try:
+    from finorix_elite_engine import finorix_elite_analyse as _finorix_elite_analyse
+    _FINORIX_ELITE_OK = True
+except Exception as _felee:
+    print(f"[signals] finorix_elite_engine import failed: {_felee}")
+    _finorix_elite_analyse = None  # type: ignore
+    _FINORIX_ELITE_OK = False
+
+try:
     from binary_master_filter import binary_master_check as _master_check
     _MASTER_OK = True
 except Exception as _mfe:
@@ -762,6 +770,41 @@ def generate_signal(
                 elif _fmtf["direction"] not in ("WAIT", None) and _fmtf["direction"] != direction:
                     if not elite_confirmed:
                         confidence = max(90, (confidence or 97) - 2)
+            except Exception:
+                pass
+
+        # ── FINORIX ELITE ENGINE — big-to-small cascade · hidden S&R · reversal ──
+        # 5-module analysis: H1→M15→M5→M1 cascade, elite S&R zones (classical +
+        # hidden + psychological + EQH/EQL + OB + FVG), hidden divergence detector,
+        # ADX/EMA-stack trend strength, and zone confluence scorer.
+        # Contract: zero side-effects — never modifies signal text.
+        if _FINORIX_ELITE_OK and _finorix_elite_analyse is not None and direction is not None:
+            try:
+                _mx3 = "OTC" if is_otc else "LIVE"
+                _fe  = _finorix_elite_analyse(pair, _mx3)
+                _fe_dir = _fe.get("direction", "WAIT")
+                if _fe_dir not in ("WAIT", None):
+                    _engine_votes.append(_fe_dir)
+                    # HIDDEN grade (highest) → triple vote (max conviction zone stack)
+                    if _fe.get("grade") == "HIDDEN":
+                        _engine_votes.append(_fe_dir)
+                        _engine_votes.append(_fe_dir)
+                    # ELITE grade → double vote
+                    elif _fe.get("grade") in ("ELITE", "GOD", "ULTRA"):
+                        _engine_votes.append(_fe_dir)
+                    # Zone confluence ≥ 4 → extra vote regardless of grade
+                    if _fe.get("zone_confluence", 0) >= 4:
+                        _engine_votes.append(_fe_dir)
+                    # Reversal phase + same direction → bigger confidence boost
+                    if _fe_dir == direction and _fe.get("confidence", 0) >= 70:
+                        _phase_boost = 2 if _fe.get("trend_phase") == "REVERSAL" else 1
+                        confidence = min(100, (confidence or 97) + _phase_boost)
+                    # Hidden zone at current price + direction match → extra +1
+                    if _fe.get("hidden_zone") and _fe_dir == direction:
+                        confidence = min(100, (confidence or 97) + 1)
+                # Veto: hard split consensus detected by elite engine
+                if _fe.get("veto") and not elite_confirmed:
+                    confidence = max(88, (confidence or 97) - 4)
             except Exception:
                 pass
 

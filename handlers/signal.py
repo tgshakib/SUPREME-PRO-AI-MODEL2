@@ -232,8 +232,32 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         call.bot, chat_id, loading, reply_markup=None,
     )
 
-    # 6-second AI AUTO-BOOST: full deep scan window before signal fires
-    await asyncio.sleep(6.0)
+    # Adaptive scan window: 6-7s normal · 10-12s high volatility / confused market
+    # Step 1: price snapshot at T=0
+    _px_t0: float | None = None
+    try:
+        from live_prices import get_live_price as _glp
+        _px_t0 = _glp(pair)
+    except Exception:
+        pass
+    await asyncio.sleep(3.0)   # first 3 seconds — always wait (minimum scan floor)
+    # Step 2: measure 3-second price movement to gauge volatility
+    _extra = 3.0   # default: 3+3 = 6s total (normal market)
+    try:
+        from live_prices import get_live_price as _glp2
+        _px_t3 = _glp2(pair)
+        if _px_t0 and _px_t3 and _px_t0 > 0:
+            _move_pct = abs(_px_t3 - _px_t0) / _px_t0   # fractional move over 3s
+            if _move_pct > 0.0006:    # >0.06% in 3s = very high volatility
+                _extra = 9.0          # total: 3+9 = 12s deep scan
+            elif _move_pct > 0.0003:  # >0.03% in 3s = elevated volatility
+                _extra = 7.0          # total: 3+7 = 10s extended scan
+            elif _move_pct > 0.00015: # >0.015% in 3s = slightly elevated
+                _extra = 4.0          # total: 3+4 = 7s slightly longer
+            # else: calm market → _extra stays 3.0 (total 6s)
+    except Exception:
+        pass   # fallback keeps _extra=3.0 → 6s total
+    await asyncio.sleep(_extra)
 
     sig = generate_signal(pair, market_name, tf_label, user_id=user_id, broker=broker)
 
