@@ -108,6 +108,13 @@ except Exception as _adve:
     _ADV_OK = False
 
 try:
+    from vpvr_engine import vpvr_session_vote as _vpvr_session_vote
+    _VPVR_OK = True
+except Exception as _vpvre:
+    _vpvr_session_vote = None  # type: ignore
+    _VPVR_OK = False
+
+try:
     from institutional_flow import analyze as _inst_analyze, get_orderflow_vote as _inst_vote
     _INST_FLOW_OK = True
 except Exception as _ife:

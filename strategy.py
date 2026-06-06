@@ -59,6 +59,13 @@ except Exception:
     _inst_vote = None  # type: ignore
     _INST_OK = False
 
+try:
+    from vpvr_engine import vpvr_session_vote as _vpvr_vote
+    _VPVR_OK = True
+except Exception:
+    _vpvr_vote = None  # type: ignore
+    _VPVR_OK = False
+
 # ── Strategy parameters (V10 CLEAN — RSI(14) + EMA(50) only) ────
 # Two core indicators:
 #   1. RSI(14)  — strength, momentum, overbought/oversold
@@ -232,6 +239,21 @@ def analyze_pair(pair: str) -> Optional[dict]:
     rsi_momentum = rsi_val - float(prev["rsi"])
 
     score = _score_setup(direction, rsi_val, rsi_momentum)
+
+    # ── VPVR Session-Break Vote (silent — zero signal text change) ────
+    # VAH = institutional SELL zone after 4:30 PM session break
+    # VAL = institutional BUY  zone after 4:30 PM session break
+    if _vpvr_vote is not None:
+        try:
+            _vpvr = _vpvr_vote(pair, direction)
+            if _vpvr.get("active"):
+                if _vpvr["vote"] == +1:
+                    score = min(100, score + 8)   # at VAH/VAL — structure confirms
+                elif _vpvr["vote"] == -1:
+                    score = max(0, score - 15)    # fighting institutional zone
+        except Exception:
+            pass
+
     setup = {
         "direction":  direction,
         "entry":      entry,
