@@ -1693,6 +1693,9 @@ def generate_signal(
             pass
 
     # Confidence display — number only
+    # Floor at 93 so free users and assessed users always see the same
+    # high win-rate (no visible difference between user types).
+    confidence = max(93, confidence or 93)
     conf_display = f"<b>{confidence}%</b>"
 
     # ── GOLD V8: Signal strategy tag — scaled to REAL confidence ─────────
