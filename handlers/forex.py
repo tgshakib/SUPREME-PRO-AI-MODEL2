@@ -644,28 +644,23 @@ async def cb_fx_instant(call: CallbackQuery, bot: Bot):
     await call.answer("⚡ Scanning market… signal ready in 5-8 sec", show_alert=False)
 
     # ── Scanning placeholder message ──────────────────────────────────────
-    scan_text = (
-        "⚡ <b>INSTANCE SIGNAL — AI SCANNING</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "🔍 <b>Scanning session-ranked pairs…</b>\n"
-        "📊 Pure Price Action · BoS · CHoCH · OB · FVG\n"
-        "💧 Liquidity Sweeps · Hidden S&R · Fake-Out Zones\n"
-        "⏳ <i>Signal ready in ~5-8 seconds…</i>"
-    )
     scan_msg = None
     try:
-        scan_msg = await call.message.answer(scan_text, parse_mode="HTML")
+        scan_msg = await call.message.answer(
+            "⚡ <b>SUPREME AI FX Analysing ...</b>", parse_mode="HTML"
+        )
     except Exception:
         pass
 
     # ── Run the analysis (await gives event loop time while fetch runs) ───
     await asyncio.sleep(1.0)   # let the scanning message show first
 
+    user_pairs = _user_pair_list(user_id)
     loop = asyncio.get_event_loop()
     try:
-        # Run blocking yfinance fetch in a thread so bot stays responsive
+        # Strict=True → scan ONLY the user's selected pair(s), no fallback fill
         sig = await loop.run_in_executor(None, lambda: instant_scan(
-            _user_pair_list(user_id)
+            user_pairs, strict=bool(user_pairs)
         ))
     except Exception as e:
         if scan_msg:
@@ -685,6 +680,26 @@ async def cb_fx_instant(call: CallbackQuery, bot: Bot):
     # ── Format signal text ────────────────────────────────────────────────
     caption = format_instant_signal(sig)
 
+    # ── Insert signal into DB so I'M IN / tracker work like a normal signal
+    from keyboards import forex_signal_kb as _fx_sig_kb
+    sig_id = None
+    try:
+        sig_id = db.create_forex_signal(
+            user_id   = user_id,
+            chat_id   = call.message.chat.id,
+            pair      = sig["pair"],
+            direction = sig["direction"],
+            entry     = sig["entry"],
+            tp_prices = [t["price"] for t in sig["tps"]],
+            sl_price  = sig["sl"],
+            max_tp    = len(sig["tps"]),
+            kind      = "LIVE",
+        )
+    except Exception:
+        pass
+
+    kb = _fx_sig_kb(sig_id, kind="LIVE") if sig_id else _instant_signal_kb()
+
     # ── Choose banner photo ───────────────────────────────────────────────
     _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     banner_buy  = os.path.join(_base, "assets", "forex_buy.jpg")
@@ -699,37 +714,46 @@ async def cb_fx_instant(call: CallbackQuery, bot: Bot):
             pass
 
     # ── Send signal card ──────────────────────────────────────────────────
-    from keyboards import forex_more_signal_kb
+    sent_msg = None
     try:
         if os.path.exists(photo_path):
-            await bot.send_photo(
+            sent_msg = await bot.send_photo(
                 chat_id=call.message.chat.id,
                 photo=FSInputFile(photo_path),
                 caption=caption,
                 parse_mode="HTML",
-                reply_markup=_instant_signal_kb(),
+                reply_markup=kb,
             )
         else:
-            await call.message.answer(
-                caption, parse_mode="HTML",
-                reply_markup=_instant_signal_kb(),
+            sent_msg = await call.message.answer(
+                caption, parse_mode="HTML", reply_markup=kb,
             )
     except Exception as e:
         try:
-            await call.message.answer(caption, parse_mode="HTML")
+            sent_msg = await call.message.answer(caption, parse_mode="HTML")
+        except Exception:
+            pass
+
+    # Track the message_id so signal card can be found for I'M IN wipe
+    if sig_id and sent_msg:
+        try:
+            db.set_forex_signal_msg(sig_id, sent_msg.message_id)
         except Exception:
             pass
 
 
 def _user_pair_list(user_id: int) -> list[str]:
-    """Return the pairs the user configured for their forex setup, or None."""
+    """Return the pair names the user configured for their forex setup.
+
+    Pairs are stored as a comma-separated string of indices into FOREX_PAIRS
+    (e.g. "0,5,10").  Returns a list of pair name strings like ["EUR/USD"].
+    """
     try:
         setup = db.get_forex_setup(user_id)
         if setup and setup.get("pairs"):
-            import json as _json
-            raw = setup["pairs"]
-            pairs = _json.loads(raw) if isinstance(raw, str) else raw
-            return [str(p) for p in pairs if p] if pairs else []
+            raw = str(setup["pairs"])
+            indices = [int(i) for i in raw.split(",") if i.strip().isdigit()]
+            return [FOREX_PAIRS[i] for i in indices if 0 <= i < len(FOREX_PAIRS)]
     except Exception:
         pass
     return []

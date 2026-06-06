@@ -630,11 +630,18 @@ def _calculate_levels(analysis: dict) -> dict:
         base_tp_dist = base_tp_dist * session_mult
         tp_step      = max(pip * 25, base_tp_dist * 0.75)
 
-    # Number of TPs: 2-5 based on session score + setup strength
-    n_tps = 2
-    if sess_sc >= 7:  n_tps = 3
-    if sess_sc >= 9:  n_tps = 4
-    if score >= 75:   n_tps = min(n_tps + 1, 5)
+    # Number of TPs — big moves get more ladders
+    if is_metal or is_crypto:
+        # Gold / Silver / BTC / ETH naturally move far → up to 9 TPs
+        n_tps = 6 if score < 75 else 9
+    elif is_index:
+        n_tps = 4 if sess_sc < 9 else 6
+    else:
+        n_tps = 2
+        if sess_sc >= 7:  n_tps = 3
+        if sess_sc >= 9:  n_tps = 4
+        if score >= 75:   n_tps = min(n_tps + 1, 6)
+        if score >= 85 and sess_sc >= 9:  n_tps = 9
 
     tps = []
     for i in range(n_tps):
@@ -718,14 +725,17 @@ def _win_rate_icon(wr: int) -> str:
 # PUBLIC API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def instant_scan(user_pairs: list[str] | None = None) -> dict:
-    """Scan all eligible pairs, pick the best current setup, and return the
+def instant_scan(user_pairs: list[str] | None = None, strict: bool = False) -> dict:
+    """Scan eligible pairs, pick the best current setup, and return the
     complete signal dict.  Always returns a signal — never fails silently.
 
     Parameters
     ----------
     user_pairs : list of pair strings the user configured, or None to use
                  the built-in ranked fallback list.
+    strict     : if True and user_pairs is non-empty, scan ONLY those pairs
+                 (no fallback fill).  Set by the INSTANCE SIGNAL handler so
+                 the scan is limited to the user's already-selected pair(s).
 
     Returns
     -------
@@ -741,12 +751,13 @@ def instant_scan(user_pairs: list[str] | None = None) -> dict:
     if user_pairs:
         pairs_to_scan = sorted(user_pairs, key=lambda p: _session_score(p), reverse=True)[:10]
 
-    # Fill up with session-ranked fallback pairs
-    for fp in sorted(_FALLBACK_PAIRS, key=lambda p: _session_score(p), reverse=True):
-        if fp not in pairs_to_scan:
-            pairs_to_scan.append(fp)
-        if len(pairs_to_scan) >= 10:
-            break
+    # Fill up with session-ranked fallback pairs (skipped when strict=True)
+    if not strict:
+        for fp in sorted(_FALLBACK_PAIRS, key=lambda p: _session_score(p), reverse=True):
+            if fp not in pairs_to_scan:
+                pairs_to_scan.append(fp)
+            if len(pairs_to_scan) >= 10:
+                break
 
     # ── Analyse each pair ─────────────────────────────────────────────────
     results = []
@@ -839,78 +850,94 @@ def instant_scan(user_pairs: list[str] | None = None) -> dict:
 
 def format_instant_signal(sig: dict) -> str:
     """Format the instant signal into a Telegram HTML caption.
+
+    Matches the forex live signal card format from _signal_text in forex_engine.py.
     Signal text contract: NEVER called from inside signal.py or any other
-    signal-text generator. This is the ONLY place the instant signal text
-    lives. bot text is untouched.
+    signal-text generator. This is the ONLY place the instant signal text lives.
     """
     pair      = sig["pair"]
     direction = sig["direction"]
     dec       = sig.get("dec", 5)
-    side_icon = "🔵 BUY  ▲" if direction == "BUY" else "🔴 SELL ▼"
+    is_buy    = (direction == "BUY")
+    head_emoji = "🟢" if is_buy else "🔴"
+    side_word  = "BUY" if is_buy else "SELL"
+    arrow_word = "BUY / UP" if is_buy else "SELL / DOWN"
+
     entry_lo  = sig["entry_lo"]
     entry_hi  = sig["entry_hi"]
     sl        = sig["sl"]
     sl_pips   = sig["sl_pips"]
     tps       = sig["tps"]
-    wr        = sig["win_rate"]
-    wr_icon   = _win_rate_icon(wr)
-    strength  = sig["strength_label"]
-    sess_name = sig["session_name"]
-    sess_full = sig.get("session_full_tag", "")
-    move_type = sig["move_type"]
-    valid_win = sig["valid_window"]
     score     = sig["score"]
-    sigs      = sig.get("analysis_signals", [])
-    rsi_v     = sig["rsi"]
 
-    lines = []
-    lines.append(f"⚡ <b>INSTANCE SIGNAL</b> — <b>{pair}</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"<b>{side_icon}</b>")
-    lines.append(f"🔀 <b>Move:</b>  {move_type}")
-    lines.append("")
+    # ── Session / kill zone ───────────────────────────────────────────────
+    sk = _session_key()
+    kz_line = {
+        "overlap": "🔥 LONDON/NY OVERLAP — MAX INSTITUTIONAL FLOW",
+        "london":  "🇬🇧 LONDON KILL ZONE — SMART MONEY ACTIVE",
+        "ny":      "🗽 NEW YORK KILL ZONE — DISTRIBUTION PHASE",
+        "asian":   "🌏 ASIAN SESSION — ACCUMULATION / RANGE",
+    }.get(sk, f"⏰ {sig['session_name'].upper()}")
 
-    # Entry zone
-    lines.append(f"⚡ <b>ENTRY ZONE</b>")
-    lines.append(f"   <code>{entry_lo:.{dec}f}</code>  —  <code>{entry_hi:.{dec}f}</code>")
-    lines.append("")
+    volume = {
+        "overlap": "HIGH",
+        "london":  "NORMAL",
+        "ny":      "NORMAL",
+        "asian":   "LOW",
+    }.get(sk, "NORMAL")
 
-    # TP ladder
-    lines.append("━━ 🎯 TARGETS ━━━━━━━━━━━━━━")
-    tp_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-    for i, tp in enumerate(tps):
-        em   = tp_emojis[i] if i < len(tp_emojis) else f"TP{i+1}"
-        sign = "+" if direction == "BUY" else "-"
-        lines.append(
-            f"🎯 <b>TP{em}</b>  <code>{tp['price']:.{dec}f}</code>"
-            f"   <i>{sign}{tp['pips']} pips</i>   <b>{tp['hit_pct']}%</b> hit"
+    # ── Trend / bias ──────────────────────────────────────────────────────
+    if score >= 85:
+        trend_label = "⬆️ STRONG UP" if is_buy else "⬇️ STRONG DOWN"
+    else:
+        trend_label = "📈 BULLISH" if is_buy else "📉 BEARISH"
+    bias_word = "📈 BULLISH" if is_buy else "📉 BEARISH"
+
+    # ── Date / time ───────────────────────────────────────────────────────
+    now_utc  = datetime.utcnow()
+    date_str = now_utc.strftime("%B %d")
+    time_str = now_utc.strftime("%H:%M:%S UTC")
+
+    # ── Entry line ────────────────────────────────────────────────────────
+    entry_zone_str = f"{entry_lo:.{dec}f} - {entry_hi:.{dec}f}"
+    entry_line = f"{head_emoji} <b>{side_word} {pair} : {entry_zone_str}</b>"
+
+    # ── TP lines ──────────────────────────────────────────────────────────
+    tp_lines = []
+    for n, tp in enumerate(tps, start=1):
+        pip_tag = f"  (+{tp['pips']} pips)"
+        tp_lines.append(
+            f"🎯 <b>TP{n}</b> : <code>{tp['price']:.{dec}f}</code>{pip_tag}"
         )
 
-    lines.append("")
-    lines.append(
-        f"🛑 <b>STOP LOSS</b>  <code>{sl:.{dec}f}</code>"
-        f"   <i>-{sl_pips} pips</i>"
+    # ── SL line ───────────────────────────────────────────────────────────
+    sl_line = (
+        f"🛡️ <b>SL</b> : <code>{sl:.{dec}f}</code>  (-{sl_pips} pips)"
     )
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    lines.append(f"{wr_icon} <b>Win Rate</b>      <b>{wr}%</b>")
-    lines.append(f"💪 <b>Strength</b>      {strength}")
-    lines.append(f"🕐 <b>Session</b>       {sess_name}")
-    lines.append(f"⏱ <b>Valid For</b>     {valid_win}")
-    if rsi_v < 30:
-        lines.append(f"📊 <b>RSI</b>           <code>{rsi_v:.0f}</code>  ◀ OVERSOLD — ideal BUY zone")
-    elif rsi_v > 70:
-        lines.append(f"📊 <b>RSI</b>           <code>{rsi_v:.0f}</code>  ◀ OVERBOUGHT — ideal SELL zone")
-    lines.append("")
-
-    if sigs:
-        lines.append("🔬 <b>Confirmation:</b>  " + "  ·  ".join(sigs[:5]))
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(
-        "🤖 <i>SUPREME PRO AI · Pure Price Action · SMC · ICT</i>\n"
-        "🏹 <i>Zero lagging indicators · Sniper precision</i>"
-    )
+    # ── Assemble (same layout as _signal_text in forex_engine.py) ─────────
+    lines = [
+        "<b>「 LIVE SIGNAL 」</b>",
+        "━━━━━━━━━━━━━━━━━",
+        "    <b>FX · SUPREME PRO AI</b>    ",
+        "━━━━━━━━━━━━━━━━━",
+        f"⚡ <b>INSTANCE</b>  ·  🟢 <b>LIVE NOW</b>",
+        entry_line,
+        "",
+        *tp_lines,
+        "",
+        sl_line,
+        "━━━━━━━━━━━━━━━━━",
+        f"🕐 <b>{time_str}</b>  ·  <b>{date_str}</b>",
+        f"📡 <b>{kz_line}</b>",
+        "━━━━━━━━━━━━━━━━━",
+        f"📆 <b>SIGNAL:</b> {head_emoji} <b>{arrow_word}</b>",
+        f"🚀 <b>Trend:</b> {trend_label}",
+        f"📊 <b>Bias:</b> {bias_word}",
+        f"🏅 <b>VOLUME:</b> {volume}",
+        "━━━━━━━━━━━━━━━━━",
+        "💀 @TRADERGUIDE_BOT",
+        "⚠️ <i>Use proper risk management on every trade.</i>",
+    ]
 
     return "\n".join(lines)

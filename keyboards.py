@@ -508,10 +508,12 @@ def fx_active_view_kb(signals: list | None = None) -> InlineKeyboardMarkup:
             text=f"🟢 I'M IN — Signal {label_num}",
             callback_data=f"fxin:{sid}",
         )])
-    rows.append([
-        InlineKeyboardButton(text="🎯 NEW SIGNAL — 100% AI SNIPER", callback_data="fx:new"),
-        InlineKeyboardButton(text="⚡ Instance SIGNAL", callback_data="fx:instant"),
-    ])
+    rows.append([InlineKeyboardButton(
+        text="🎯 NEW SIGNAL — 100% AI SNIPER", callback_data="fx:new",
+    )])
+    rows.append([InlineKeyboardButton(
+        text="⚡ INSTANCE SIGNAL", callback_data="fx:instant",
+    )])
     rows.append([InlineKeyboardButton(text="🛑 STOP", callback_data="fx:stop")])
     rows.append([
         InlineKeyboardButton(text="⬅️ BACK", callback_data="m:home"),

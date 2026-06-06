@@ -111,3 +111,25 @@ def short_time_for_user(user_id: int) -> str:
     except Exception:
         utc_time = datetime.utcnow()
         return utc_time.strftime("%H:%M:%S UTC")
+
+
+def next_candle_time_for_user(user_id: int) -> str:
+    """Return the next 1-minute candle start time in user's timezone.
+
+    Format: 'HH:MM UTC+N' — no seconds, numeric offset only.
+    Used for binary signal EXECUTE NOW so users always see the candle
+    they will enter (next minute boundary), not the current second.
+
+    Example: pressed at 16:08:45 UTC+6 → returns '16:09 UTC+6'
+    """
+    tz_name = get_user_tz(user_id)
+    try:
+        local_time = now_for_user(user_id)
+        next_min   = local_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        time_str   = next_min.strftime("%H:%M")
+        offset_str = _utc_offset_str(tz_name)
+        return f"{time_str} {offset_str}"
+    except Exception:
+        utc_time = datetime.utcnow()
+        next_min = utc_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        return next_min.strftime("%H:%M UTC")
