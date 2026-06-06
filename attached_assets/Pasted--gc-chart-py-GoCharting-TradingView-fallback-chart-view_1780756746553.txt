@@ -1,0 +1,179 @@
+"""
+gc_chart.py — GoCharting + TradingView fallback chart view
+Drop-in module. Zero signal interference.
+"""
+
+import aiohttp
+import logging
+from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
+
+# ── Timeframe maps ──────────────────────────────────────────────────────────
+
+GC_TF_MAP = {
+    "10s":  "10S",
+    "30s":  "30S",
+    "1m":   "1",
+    "3m":   "3",
+    "5m":   "5",
+    "15m":  "15",
+    "30m":  "30",
+    "1h":   "60",
+    "4h":   "240",
+    "1d":   "D",
+    "1w":   "W",
+}
+
+TV_TF_MAP = {
+    "10s":  "10S",
+    "30s":  "30S",
+    "1m":   "1",
+    "3m":   "3",
+    "5m":   "5",
+    "15m":  "15",
+    "30m":  "30",
+    "1h":   "60",
+    "4h":   "240",
+    "1d":   "D",
+    "1w":   "W",
+}
+
+# ── Symbol normalisation ─────────────────────────────────────────────────────
+
+# OTC / Binary symbols → GoCharting uses OANDA or index feed
+OTC_ALIAS = {
+    "EURUSD-OTC": "EURUSD",
+    "GBPUSD-OTC": "GBPUSD",
+    "USDJPY-OTC": "USDJPY",
+    "AUDUSD-OTC": "AUDUSD",
+    "USDCAD-OTC": "USDCAD",
+    "USDCHF-OTC": "USDCHF",
+    "EURGBP-OTC": "EURGBP",
+    "EURJPY-OTC": "EURJPY",
+    "NZDUSD-OTC": "NZDUSD",
+    "GBPJPY-OTC": "GBPJPY",
+}
+
+def normalise_symbol(raw: str) -> tuple[str, str]:
+    """
+    Returns (gc_symbol, tv_symbol).
+    Strips -OTC suffix, maps to clean pair.
+    """
+    upper = raw.upper().strip()
+    clean = OTC_ALIAS.get(upper, upper)
+
+    # GoCharting: prefix OANDA: for forex
+    if len(clean) == 6 and clean.isalpha():
+        gc_sym = f"OANDA:{clean}"
+        tv_sym = f"OANDA:{clean}"
+    else:
+        gc_sym = clean
+        tv_sym = clean
+
+    return gc_sym, tv_sym
+
+
+# ── URL builders ─────────────────────────────────────────────────────────────
+
+def build_gc_url(symbol: str, timeframe: str) -> str | None:
+    tf = GC_TF_MAP.get(timeframe.lower())
+    if not tf:
+        return None
+    gc_sym, _ = normalise_symbol(symbol)
+    encoded = quote(gc_sym, safe="")
+    return (
+        f"https://gocharting.com/terminal?"
+        f"ticker={encoded}"
+        f"&chartType=CANDLESTICK"
+        f"&interval={tf}"
+        f"&theme=dark"
+        f"&studies=VOLUME,EMA(9),EMA(21),BOLLINGER_BANDS"
+    )
+
+
+def build_tv_url(symbol: str, timeframe: str) -> str | None:
+    tf = TV_TF_MAP.get(timeframe.lower())
+    if not tf:
+        return None
+    _, tv_sym = normalise_symbol(symbol)
+    encoded = quote(tv_sym, safe=":")
+    return (
+        f"https://www.tradingview.com/chart/"
+        f"?symbol={encoded}"
+        f"&interval={tf}"
+        f"&theme=dark"
+        f"&style=1"
+        f"&studies=BB,EMA,MACD,RSI"
+    )
+
+
+# ── Async reachability probe ──────────────────────────────────────────────────
+
+async def _url_reachable(url: str, timeout: int = 5) -> bool:
+    """HEAD request to check if GC endpoint responds."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.head(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                return resp.status < 500
+    except Exception:
+        return False
+
+
+# ── Main resolver ─────────────────────────────────────────────────────────────
+
+async def get_chart_url(symbol: str, timeframe: str) -> dict:
+    """
+    Returns:
+        {
+            "url": str,
+            "source": "GoCharting" | "TradingView",
+            "symbol": str,
+            "timeframe": str,
+            "error": str | None
+        }
+    """
+    tf_clean = timeframe.lower().strip()
+
+    if tf_clean not in GC_TF_MAP:
+        supported = ", ".join(GC_TF_MAP.keys())
+        return {
+            "url": None,
+            "source": None,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "error": f"Unsupported timeframe `{timeframe}`. Supported: {supported}"
+        }
+
+    gc_url = build_gc_url(symbol, tf_clean)
+    gc_alive = await _url_reachable(gc_url) if gc_url else False
+
+    if gc_url and gc_alive:
+        return {
+            "url": gc_url,
+            "source": "GoCharting",
+            "symbol": symbol.upper(),
+            "timeframe": timeframe.upper(),
+            "error": None
+        }
+
+    # Silent fallback
+    logger.warning(f"[gc_chart] GC unreachable for {symbol}/{timeframe} — falling back to TradingView")
+    tv_url = build_tv_url(symbol, tf_clean)
+
+    if tv_url:
+        return {
+            "url": tv_url,
+            "source": "TradingView",
+            "symbol": symbol.upper(),
+            "timeframe": timeframe.upper(),
+            "error": None
+        }
+
+    return {
+        "url": None,
+        "source": None,
+        "symbol": symbol.upper(),
+        "timeframe": timeframe.upper(),
+        "error": "Chart unavailable for this pair/timeframe."
+    }

@@ -62,11 +62,27 @@ FOREX_TIMEFRAMES = [
 ]
 
 FOREX_PAIRS = [
-    "CAD/JPY", "CHF/JPY", "CAD/CHF", "EUR/GBP", "EUR/JPY", "EUR/USD",
-    "GBP/CAD", "GBP/CHF", "GBP/JPY", "GBP/USD", "USD/CAD", "USD/CHF",
-    "USD/JPY", "ETHUSD", "SOLUSDT", "BTCUSD", "ETHUSDT", "BTCUSDT",
-    "BTC", "GOLD", "SILVER", "DXY", "USOIL", "XAU/USD",
-    "XAG/USD", "NAS100", "US100",
+    # ── Majors ────────────────────────────────────────────────
+    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD",
+    "USD/CHF", "NZD/USD",
+    # ── Euro crosses ──────────────────────────────────────────
+    "EUR/GBP", "EUR/JPY", "EUR/AUD", "EUR/CAD", "EUR/CHF", "EUR/NZD",
+    # ── GBP crosses ───────────────────────────────────────────
+    "GBP/JPY", "GBP/AUD", "GBP/CAD", "GBP/CHF", "GBP/NZD",
+    # ── AUD / NZD crosses ─────────────────────────────────────
+    "AUD/JPY", "AUD/CAD", "AUD/CHF", "AUD/NZD",
+    "NZD/JPY", "NZD/CAD", "NZD/CHF",
+    # ── CAD / CHF crosses ─────────────────────────────────────
+    "CAD/JPY", "CAD/CHF", "CHF/JPY",
+    # ── Metals ────────────────────────────────────────────────
+    "XAU/USD", "XAG/USD", "GOLD", "SILVER",
+    # ── Energy / DXY ──────────────────────────────────────────
+    "USOIL", "DXY",
+    # ── Indices ───────────────────────────────────────────────
+    "NAS100", "US100", "DJ30", "SP500",
+    # ── Crypto ────────────────────────────────────────────────
+    "BTC/USD", "ETH/USD", "BNB/USD", "SOL/USD", "XRP/USD",
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BTCUSD", "ETHUSD", "BTC",
 ]
 
 # Approximate price ranges for synthetic signal pricing per pair
