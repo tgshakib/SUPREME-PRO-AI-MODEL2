@@ -614,23 +614,35 @@ def get_market_bias(pair: str, lookback_bars: int = 15
                     ) -> Optional[tuple[str, float]]:
     """Scan the chart and decide the dominant short-term direction.
 
-    Reads the last `lookback_bars` 1-minute candles from Yahoo Finance and
-    measures the momentum across the window. Returns ('BUY', strength) or
-    ('SELL', strength) where strength is 0..1, or None if the symbol is
-    not supported (most OTC tickers, network failure, etc.).
+    Primary  : candle_feed.get_mtf_bias() — TradingView real-time data
+               across 1m / 5m / 15m / 1h / 4h / 1d / 1W with weighted
+               consensus (longer TF = higher weight).
+    Fallback : yfinance 1-minute candle momentum (original logic).
 
-    Cached per ticker for ~45 seconds so repeated analyses don't hammer
-    Yahoo. Used by the binary signal engine to bias the AI's pick toward
-    the actual live market direction (instead of a coin-flip)."""
-    if not _YF_OK:
-        return None
+    Returns ('BUY', strength) or ('SELL', strength) where strength is
+    0..1, or None if the pair is not supported / no data available.
+    Cached per ticker for ~45 seconds."""
     ticker = yf_ticker(pair)
-    if not ticker:
-        return None
     now = time.time()
-    cached = _BIAS_CACHE.get(ticker)
+    cached = _BIAS_CACHE.get(ticker or pair)
     if cached and (now - cached[0]) < _BIAS_TTL:
         return (cached[1], cached[2])
+
+    # ── Primary: multi-timeframe feed (TradingView → yfinance per TF) ──
+    try:
+        from candle_feed import get_mtf_bias as _mtf
+        mtf = _mtf(pair)
+        if mtf and mtf.get("bias") in ("BUY", "SELL") and mtf.get("strength", 0) > 0.1:
+            direction = mtf["bias"]
+            strength  = float(mtf["strength"])
+            _BIAS_CACHE[ticker or pair] = (now, direction, strength)
+            return (direction, strength)
+    except Exception as _ce:
+        print(f"[live_prices] candle_feed error for {pair}: {_ce}")
+
+    # ── Fallback: original yfinance 1-minute momentum ──────────────────
+    if not _YF_OK or not ticker:
+        return None
     try:
         t = yf.Ticker(ticker)
         hist = t.history(period="1d", interval="1m", auto_adjust=False)
@@ -638,21 +650,19 @@ def get_market_bias(pair: str, lookback_bars: int = 15
             return None
         closes = hist["Close"].iloc[-lookback_bars:].tolist()
         first = float(closes[0])
-        last = float(closes[-1])
+        last  = float(closes[-1])
         if first <= 0:
             return None
         change_pct = (last - first) / first
-        # Confirmation count: how many later bars are above (or below) the start
         if change_pct >= 0:
-            confirm = sum(1 for c in closes[1:] if float(c) >= first)
+            confirm   = sum(1 for c in closes[1:] if float(c) >= first)
             direction = "BUY"
         else:
-            confirm = sum(1 for c in closes[1:] if float(c) <= first)
+            confirm   = sum(1 for c in closes[1:] if float(c) <= first)
             direction = "SELL"
-        # Strength = blend of % move (scaled) and confirmation ratio
-        move_score = min(1.0, abs(change_pct) * 800.0)
+        move_score  = min(1.0, abs(change_pct) * 800.0)
         ratio_score = confirm / max(1, len(closes) - 1)
-        strength = max(0.15, min(1.0, 0.6 * move_score + 0.4 * ratio_score))
+        strength    = max(0.15, min(1.0, 0.6 * move_score + 0.4 * ratio_score))
         _BIAS_CACHE[ticker] = (now, direction, strength)
         return (direction, strength)
     except Exception as e:
