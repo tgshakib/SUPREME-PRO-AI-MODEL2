@@ -111,17 +111,17 @@ def price_band(pair: str) -> tuple[float, float, int]:
 
 
 TP_LEVELS = [
-    ("🎯 30+ PIPS",   30),
-    ("🎯 40+ PIPS",   40),
-    ("🎯 60+ PIPS",   60),
-    ("🎯 80+ PIPS",   80),
-    ("🎯 100+ PIPS", 100),
-    ("🎯 120+ PIPS", 120),
-    ("🎯 150+ PIPS", 150),
-    ("🎯 200+ PIPS", 200),
-    ("🎯 300+ PIPS", 300),
-    ("🎯 500+ PIPS", 500),
-    ("🎯 900+ PIPS", 900),
+    ("TP¹ 30+pips",   30),
+    ("TP² 40+pips",   40),
+    ("TP³ 60+pips",   60),
+    ("TP⁴ 80+pips",   80),
+    ("TP⁵ 100+pips", 100),
+    ("TP⁶ 120pips",  120),
+    ("TP⁷ 160+pips", 160),
+    ("TP⁸ 220+pips", 220),
+    ("🎯 300+ PIPS",  300),
+    ("🎯 500+ PIPS",  500),
+    ("🎯 900+ PIPS",  900),
 ]
 
 # Legacy max_tp values (1-6) came from old TP-count format.

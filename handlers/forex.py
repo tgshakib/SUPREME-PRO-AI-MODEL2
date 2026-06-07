@@ -456,7 +456,7 @@ async def cb_fx_im_in(call: CallbackQuery, bot: Bot):
     # ── Collapse the signal card into a compact "I'M IN" tracker ──
     # The full signal panel hides; only the pair + side + status stays
     # visible so the chat is clean. Full TP/SL detail lives under the
-    # 🟢 YOUR ACTIVE Fx-Signal button on the home screen.
+    # 🟢 YOUR ACTIVE Fx-Signal button below.
     pair      = sig.get("pair", "")
     direction = sig.get("direction", "")
     side_icon = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
@@ -467,12 +467,18 @@ async def cb_fx_im_in(call: CallbackQuery, bot: Bot):
         f"✅ <b>I'M IN  ·  {pair}  ·  {side_icon}</b>{entry_str}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"👀 <b>TRACKING YOUR TRADE</b>\n"
-        f"<i>Tap <b>🟢 YOUR ACTIVE Fx-Signal</b> on the home screen\n"
-        f"to see full TP / SL prices and live status.</i>"
+        f"<i>Tap <b>🟢 Active Signal</b> below to see full TP / SL and live status.</i>"
     )
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    compact_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Active Signal",    callback_data="fx:active_view"),
+         InlineKeyboardButton(text="📊 History",           callback_data="fx:signal_history")],
+        [InlineKeyboardButton(text="⚡ New Instance",     callback_data="fx:instant"),
+         InlineKeyboardButton(text="🏢 WORKPLACE",         callback_data="m:home")],
+    ])
     try:
         await call.message.edit_text(compact, parse_mode="HTML",
-                                     reply_markup=None)
+                                     reply_markup=compact_kb)
     except Exception:
         try:
             await call.message.delete()
@@ -678,7 +684,7 @@ async def cb_fx_instant(call: CallbackQuery, bot: Bot):
     await asyncio.sleep(4.5)
 
     # ── Format signal text ────────────────────────────────────────────────
-    caption = format_instant_signal(sig)
+    caption = format_instant_signal(sig, user_id=user_id)
 
     # ── Insert signal into DB so I'M IN / tracker work like a normal signal
     from keyboards import forex_signal_kb as _fx_sig_kb
@@ -764,11 +770,84 @@ def _instant_signal_kb():
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="⚡ New Instance", callback_data="fx:instant"),
-            InlineKeyboardButton(text="🎯 AI Sniper",    callback_data="fx:new"),
+            InlineKeyboardButton(text="⚡ New Instance",   callback_data="fx:instant"),
+            InlineKeyboardButton(text="🎯 AI Sniper",      callback_data="fx:new"),
         ],
         [
             InlineKeyboardButton(text="🟢 Active Signals", callback_data="fx:active_view"),
+            InlineKeyboardButton(text="📊 History",        callback_data="fx:signal_history"),
+        ],
+        [
             InlineKeyboardButton(text="🏢 WORKPLACE",      callback_data="m:home"),
         ],
+    ])
+
+
+# ── Signal History ─────────────────────────────────────────────────────────
+@router.callback_query(F.data == "fx:signal_history")
+async def cb_fx_signal_history(call: CallbackQuery, bot: Bot):
+    """Show the last 10 forex signals (open + closed) for this user."""
+    await call.answer()
+    user_id = call.from_user.id
+    signals = db.list_recent_forex_signals(user_id, limit=10)
+
+    if not signals:
+        await show_screen(
+            call.bot, call.message.chat.id,
+            "📊 <b>No signal history yet.</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Your forex signal history will appear here after you receive signals.",
+            _history_kb(),
+        )
+        return
+
+    _STATUS_ICON = {
+        "open":   "🟡",
+        "closed": "✅",
+    }
+    _OUTCOME_ICON = {
+        "tp":      "✅ TP HIT",
+        "partial": "🔶 PARTIAL",
+        "sl":      "❌ SL HIT",
+        "expired": "⏰ EXPIRED",
+    }
+    blocks = [
+        "📊 <b>SIGNAL HISTORY</b>  ·  last 10 signals",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+    for s in signals:
+        pair      = s.get("pair", "?")
+        direction = s.get("direction", "?")
+        status    = s.get("status", "open")
+        outcome   = s.get("outcome")
+        tps_hit   = int(s.get("tps_hit") or 0)
+        max_tp    = int(s.get("max_tp") or 1)
+        kind      = s.get("kind") or "LIVE"
+        side_icon = "🟢" if direction == "BUY" else "🔴"
+        st_icon   = _STATUS_ICON.get(status, "⚪")
+        out_str   = _OUTCOME_ICON.get(outcome, "") if outcome else ""
+        tp_prog   = f"TP {tps_hit}/{max_tp}" if max_tp else ""
+        kind_tag  = "📍 LIMIT" if kind == "LIMIT" else "🟢 LIVE"
+        line = f"{st_icon} {side_icon} <b>{pair}</b>  ·  {direction}  ·  {kind_tag}"
+        if tp_prog:
+            line += f"  ·  {tp_prog}"
+        if out_str:
+            line += f"  {out_str}"
+        blocks.append(line)
+
+    blocks.append("━━━━━━━━━━━━━━━━━━━")
+    await show_screen(
+        call.bot, call.message.chat.id,
+        "\n".join(blocks),
+        _history_kb(),
+    )
+
+
+def _history_kb():
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Active Signals",  callback_data="fx:active_view"),
+         InlineKeyboardButton(text="⚡ New Instance",    callback_data="fx:instant")],
+        [InlineKeyboardButton(text="🎯 AI Sniper",       callback_data="fx:new"),
+         InlineKeyboardButton(text="🏢 WORKPLACE",       callback_data="m:home")],
     ])

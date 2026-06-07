@@ -926,6 +926,18 @@ def is_forex_alert_armed(signal_id: int) -> bool:
         return bool(row and row["alert_armed"])
 
 
+def list_recent_forex_signals(user_id: int, limit: int = 10) -> List[Dict]:
+    """Return the most recent forex signals (open + closed) for a user.
+    Ordered newest first. Used for the 📊 Signal History view."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM forex_signal WHERE user_id=? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def last_closed_forex_outcome(user_id: int) -> Optional[str]:
     """Outcome of the user's most recently CLOSED forex signal (tp/sl/partial),
     used to flip the next signal into 'recovery / max focus' mode after SL."""

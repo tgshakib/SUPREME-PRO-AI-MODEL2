@@ -2025,7 +2025,7 @@ async def trigger_immediate_scan(bot: Bot, user_id: int):
 # How long we keep tracking a signal before giving up. A real chart can
 # take a long time to actually move 30 pips, so we tail it for hours,
 # not minutes — TP HIT only fires when live price truly crosses a level.
-TRACK_POLL_SEC = 25                      # ~yfinance cache TTL is 30s
+TRACK_POLL_SEC = 10                      # poll every 10s for faster TP/SL detection
 TRACK_TIMEOUT_SEC = 60 * 60 * 4          # 4 hours max — then close as 'expired'
 
 

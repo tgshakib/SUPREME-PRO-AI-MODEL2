@@ -848,12 +848,14 @@ def instant_scan(user_pairs: list[str] | None = None, strict: bool = False) -> d
     }
 
 
-def format_instant_signal(sig: dict) -> str:
+def format_instant_signal(sig: dict, user_id: int | None = None) -> str:
     """Format the instant signal into a Telegram HTML caption.
 
     Matches the forex live signal card format from _signal_text in forex_engine.py.
     Signal text contract: NEVER called from inside signal.py or any other
     signal-text generator. This is the ONLY place the instant signal text lives.
+
+    Pass user_id so the timestamp respects the user's configured timezone.
     """
     pair      = sig["pair"]
     direction = sig["direction"]
@@ -893,10 +895,16 @@ def format_instant_signal(sig: dict) -> str:
         trend_label = "📈 BULLISH" if is_buy else "📉 BEARISH"
     bias_word = "📈 BULLISH" if is_buy else "📉 BEARISH"
 
-    # ── Date / time ───────────────────────────────────────────────────────
+    # ── Date / time — use user timezone when available ────────────────────
     now_utc  = datetime.utcnow()
     date_str = now_utc.strftime("%B %d")
     time_str = now_utc.strftime("%H:%M:%S UTC")
+    if user_id is not None:
+        try:
+            from tz_utils import short_time_for_user
+            time_str = short_time_for_user(user_id)
+        except Exception:
+            pass
 
     # ── Entry line ────────────────────────────────────────────────────────
     entry_zone_str = f"{entry_lo:.{dec}f} - {entry_hi:.{dec}f}"

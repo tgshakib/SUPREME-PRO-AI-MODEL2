@@ -514,7 +514,10 @@ def fx_active_view_kb(signals: list | None = None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(
         text="⚡ INSTANCE SIGNAL", callback_data="fx:instant",
     )])
-    rows.append([InlineKeyboardButton(text="🛑 STOP", callback_data="fx:stop")])
+    rows.append([
+        InlineKeyboardButton(text="📊 Signal History", callback_data="fx:signal_history"),
+        InlineKeyboardButton(text="🛑 STOP",            callback_data="fx:stop"),
+    ])
     rows.append([
         InlineKeyboardButton(text="⬅️ BACK", callback_data="m:home"),
         InlineKeyboardButton(text="❌ CLOSE", callback_data="fx:close_view"),
