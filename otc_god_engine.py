@@ -240,23 +240,46 @@ def otc_god_analyze(pair: str) -> Optional[dict]:
         liq_sweep    bool (liquidity sweep detected)
         reasons      list[str]
     """
-    ticker = yf_ticker(pair)
-    if not ticker:
-        return None
+    ticker    = yf_ticker(pair)
+    cache_key = ticker or pair   # use pair label as key when no yf ticker
 
-    now = time.time()
-    cached = _CACHE.get(ticker)
+    now    = time.time()
+    cached = _CACHE.get(cache_key)
     if cached and (now - cached[0]) < _TTL:
         return cached[1]
 
-    # ── Fetch all timeframes ─────────────────────────────────────────────────
-    df1  = _fetch_tf(ticker, "1m",  "2d")
-    df5  = _fetch_tf(ticker, "5m",  "3d")
-    df15 = _fetch_tf(ticker, "15m", "7d")
-    df30 = _fetch_tf(ticker, "30m", "14d")
+    # ── OTC Feed (Twelve Data + drift model) — primary source for OTC pairs ──
+    # Real OHLCV candles adjusted to match Quotex synthetic pricing.
+    # Falls back to yfinance silently when key not set or pair unsupported.
+    _otc_df_fn = None
+    if "〔OTC〕" in pair or "(OTC)" in pair.upper():
+        try:
+            from otc_feed import get_otc_df as _otc_df_fn
+        except Exception:
+            _otc_df_fn = None
+
+    df1 = df5 = df15 = df30 = None
+
+    if _otc_df_fn is not None:
+        try:
+            df1  = _otc_df_fn(pair, "1m",  count=300)
+            df5  = _otc_df_fn(pair, "5m",  count=300)
+            df15 = _otc_df_fn(pair, "15m", count=150)
+            df30 = _otc_df_fn(pair, "30m", count=100)
+        except Exception:
+            pass
+
+    # Fall back to yfinance for any timeframes the OTC feed couldn't fill
+    if ticker:
+        if df1  is None: df1  = _fetch_tf(ticker, "1m",  "2d")
+        if df5  is None: df5  = _fetch_tf(ticker, "5m",  "3d")
+        if df15 is None: df15 = _fetch_tf(ticker, "15m", "7d")
+        if df30 is None: df30 = _fetch_tf(ticker, "30m", "14d")
+    elif _otc_df_fn is None:
+        return None   # no data source at all
 
     if df5 is None or "close" not in df5.columns or len(df5) < 30:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     # Running score: +N = PUT/SELL signal, -N = CALL/BUY signal
@@ -276,11 +299,11 @@ def otc_god_analyze(pair: str) -> Optional[dict]:
         vol5_raw = df5.get("volume")
         vol5 = vol5_raw.squeeze().astype(float).fillna(0) if vol5_raw is not None else None
     except Exception:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     if len(cl5) < 30:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     # Use CONFIRMED closed bars: bar -2 is the signal bar (bar -1 still forming)
@@ -1013,7 +1036,7 @@ def otc_god_analyze(pair: str) -> Optional[dict]:
         score     = total_buy
         signals   = buy_sigs
     else:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     grade = min(100, int(round(score / 45 * 100)))
@@ -1029,5 +1052,5 @@ def otc_god_analyze(pair: str) -> Optional[dict]:
         "otc_god":   True,
         "reasons":   reasons,
     }
-    _CACHE[ticker] = (now, result)
+    _CACHE[cache_key] = (now, result)
     return result

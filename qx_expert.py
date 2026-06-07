@@ -466,17 +466,32 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
     or None when no high-confidence setup is found.
     """
     ticker = yf_ticker(pair)
-    if not ticker:
-        return None
+    cache_key = ticker or pair   # use pair name when no yf ticker
 
     now    = time.time()
-    cached = _CACHE.get(ticker)
+    cached = _CACHE.get(cache_key)
     if cached and (now - cached[0]) < _TTL:
         return cached[1]
 
-    df = _fetch(ticker)
+    # ── OTC Feed (Twelve Data + drift model) — primary source for OTC pairs ──
+    # Gives real OHLCV bars adjusted to match Quotex synthetic pricing.
+    # Falls back to yfinance silently when key not set or API fails.
+    df = None
+    if is_otc or "〔OTC〕" in pair or "(OTC)" in pair.upper():
+        try:
+            from otc_feed import get_otc_df as _otc_df
+            df = _otc_df(pair, "1m", count=QX_CANDLES + 20)
+        except Exception:
+            df = None
+
     if df is None:
-        _CACHE[ticker] = (now, None)
+        if not ticker:
+            _CACHE[cache_key] = (now, None)
+            return None
+        df = _fetch(ticker)
+
+    if df is None:
+        _CACHE[cache_key] = (now, None)
         return None
 
     try:
@@ -485,11 +500,11 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
         low   = df["low"].astype(float).squeeze()
         open_ = df["open"].astype(float).squeeze()
     except Exception:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     if len(close) < 35:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     # ── Score the LAST CONFIRMED bar (bar[-2]) ────────────────────────
@@ -516,7 +531,7 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
     # ── Direction decision ────────────────────────────────────────────
     total = buy_v + sell_v
     if total == 0:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     if buy_v > sell_v:
@@ -524,7 +539,7 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
     elif sell_v > buy_v:
         direction = "SELL"; agree = sell_v; opposing = buy_v
     else:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     # ── Minimum vote thresholds (THE KEY FIX: prevents single-signal fires) ──
@@ -535,11 +550,11 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
 
     if is_otc:
         if agree < MIN_OTC or opposing > MAX_OPP_OTC:
-            _CACHE[ticker] = (now, None)
+            _CACHE[cache_key] = (now, None)
             return None
     else:
         if agree < MIN_LIVE or opposing > MAX_OPP_LIVE:
-            _CACHE[ticker] = (now, None)
+            _CACHE[cache_key] = (now, None)
             return None
 
     # ── NON-REPRINT: bar[-3] must agree ──────────────────────────────
@@ -553,11 +568,11 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
         else:
             # OTC: reject if bars disagree (synthetic candles repaint-sensitive)
             if is_otc:
-                _CACHE[ticker] = (now, None)
+                _CACHE[cache_key] = (now, None)
                 return None
             # Live: allow if current bar is very strong (15+ votes)
             if agree < 15:
-                _CACHE[ticker] = (now, None)
+                _CACHE[cache_key] = (now, None)
                 return None
     except Exception:
         non_reprint = False
@@ -581,7 +596,7 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
     # ── Grade gate ────────────────────────────────────────────────────
     min_grade = 78 if is_otc else QX_MIN_GRADE
     if grade < min_grade:
-        _CACHE[ticker] = (now, None)
+        _CACHE[cache_key] = (now, None)
         return None
 
     # ── Elite flag ────────────────────────────────────────────────────
@@ -599,5 +614,5 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
         "sub_candle_dir": sub_candle_dir,
         "confidence":     round(agree / MAX_POSSIBLE, 3),
     }
-    _CACHE[ticker] = (now, result)
+    _CACHE[cache_key] = (now, result)
     return result
