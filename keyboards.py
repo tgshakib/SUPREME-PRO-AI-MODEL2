@@ -515,14 +515,28 @@ def fx_active_view_kb(signals: list | None = None) -> InlineKeyboardMarkup:
         text="⚡ INSTANCE SIGNAL", callback_data="fx:instant",
     )])
     rows.append([
-        InlineKeyboardButton(text="📊 Signal History", callback_data="fx:signal_history"),
-        InlineKeyboardButton(text="🛑 STOP",            callback_data="fx:stop"),
+        InlineKeyboardButton(text="🛑 STOP", callback_data="fx:stop"),
     ])
     rows.append([
         InlineKeyboardButton(text="⬅️ BACK", callback_data="m:home"),
         InlineKeyboardButton(text="❌ CLOSE", callback_data="fx:close_view"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def instance_signal_result_kb(signal_id: int) -> InlineKeyboardMarkup:
+    """Keyboard shown under an Instance Signal card.
+    I'M IN + STOP | BACK — same structure as normal forex signal."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🟢 I'M IN",
+            callback_data=f"fxin:{signal_id}",
+        )],
+        [
+            InlineKeyboardButton(text="🛑 STOP",   callback_data="fx:stop"),
+            InlineKeyboardButton(text="⬅️ BACK",   callback_data="fx:active_view"),
+        ],
+    ])
 
 
 # ── Timezone picker ──────────────────────────────────────
