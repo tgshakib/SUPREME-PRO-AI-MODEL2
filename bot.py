@@ -130,6 +130,22 @@ async def main():
         asyncio.create_task(run_otc_price_service())
     except Exception as _otc_err:
         logger.warning(f"OTC price service failed to start: {_otc_err}")
+
+    # OTC Combined WebSocket Feed (QX + PO dual-broker live candle stream)
+    # Provides real OHLCV candles for all OTC pairs — falls back to existing
+    # system silently when not connected.
+    try:
+        from otc_feed_combined import (
+            otc_feed      as _otc_combined_feed,
+            ALL_OTC_PAIRS as _OTC_ALL_PAIRS,
+            ALL_TIMEFRAMES as _OTC_ALL_TFS,
+        )
+        _otc_combined_feed.subscribe_all(_OTC_ALL_PAIRS, _OTC_ALL_TFS)
+        _otc_combined_feed.start()
+        logger.info("[bot] OTC combined WS feed (QX + PO) started — %d pairs",
+                    len(_OTC_ALL_PAIRS))
+    except Exception as _cfe:
+        logger.warning(f"OTC combined feed failed to start: {_cfe}")
     asyncio.create_task(run_funded_pass_loop(bot))
     asyncio.create_task(run_mailing_purge_loop(bot))
     asyncio.create_task(auto_trading.run_midnight_archive())

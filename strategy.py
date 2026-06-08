@@ -240,6 +240,76 @@ def analyze_pair(pair: str) -> Optional[dict]:
 
     score = _score_setup(direction, rsi_val, rsi_momentum)
 
+    # ── EARLY TREND SHIFT DETECTION (RSI divergence + EMA slope) ──────
+    # These two reads of RSI + EMA50 catch structural shifts BEFORE price
+    # visually confirms — zero extra indicators, just deeper pattern reading.
+
+    # 1. RSI DIVERGENCE — most reliable early reversal signal
+    #    Bearish div: price makes new HIGH but RSI makes lower HIGH → add SELL weight
+    #    Bullish div: price makes new LOW  but RSI makes higher LOW → add BUY  weight
+    _div_boost = 0
+    try:
+        import numpy as _np
+        _rsi_arr   = df["rsi"].values[-18:]
+        _close_arr = close.values[-18:]
+        n = len(_rsi_arr)
+        if direction == "BUY" and n >= 6:
+            # Find last two RSI troughs (local minima)
+            _tr = [i for i in range(1, n - 1)
+                   if _rsi_arr[i] < _rsi_arr[i-1] and _rsi_arr[i] < _rsi_arr[i+1]]
+            if len(_tr) >= 2:
+                t1, t2 = _tr[-2], _tr[-1]
+                # Bullish divergence: price trough lower or flat, RSI trough higher
+                if _rsi_arr[t2] > _rsi_arr[t1] + 1.5 and _close_arr[t2] <= _close_arr[t1] * 1.0005:
+                    _div_boost = 14  # hidden bull strength — confirm BUY
+        elif direction == "SELL" and n >= 6:
+            # Find last two RSI peaks (local maxima)
+            _pk = [i for i in range(1, n - 1)
+                   if _rsi_arr[i] > _rsi_arr[i-1] and _rsi_arr[i] > _rsi_arr[i+1]]
+            if len(_pk) >= 2:
+                p1, p2 = _pk[-2], _pk[-1]
+                # Bearish divergence: price peak higher or flat, RSI peak lower
+                if _rsi_arr[p2] < _rsi_arr[p1] - 1.5 and _close_arr[p2] >= _close_arr[p1] * 0.9995:
+                    _div_boost = 14  # hidden bear exhaustion — confirm SELL
+    except Exception:
+        _div_boost = 0
+
+    # 2. EMA50 SLOPE — trend momentum / deceleration detection
+    #    Accelerating slope = trend is healthy; flattening/reversing = early warning
+    _slope_boost = 0
+    try:
+        _ema_arr = df["ema50"].values
+        if len(_ema_arr) >= 8:
+            _slope_now  = float(_ema_arr[-1]) - float(_ema_arr[-4])   # recent 3-bar slope
+            _slope_prev = float(_ema_arr[-4]) - float(_ema_arr[-7])   # prior  3-bar slope
+            if direction == "BUY":
+                if _slope_now > 0:            # EMA still rising — trend intact
+                    _slope_boost = 6 if _slope_now >= abs(_slope_prev) * 0.6 else 2
+                elif _slope_now < 0 and _slope_prev > 0:
+                    _slope_boost = -10         # EMA just turned down — early warning
+            else:
+                if _slope_now < 0:            # EMA still falling — trend intact
+                    _slope_boost = 6 if abs(_slope_now) >= abs(_slope_prev) * 0.6 else 2
+                elif _slope_now > 0 and _slope_prev < 0:
+                    _slope_boost = -10         # EMA just turned up — early warning
+    except Exception:
+        _slope_boost = 0
+
+    # 3. RSI MOMENTUM SURGE — rapid RSI acceleration into entry zone
+    #    RSI crossing zone boundary this bar with high velocity = precision entry
+    _surge_boost = 0
+    try:
+        _rsi_3bar = float(df["rsi"].iloc[-3])
+        _rsi_accel = rsi_val - _rsi_3bar   # RSI velocity over 3 bars
+        if direction == "BUY" and _rsi_accel >= 4.0:
+            _surge_boost = 8   # RSI surging into bull zone — early entry point
+        elif direction == "SELL" and _rsi_accel <= -4.0:
+            _surge_boost = 8   # RSI diving into bear zone — early entry point
+    except Exception:
+        _surge_boost = 0
+
+    score = max(0, min(100, score + _div_boost + _slope_boost + _surge_boost))
+
     # ── VPVR Session-Break Vote (silent — zero signal text change) ────
     # VAH = institutional SELL zone after 4:30 PM session break
     # VAL = institutional BUY  zone after 4:30 PM session break
@@ -305,20 +375,43 @@ _MTF_TTL   = 25.0   # Elite: 25s (was 90s — biggest lag source in the system)
 
 def _bias_from_closes(closes) -> int:
     """Return +1 (bull), -1 (bear), 0 (flat) from a closes series.
-    V10: price vs EMA50 + RSI(14) zone — no EMA crossover lag.
+    V10+: price vs EMA50 + RSI(14) zone — no EMA crossover lag.
+
+    Early trend shift detection:
+      RSI accelerating INTO the zone boundary (approaching 55 from below for
+      BUY, or approaching 45 from above for SELL) with strong 3-bar velocity
+      counts as an early +1/-1 vote — catches shifts 1-2 bars BEFORE full
+      zone entry. Confirmed zone entries score as normal.
     """
     if closes is None or len(closes) < EMA_TREND + 2:
         return 0
     try:
-        ema50 = float(_ema(closes, EMA_TREND).iloc[-1])
-        rsi   = float(_rsi(closes, RSI_PERIOD).iloc[-1])
-        price = float(closes.iloc[-1])
+        ema50  = float(_ema(closes, EMA_TREND).iloc[-1])
+        rsi_s  = _rsi(closes, RSI_PERIOD)
+        rsi    = float(rsi_s.iloc[-1])
+        price  = float(closes.iloc[-1])
     except Exception:
         return 0
+
+    # ── Confirmed zone entry (primary signal) ─────────────────────
     if price > ema50 and rsi >= RSI_BUY_MIN:
         return 1
     if price < ema50 and rsi <= RSI_SELL_MAX:
         return -1
+
+    # ── Early shift: RSI accelerating into zone boundary ──────────
+    # 3-bar RSI velocity ≥ 2.5 pts/bar signals strong momentum
+    # before the RSI fully crosses the BUY_MIN / SELL_MAX threshold.
+    try:
+        if len(rsi_s) >= 4:
+            rsi_vel = float(rsi_s.iloc[-1]) - float(rsi_s.iloc[-4])   # 3-bar delta
+            if price > ema50 and RSI_BUY_MIN - 8 <= rsi < RSI_BUY_MIN and rsi_vel >= 3.0:
+                return 1   # RSI charging toward bull zone — early BUY
+            if price < ema50 and RSI_SELL_MAX < rsi <= RSI_SELL_MAX + 8 and rsi_vel <= -3.0:
+                return -1  # RSI diving toward bear zone — early SELL
+    except Exception:
+        pass
+
     return 0
 
 

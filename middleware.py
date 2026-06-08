@@ -47,7 +47,8 @@ _click_lock = asyncio.Lock()
 _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 # How long (seconds) to block repeated clicks on the same button
-COOLDOWN_SEC = 5.0
+# 1.5s is enough to kill accidental double-taps while still feeling instant
+COOLDOWN_SEC = 1.5
 
 # Cleanup background task handle
 _cleanup_task: asyncio.Task | None = None
