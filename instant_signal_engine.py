@@ -600,7 +600,11 @@ def _calculate_levels(analysis: dict) -> dict:
     elif is_index:
         sl_min, sl_max = 30, 200
     else:
-        sl_min, sl_max = 22, 45
+        # Standard forex: 15–30 pips hard cap
+        sl_min, sl_max = 15, 30
+        # A+ sniper — score ≥ 90 → ultra-tight 6–9 pip SL
+        if score >= 90:
+            sl_min, sl_max = 6, 9
 
     sl_pips = max(sl_min, min(sl_pips, sl_max))
     sl = (price - sl_pips * pip) if direction == "BUY" else (price + sl_pips * pip)

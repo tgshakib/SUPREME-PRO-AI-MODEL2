@@ -119,12 +119,12 @@ except Exception as _fxe:
 # move. The user can phrase it as: "I want at least this much RR".
 PIPS_COMMAND_MIN_RR = 2.5   # GOLD V8: elite R:R floor (was 1.8)
 
-# ── GOLD V8: SL clamping — tighter SL = sharper R:R ─────────────────
-# For standard forex, SL distance MUST be in [20, 45] pips.
-# Tighter SL = higher R:R = better expected value per trade.
-# For metals / crypto / indices ATR-based clamps remain unchanged.
-SL_MIN_PIPS_FOREX = 20   # GOLD V8: was 25 (tighter = better R:R)
-SL_MAX_PIPS_FOREX = 45   # GOLD V8: was 60 (less slack = sniper exits)
+# ── SL clamping — tight SL = sharper R:R ────────────────────────────
+# Standard forex SL: 20–30 pips hard cap.
+# A+ sniper (smart engine grade ≥ 90): 8 pip ultra-tight SL.
+# Metals / crypto / indices use ATR-based clamps (unchanged).
+SL_MIN_PIPS_FOREX = 20
+SL_MAX_PIPS_FOREX = 30   # hard cap: no signal wider than 30 pips SL
 
 
 def _is_metal_pair(pair: str) -> bool:
@@ -235,15 +235,9 @@ def _sl_bounds(pair: str, pip: float, atr: Optional[float]
                ) -> tuple[float, float]:
     """Return (min_sl_distance, max_sl_distance) in PRICE units.
 
-    ATR defaults are now percentage-of-price so they scale correctly
-    for every asset class. The old fixed pip multiples (e.g. 50*pip for
-    BTC with pip=1.0 → only $50!) were the root cause of BTC/Gold SLs
-    being placed so tight that any 1-second wick would kill the trade.
-
-    Targets (no ATR available):
-      Gold  ~$2 350 → 1H ATR ≈ $15 → SL range $8–$45
-      BTC   ~$62 000 → 1H ATR ≈ $900 → SL range $360–$2 000
-      EUR/USD → unchanged 25-60 pip hard clamp
+    Standard forex: hard 20–30 pip clamp.
+    A+ sniper (smart engine grade ≥ 90): 8-pip override applied at call-site.
+    Metals/crypto/indices: ATR-based clamps — scale correctly for asset volatility.
     """
     from config import price_band as _price_band
     if _is_metal_pair(pair):
@@ -641,6 +635,11 @@ def _generate_levels_raw(pair: str, max_tp: int,
         else:
             sl_anchor = float(smart["swept_swing"]) + buf
         sl = _clamp_sl(direction, entry, sl_anchor, pair, pip, atr)
+        # A+ sniper override: smart engine grade ≥ 90 → 8-pip ultra-tight SL
+        if not (_is_metal_pair(pair) or _is_crypto_pair(pair) or _is_index_pair(pair)):
+            if smart.get("grade", 0) >= 90:
+                sl = round((entry - 8 * pip) if direction == "BUY"
+                           else (entry + 8 * pip), 5)
 
         # TP ladder — prefer the liquidity engine's pool list; fall
         # back to ATR-stepped extrapolation when no pools are available.
