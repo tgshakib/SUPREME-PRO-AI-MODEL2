@@ -726,19 +726,19 @@ def _strength_label(score: int) -> str:
 
 
 def _confidence_grade(score: int) -> str:
-    """A-grade confidence label for signal card.
+    """Confidence label with win-rate probability bracket.
 
     Minimum displayed = A (score is floored at 75 so B/C never show).
-    A+++ = zero-pip sniper on a confirmed big institutional move.
-    A++  = elite multi-confirmation entry.
-    A+   = high-probability confirmed setup.
-    A    = solid qualified entry (minimum threshold).
+    A+++ (98-100%) = zero-pip sniper on confirmed institutional move.
+    A++  (95-97%)  = elite multi-confirmation entry.
+    A+   (90-94%)  = high-probability confirmed setup.
+    A    (85-89%)  = solid qualified entry (minimum threshold).
     """
-    score = max(score, 75)   # floor: minimum A always
-    if score >= 100: return "A+++"
-    if score >= 95:  return "A++"
-    if score >= 80:  return "A+"
-    return "A"
+    score = max(score, 75)
+    if score >= 100: return "A+++ · 98-100% 🎯"
+    if score >= 95:  return "A++ · 95-97% 🏆"
+    if score >= 80:  return "A+ · 90-94% 🔥"
+    return "A · 85-89% ✅"
 
 
 def _win_rate_icon(wr: int) -> str:

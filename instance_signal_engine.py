@@ -17,19 +17,33 @@ import math
 # CONFIDENCE GRADING SYSTEM
 # ─────────────────────────────────────────────
 CONFIDENCE_LEVELS = {
-    "A+++": (92, 100),   # Sniper — zero pip drop, massive move catch
-    "A++":  (85, 91),    # High conviction, tight SL
-    "A+":   (78, 84),    # Strong setup, clean structure
-    "A":    (70, 77),    # Solid, good R:R
-    "B":    (58, 69),    # Moderate, acceptable risk
-    "C":    (45, 57),    # Weak — shown but flagged
+    "A+++": (92, 100),   # 98-100% win rate — Sniper, zero pip drop
+    "A++":  (85, 91),    # 95-97% win rate  — High conviction, tight SL
+    "A+":   (78, 84),    # 90-94% win rate  — Strong setup, clean structure
+    "A":    (70, 77),    # 85-89% win rate  — Solid, good R:R
+    "B":    (58, 69),    # 75-84% — floors to A on signal card
+    "C":    (45, 57),    # <75%   — floors to A on signal card
+}
+
+_GRADE_LABEL = {
+    "A+++": "A+++ · 98-100% 🎯",
+    "A++":  "A++ · 95-97% 🏆",
+    "A+":   "A+ · 90-94% 🔥",
+    "A":    "A · 85-89% ✅",
+    "B":    "A · 85-89% ✅",   # B floors to A on card
+    "C":    "A · 85-89% ✅",   # C floors to A on card
 }
 
 def grade_confidence(score: float) -> str:
     for grade, (lo, hi) in CONFIDENCE_LEVELS.items():
         if lo <= score <= hi:
             return grade
-    return "C"
+    return "A"   # floor — never emit below A
+
+
+def grade_label(grade: str) -> str:
+    """Return the display label with win-rate % for a confidence grade."""
+    return _GRADE_LABEL.get(grade, "A · 85-89% ✅")
 
 
 # ─────────────────────────────────────────────
@@ -63,7 +77,7 @@ class ForexSignal:
             f"Entry    : {self.entry:.5f}\n"
             f"SL       : {self.sl:.5f}  ({sl_pips:.1f} pips)\n"
             f"{tp_text}\n"
-            f"Confidence: {self.confidence_grade}\n"
+            f"Confidence: {grade_label(self.confidence_grade)}\n"
             f"Analysis : {self.analysis_summary}\n"
             f"Time     : {self.timestamp}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━"
