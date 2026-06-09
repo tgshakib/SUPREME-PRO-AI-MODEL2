@@ -137,9 +137,9 @@ def _confidence_grade(score: int) -> str:
     A    = solid qualified entry (minimum threshold).
     """
     score = max(score, 75)
-    if score >= 93: return "A+++"
-    if score >= 87: return "A++"
-    if score >= 80: return "A+"
+    if score >= 100: return "A+++"
+    if score >= 95:  return "A++"
+    if score >= 80:  return "A+"
     return "A"
 
 
