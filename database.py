@@ -882,6 +882,19 @@ def count_open_forex_signals_for_pair(user_id: int, pair: str) -> int:
         return int(row["c"]) if row else 0
 
 
+def count_instance_signals_today(user_id: int) -> int:
+    """Count how many INSTANCE signals this free user has fired today.
+    Used to enforce the 1-per-day limit on free/non-premium accounts."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM forex_signal "
+            "WHERE user_id=? AND kind='INSTANCE' "
+            "AND date(created_at)=date('now')",
+            (user_id,),
+        ).fetchone()
+        return int(row["c"]) if row else 0
+
+
 def count_open_forex_signals_for_pair_kind(
         user_id: int, pair: str, kind: str) -> int:
     """How many OPEN signals of THIS specific kind (LIVE / LIMIT / HFT)

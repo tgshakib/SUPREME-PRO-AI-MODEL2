@@ -639,24 +639,15 @@ async def cb_fx_instant(call: CallbackQuery, bot: Bot):
         await call.answer("Verify first via /start", show_alert=True)
         return
 
-    # ── Free trial limit (same cap as NEW SIGNAL) ─────────────────────────
+    # ── Free trial limit — Instance Signal: 1 per day for free users ─────
     if not _is_premium(user_id):
-        setup = db.get_forex_setup(user_id)
-        if setup and setup.get("day") == db.today_str():
-            import database as _db2
-            bonus = _db2.get_referral_bonus(user_id)
-            effective_limit = FREE_FOREX_DAILY_LIMIT + bonus["bonus_forex"]
-            if (setup.get("sent_today") or 0) >= effective_limit:
-                bonus_note = (
-                    f" (+{bonus['bonus_forex']} referral bonus)"
-                    if bonus["bonus_forex"] else ""
-                )
-                await call.answer(
-                    f"Free trial = {effective_limit} signal/day{bonus_note}. "
-                    "Buy access for unlimited.",
-                    show_alert=True,
-                )
-                return
+        if db.count_instance_signals_today(user_id) >= 1:
+            await call.answer(
+                "⚡ Free trial = 1 Instance Signal per day. "
+                "Buy access for unlimited.",
+                show_alert=True,
+            )
+            return
 
     await call.answer("⚡ Scanning market… signal ready in 5-8 sec", show_alert=False)
 
