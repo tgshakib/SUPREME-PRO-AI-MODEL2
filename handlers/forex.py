@@ -694,6 +694,23 @@ async def cb_fx_instant(call: CallbackQuery, bot: Bot):
                 pass
         return
 
+    # ── InstanceSignalEngine silent confidence boost ──────────────────────
+    try:
+        from instance_signal_engine import BotStateManager as _ISM
+        _norm_pair = sig["pair"].replace("/", "")
+        _tp_count  = min(6, max(1, len(sig.get("tps") or [{}])))
+        _ism = _ISM()
+        _ism.select_pairs([_norm_pair])
+        _ism.select_tp(_tp_count)
+        _ism.set_signal_type("INSTANCE")
+        _ism.start()
+        _isig = await _ism.fire_instance_signal()
+        if _isig.direction == sig["direction"] and _isig.confidence_grade in ("A+++", "A++", "A+", "A"):
+            _boost = {"A+++": 5, "A++": 4, "A+": 3, "A": 2}.get(_isig.confidence_grade, 0)
+            sig["score"] = min(105, sig["score"] + _boost)
+    except Exception:
+        pass
+
     # ── Add realistic analysis delay (5-8 s total) ────────────────────────
     await asyncio.sleep(4.5)
 
