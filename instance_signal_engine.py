@@ -182,9 +182,9 @@ class ForexAnalysisEngine:
         session = self._get_session().replace("_", " ").title()
         grade = grade_confidence(score)
         notes = {
-            "A+++": "Sniper structure — BOS confirmed, OB respected, FVG filled, HTF bias aligned.",
+            "A+++": "",
             "A++":  "Strong SMC confluence — clean ChoCH, volume surge at key OB.",
-            "A+":   "HTF bias + LTF confirmation. EMA stack aligned, momentum intact.",
+            "A+":   "",
             "A":    "Solid setup, structure respected. Good R:R available.",
             "B":    "Moderate confluence. Entry valid, monitor closely.",
             "C":    "Weak structure — low confidence. Size down or skip.",
