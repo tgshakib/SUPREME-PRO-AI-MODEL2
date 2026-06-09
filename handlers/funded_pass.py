@@ -389,6 +389,17 @@ async def _send_fp_signal(bot: Bot, fp: dict):
     direction, entry, tps, sl, dec, _pat = _generate_levels(pair, max_tp=1)
     pip = live_pip_size(pair)
 
+    # Funded-pass SL clamp — standard forex only: 15–25 pips hard cap.
+    # Metals / crypto / indices retain their ATR-scaled SL from _generate_levels.
+    _fp_is_exotic = any(x in pair.upper() for x in (
+        "XAU", "XAG", "BTC", "ETH", "SOL", "BNB", "LTC", "XRP",
+        "NDX", "DJI", "NAS", "SPX", "US30", "US500",
+    ))
+    if not _fp_is_exotic:
+        _sl_dist = abs(entry - sl)
+        _sl_dist = max(15 * pip, min(_sl_dist, 25 * pip))
+        sl = (entry - _sl_dist) if direction == "BUY" else (entry + _sl_dist)
+
     # Funded-pass: 96% LIVE NOW (sniper entry — zero pip slippage),
     # 4% LIMIT (zone entry). This ensures near-zero pip drop on entry.
     kind = "LIMIT" if random.random() < 0.04 else "LIVE"
