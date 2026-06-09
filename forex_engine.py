@@ -127,6 +127,22 @@ SL_MIN_PIPS_FOREX = 20
 SL_MAX_PIPS_FOREX = 30   # hard cap: no signal wider than 30 pips SL
 
 
+def _confidence_grade(score: int) -> str:
+    """A-grade confidence label (A / A+ / A++ / A+++).
+
+    Score is floored at 75 so B/C grades never appear on a signal card.
+    A+++ = zero-pip sniper entry on a confirmed big institutional move.
+    A++  = elite multi-confirmation setup.
+    A+   = high-probability confirmed entry.
+    A    = solid qualified entry (minimum threshold).
+    """
+    score = max(score, 75)
+    if score >= 93: return "A+++"
+    if score >= 87: return "A++"
+    if score >= 80: return "A+"
+    return "A"
+
+
 def _is_metal_pair(pair: str) -> bool:
     p = (pair or "").upper().replace(" ", "")
     return any(k in p for k in ("XAU", "XAG", "GOLD", "SILVER"))
@@ -1240,6 +1256,11 @@ def _signal_text(pair: str, direction: str, tp_prices, sl_price,
     trend_label = _trend_label(direction, sniper_data, liq_data)
     bias_word   = "📈 BULLISH" if is_buy else "📉 BEARISH"
 
+    # ── Confidence grade (A / A+ / A++ / A+++) ────────────────
+    _sn_score   = (sniper_data or {}).get("score", 0)
+    _sm_grade   = (smart      or {}).get("grade", 0)
+    _conf_grade = _confidence_grade(max(_sn_score, _sm_grade, 75))
+
     # ── Confirmation block (session + footprint + SMC) ────────
     conf_lines: list[str] = []
 
@@ -1313,6 +1334,7 @@ def _signal_text(pair: str, direction: str, tp_prices, sl_price,
         f"🚀 <b>Trend:</b> {trend_label}",
         f"📊 <b>Bias:</b> {bias_word}",
         f"🏅 <b>VOLUME:</b> {volume}",
+        f"💎 <b>Confidence:</b> {_conf_grade}",
         "━━━━━━━━━━━━━━━━━",
         "💀 @TRADERGUIDE_BOT",
         "⚠️ <i>Use proper risk management on every trade.</i>",

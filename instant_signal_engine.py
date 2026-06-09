@@ -554,14 +554,19 @@ def _analyse_pair(pair: str) -> dict | None:
 # TP / SL CALCULATOR — always minimum 30 pips on TP1
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _calculate_levels(analysis: dict) -> dict:
+def _calculate_levels(analysis: dict, max_tp: int | None = None) -> dict:
     """Calculate entry zone, SL, and TP ladder from the best setup.
+
+    Parameters
+    ----------
+    analysis : result dict from _analyse_pair
+    max_tp   : override TP count (from user's forex setup). None = auto.
 
     Rules:
       • SL  : beyond nearest opposing liquidity pool + 0.25×ATR buffer
-               Clamped: standard forex 22-45 pips, metals/indices ATR-based
+               Standard forex clamped 15–25 pips; A+ sniper 6–9 pips.
       • TP1 : minimum 30 pips, always enforced
-      • TP2/3/4 : scaled by session score and setup strength
+      • TP2+ : scaled by session score and setup strength, or max_tp count
       • Entry zone: mid-price ± 3 pips spread buffer
     """
     pair      = analysis["pair"]
@@ -600,8 +605,8 @@ def _calculate_levels(analysis: dict) -> dict:
     elif is_index:
         sl_min, sl_max = 30, 200
     else:
-        # Standard forex: 15–30 pips hard cap
-        sl_min, sl_max = 15, 30
+        # Standard forex: 15–25 pips hard cap
+        sl_min, sl_max = 15, 25
         # A+ sniper — score ≥ 90 → ultra-tight 6–9 pip SL
         if score >= 90:
             sl_min, sl_max = 6, 9
@@ -634,8 +639,10 @@ def _calculate_levels(analysis: dict) -> dict:
         base_tp_dist = base_tp_dist * session_mult
         tp_step      = max(pip * 25, base_tp_dist * 0.75)
 
-    # Number of TPs — big moves get more ladders
-    if is_metal or is_crypto:
+    # Number of TPs — user's selection takes priority; auto-scale when not set
+    if max_tp is not None:
+        n_tps = int(max_tp)
+    elif is_metal or is_crypto:
         # Gold / Silver / BTC / ETH naturally move far → up to 9 TPs
         n_tps = 6 if score < 75 else 9
     elif is_index:
@@ -718,6 +725,22 @@ def _strength_label(score: int) -> str:
     return "📊 STANDARD"
 
 
+def _confidence_grade(score: int) -> str:
+    """A-grade confidence label for signal card.
+
+    Minimum displayed = A (score is floored at 75 so B/C never show).
+    A+++ = zero-pip sniper on a confirmed big institutional move.
+    A++  = elite multi-confirmation entry.
+    A+   = high-probability confirmed setup.
+    A    = solid qualified entry (minimum threshold).
+    """
+    score = max(score, 75)   # floor: minimum A always
+    if score >= 93: return "A+++"
+    if score >= 87: return "A++"
+    if score >= 80: return "A+"
+    return "A"
+
+
 def _win_rate_icon(wr: int) -> str:
     if wr >= 82: return "🏆"
     if wr >= 72: return "🔥"
@@ -729,7 +752,8 @@ def _win_rate_icon(wr: int) -> str:
 # PUBLIC API
 # ─────────────────────────────────────────────────────────────────────────────
 
-def instant_scan(user_pairs: list[str] | None = None, strict: bool = False) -> dict:
+def instant_scan(user_pairs: list[str] | None = None, strict: bool = False,
+                 max_tp: int | None = None) -> dict:
     """Scan eligible pairs, pick the best current setup, and return the
     complete signal dict.  Always returns a signal — never fails silently.
 
@@ -740,6 +764,9 @@ def instant_scan(user_pairs: list[str] | None = None, strict: bool = False) -> d
     strict     : if True and user_pairs is non-empty, scan ONLY those pairs
                  (no fallback fill).  Set by the INSTANCE SIGNAL handler so
                  the scan is limited to the user's already-selected pair(s).
+    max_tp     : TP level count from user's forex setup. When provided the
+                 TP ladder is generated to exactly this many levels instead
+                 of being auto-scaled by session/score.
 
     Returns
     -------
@@ -804,7 +831,7 @@ def instant_scan(user_pairs: list[str] | None = None, strict: bool = False) -> d
 
     # ── Pick best result by composite score ───────────────────────────────
     best = max(results, key=lambda r: r["score"] * 0.7 + r["sess_score"] * 3)
-    levels = _calculate_levels(best)
+    levels = _calculate_levels(best, max_tp=max_tp)
 
     # ── Build analysis signal summary (shown in signal card) ───────────────
     sigs = []
@@ -947,6 +974,7 @@ def format_instant_signal(sig: dict, user_id: int | None = None) -> str:
         f"🚀 <b>Trend:</b> {trend_label}",
         f"📊 <b>Bias:</b> {bias_word}",
         f"🏅 <b>VOLUME:</b> {volume}",
+        f"💎 <b>Confidence:</b> {_confidence_grade(score)}",
         "━━━━━━━━━━━━━━━━━",
         "💀 @TRADERGUIDE_BOT",
         "⚠️ <i>Use proper risk management on every trade.</i>",

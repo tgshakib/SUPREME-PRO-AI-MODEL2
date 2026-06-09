@@ -673,11 +673,14 @@ async def cb_fx_instant(call: CallbackQuery, bot: Bot):
     await asyncio.sleep(1.0)   # let the scanning message show first
 
     user_pairs = _user_pair_list(user_id)
+    # Read user's TP count from their active forex setup (pip-target → count)
+    _setup  = db.get_forex_setup(user_id)
+    _max_tp = _tp_pip_to_count(int(_setup["max_tp"])) if _setup and _setup.get("max_tp") else None
     loop = asyncio.get_event_loop()
     try:
         # Strict=True → scan ONLY the user's selected pair(s), no fallback fill
         sig = await loop.run_in_executor(None, lambda: instant_scan(
-            user_pairs, strict=bool(user_pairs)
+            user_pairs, strict=bool(user_pairs), max_tp=_max_tp
         ))
     except Exception as e:
         if scan_msg:
@@ -756,6 +759,25 @@ async def cb_fx_instant(call: CallbackQuery, bot: Bot):
             db.set_forex_signal_msg(sig_id, sent_msg.message_id)
         except Exception:
             pass
+
+
+def _tp_pip_to_count(pip_target: int) -> int:
+    """Convert the stored forex_setup max_tp (pip target) to a TP level count.
+
+    TP_LEVELS stores pip targets (30, 40, 60, 80, 100, 120, 160, 220, 300+).
+    The label numbering TP¹–TP⁸ maps 1:1 to the count of TP levels we show.
+    Legacy max_tp values 1-9 are already a count — pass them through directly.
+    """
+    if pip_target <= 9:   return max(1, pip_target)   # legacy count format
+    if pip_target <= 30:  return 1
+    if pip_target <= 40:  return 2
+    if pip_target <= 60:  return 3
+    if pip_target <= 80:  return 4
+    if pip_target <= 100: return 5
+    if pip_target <= 120: return 6
+    if pip_target <= 160: return 7
+    if pip_target <= 220: return 8
+    return 9
 
 
 def _user_pair_list(user_id: int) -> list[str]:
