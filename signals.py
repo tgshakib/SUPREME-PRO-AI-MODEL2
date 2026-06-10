@@ -1748,6 +1748,11 @@ def generate_signal(
 
     _sep5 = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+    # ╔══════════════════════════════════════════════════════════════╗
+    # ║  BINARY SIGNAL TEXT — LOCKED FORMAT (owner-approved)        ║
+    # ║  DO NOT add, remove, or reorder any line without explicit   ║
+    # ║  written permission from the bot owner.                     ║
+    # ╚══════════════════════════════════════════════════════════════╝
     if is_non_mtg:
         text = (
             f"{header}\n"
@@ -1759,7 +1764,9 @@ def generate_signal(
             f"🏅 Grade: {grade}\n"
             f"🚀 Trend: <b>{trend}</b>\n"
             f"🎯 Confidence: {conf_display}\n"
+            f"{_big_move_line}"
             f"🛡️ MTG: {mtg}\n"
+            f"{_current_px_line}"
             + f"{_sep3}\n"
             f"🕐 <b>{now_str}</b> ✦ <b>EXECUTE NOW</b>\n"
             f"{_sep4}\n"
@@ -1776,7 +1783,9 @@ def generate_signal(
             f"🏅 Grade: {grade}\n"
             f"🚀 Trend: <b>{trend}</b>\n"
             f"🎯 Confidence: {conf_display}\n"
+            f"{_big_move_line}"
             f"🛡️ MTG: {mtg}\n"
+            f"{_current_px_line}"
             + f"💀 Community: @Traderguide_bot\n"
             f"{_sep3}\n"
             f"🕐 <b>{now_str}</b> ✦ <b>EXECUTE NOW</b>\n"
