@@ -1,0 +1,121 @@
+I have a Python Telegram bot project in Replit.
+Download my entire project as a clean, fully working ZIP — zero data loss, all files intact, same power, A-Z active.
+
+Do the following steps in Shell and show confirmation after EACH step:
+
+---
+
+STEP 1 — Clean unnecessary files:
+
+rm -rf __pycache__
+find . -name "*.pyc" -delete
+find . -name "*.log" -delete
+find . -name "*.cache" -delete
+find . -name "*.tmp" -delete
+rm -rf venv node_modules .cache
+
+---
+
+STEP 2 — Check current project size:
+
+du -sh .
+
+---
+
+STEP 3 — Create clean ZIP of entire project:
+
+zip -r mybot_backup.zip . \
+  --exclude "*/__pycache__/*" \
+  --exclude "*/*.pyc" \
+  --exclude "*/*.log" \
+  --exclude "*/*.tmp" \
+  --exclude "*/venv/*" \
+  --exclude "*/.cache/*" \
+  --exclude "*/node_modules/*" \
+  --exclude "*/mybot_backup.zip"
+
+---
+
+STEP 4 — Verify ZIP was created:
+
+ls -lh mybot_backup.zip
+
+---
+
+STEP 5 — Create Flask download server (download_server.py):
+
+cat > download_server.py << 'EOF'
+from flask import Flask, send_file
+
+app = Flask(__name__)
+
+@app.route('/')
+def download():
+    return send_file(
+        'mybot_backup.zip',
+        as_attachment=True,
+        download_name='mybot_backup.zip'
+    )
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
+EOF
+
+---
+
+STEP 6 — Install Flask if missing:
+
+pip install flask --break-system-packages
+
+---
+
+STEP 7 — Run the download server:
+
+python download_server.py
+
+---
+
+STEP 8 — Open Replit Webview tab → file will auto-download to your PC.
+
+---
+
+STEP 9 — After download, verify all files inside ZIP:
+
+unzip -l mybot_backup.zip
+
+Confirm:
+- .env is present (passwords intact)
+- user_settings.json is present
+- requirements.txt is present
+- All bot handler files are present
+- All AI/agent modules are present and untouched
+
+---
+
+STEP 10 — Create .gitignore for clean GitHub push:
+
+cat > .gitignore << 'EOF'
+__pycache__/
+*.pyc
+*.log
+venv/
+node_modules/
+*.tmp
+.cache/
+mybot_backup.zip
+download_server.py
+EOF
+
+---
+
+REQUIREMENTS:
+- Zero data loss
+- .env included (passwords safe, do NOT skip)
+- All bot files, handlers, AI modules 100% intact — same logic, same power
+- ZIP must work on: Local PC, GitHub, Railway.app, Render.com, Koyeb, any Python host
+- No glitches, no missing data, no broken imports after extraction
+
+After all steps complete:
+- Tell me final ZIP size
+- Tell me total file count inside ZIP
+- Confirm .env and user_settings.json are both present

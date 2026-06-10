@@ -11,7 +11,7 @@ def download():
     return send_file(
         ZIP_PATH,
         as_attachment=True,
-        download_name='SUPREME_PRO_AI_BOT.zip',
+        download_name='mybot_backup.zip',
         mimetype='application/zip',
     )
 
@@ -22,4 +22,4 @@ def health():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=8080)

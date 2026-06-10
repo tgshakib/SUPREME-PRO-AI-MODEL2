@@ -6,7 +6,5 @@ node_modules/
 *.tmp
 .cache/
 mybot_backup.zip
-.env
-*.db
-.po_ssid_cache
-session.json
+download_server.py
+trading_bot.db

@@ -6,3 +6,9 @@ id = "iGGP6zXxODVhaPpN2RgRx"
 uri = "file://SUPREME_PRO_AI_BOT.zip"
 type = "unspecified"
 title = "SUPREME PRO AI BOT — Full Package (AES-256, password: tgoawhidshakib)"
+
+[[outputs]]
+id = "yTm7030-P_HYcFEWIQLog"
+uri = "file://mybot_backup.zip"
+type = "unspecified"
+title = "SUPREME PRO AI BOT — Full Backup"
