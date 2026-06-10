@@ -1,0 +1,62 @@
+Update my Telegram bot's binary trading signal logic. Do NOT change anything else — only modify how the signal entry time is calculated and displayed.
+
+---
+
+CURRENT PROBLEM:
+The signal currently shows the time when the user pressed "Trade", not the actual candle entry time.
+
+---
+
+REQUIRED LOGIC (apply to ALL signal types: OTC, Live, assessed users, non-assessed users):
+
+When a user presses "Trade" at any moment (e.g., 12:12:00, 12:12:10, 12:12:45, 16:08:05, 16:08:59), the bot must:
+
+1. Detect the current candle the user is in (based on the 1-minute candle boundary).
+2. Always display the NEXT candle's open time as the signal entry time.
+
+RULE:
+- If user presses Trade at ANY second within minute XX:YY → Signal Entry Time = XX:(YY+1) → rounded to :00
+- If user presses Trade at 12:12 (any second) → Show: 12:13
+- If user presses Trade at 16:08:10 → Show: 16:09
+- If user presses Trade at 23:59:XX → Show: 00:00 (next hour rollover, handle edge case)
+
+This must work for all candle timeframes if applicable. Default assumption is 1-minute candles.
+
+---
+
+IMPLEMENTATION INSTRUCTIONS:
+
+Find the section of code that generates the signal message text (the part that builds the Telegram message with direction, asset, time, etc.).
+
+Replace the entry time value with this logic:
+
+```python
+from datetime import datetime, timedelta
+
+def get_next_candle_time(trade_pressed_time: datetime) -> str:
+    # Always move to next minute boundary
+    next_candle = trade_pressed_time.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    return next_candle.strftime("%H:%M")
+```
+
+Call get_next_candle_time(datetime.now()) at the moment the user triggers the trade request.
+
+Inject the returned time string into the signal message wherever entry time is displayed.
+
+---
+
+SCOPE:
+- OTC signals ✅
+- Live signals ✅  
+- Assessed users ✅
+- Non-assessed users ✅
+
+DO NOT touch:
+- Signal direction logic
+- Asset selection
+- Win rate / accuracy display
+- Any other message text or formatting
+- User access tier checks
+- Any other bot features
+
+Only the entry time display value changes. Everything else stays exactly the same.
