@@ -1748,11 +1748,36 @@ def generate_signal(
 
     _sep5 = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    # ╔══════════════════════════════════════════════════════════════╗
-    # ║  BINARY SIGNAL TEXT — LOCKED FORMAT (owner-approved)        ║
-    # ║  DO NOT add, remove, or reorder any line without explicit   ║
-    # ║  written permission from the bot owner.                     ║
-    # ╚══════════════════════════════════════════════════════════════╝
+    # ╔══════════════════════════════════════════════════════════════════════╗
+    # ║        BINARY SIGNAL TEXT — FINAL & ORIGINAL FORMAT               ║
+    # ║        LOCKED BY OWNER — DO NOT MODIFY WITHOUT PERMISSION         ║
+    # ╠══════════════════════════════════════════════════════════════════════╣
+    # ║  EXACT OUTPUT FORMAT (every line, in order):                       ║
+    # ║                                                                      ║
+    # ║  🟢 CALL  |  BUY「 SUPREME PRO AI 」        ← header              ║
+    # ║  ━━━━━━━━━━━━━━━━━━━━━━━━                   ← _sep1               ║
+    # ║  💱 EUR/USD                                  ← pair                ║
+    # ║  📊 Market: 🌐 LIVE  •  1 MIN               ← market / tf_label   ║
+    # ║  ━━━━━━━━━━━━━━━━━━                          ← _sep2               ║
+    # ║  📆 SIGNAL: 🟢 CALL / UP                    ← signal_arrow        ║
+    # ║  🏅 Grade: 💎 PREMIUM  (or 🆓 FREE)         ← grade               ║
+    # ║  🚀 Trend: ⬆️ STRONG UP                     ← trend               ║
+    # ║  🎯 Confidence: 95%                          ← conf_display        ║
+    # ║  🛡️ MTG: 1 Step Required                    ← mtg                 ║
+    # ║  💰 Current Price: 1.08460  [LIVE only]      ← _current_px_line   ║
+    # ║  💀 Community: @Traderguide_bot [MTG only]   ← MTG branch only    ║
+    # ║  ━━━━━━━━━━━━━━━━━━━━━                       ← _sep3              ║
+    # ║  🕐 16:09 UTC+6 ✦ EXECUTE NOW               ← now_str (next min) ║
+    # ║  ━━━━━━━━━━━━━━━━━━━━━━━                     ← _sep4              ║
+    # ║  ⚠️ Enter on the NEW candle · Use proper risk management.          ║
+    # ║                                                                      ║
+    # ║  RULES:                                                              ║
+    # ║  • _current_px_line  → shows ONLY for LIVE pairs, blank for OTC    ║
+    # ║  • Community line    → shows ONLY in MTG (else) branch             ║
+    # ║  • Time (now_str)    → always NEXT candle open (current min + 1)   ║
+    # ║  • NO extra lines allowed — no AI stack, no big move badge,        ║
+    # ║    no strategy tag, no recovery banner, nothing extra              ║
+    # ╚══════════════════════════════════════════════════════════════════════╝
     if is_non_mtg:
         text = (
             f"{header}\n"
