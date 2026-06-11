@@ -32,6 +32,7 @@ from keyboards import (
     forex_tf_kb, forex_pairs_input_kb, forex_pairs_text,
     forex_tp_kb, forex_active_kb, fx_active_view_kb, forex_tp_locked_kb,
     instance_signal_result_kb,
+    instance_isig_pair_kb, instance_isig_tf_kb, instance_isig_tp_kb,
 )
 from live_prices import decimals as live_decimals, pip_size as live_pip_size
 from config import (
@@ -71,6 +72,11 @@ router = Router()
 
 class ForexState(StatesGroup):
     awaiting_pairs = State()
+
+
+class InstanceSignalSelect(StatesGroup):
+    """FSM for the guided Instance Signal flow: pair → TF → TP → fire."""
+    idle = State()   # placeholder so the group is always defined
 
 
 def _tf_label(code: str) -> str:
@@ -980,3 +986,226 @@ def _instant_history_kb():
         [InlineKeyboardButton(text="🛑 STOP",            callback_data="fx:stop"),
          InlineKeyboardButton(text="🏢 WORKPLACE",        callback_data="m:home")],
     ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚡ GUIDED INSTANCE SIGNAL — pair → TF → TP → fire (with 20-pip SL cap)
+# Placed under "🟢 YOUR ACTIVE Fx-Signal" on the home screen.
+# Each step shows only that selection; back-buttons preserve the flow.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Step 0: Start — show pair selection ──────────────────────────────────────
+@router.callback_query(F.data == "isig:start")
+async def cb_isig_start(call: CallbackQuery, bot: Bot):
+    """User tapped ⚡ INSTANCE SIGNAL on the home screen."""
+    await call.answer()
+    user_id = call.from_user.id
+    if not db.is_verified(user_id):
+        await call.answer("Verify first via /start", show_alert=True)
+        return
+    # Free-user daily cap (share with the existing instant signal limit)
+    if not _is_premium(user_id):
+        if db.count_instance_signals_today(user_id) >= 1:
+            await call.answer(
+                "⚡ Free trial = 1 Instance Signal per day. Buy access for unlimited.",
+                show_alert=True,
+            )
+            return
+    await show_screen(
+        bot, call.message.chat.id,
+        "⚡ <b>INSTANCE SIGNAL</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "Step 1 of 3 — Select your pair:",
+        instance_isig_pair_kb(),
+    )
+
+
+# ── Step 1: Pair selected → show TF selection ────────────────────────────────
+@router.callback_query(F.data.startswith("isig:pair:"))
+async def cb_isig_pair(call: CallbackQuery, bot: Bot):
+    await call.answer()
+    safe_pair = call.data.split("isig:pair:", 1)[1]
+    pair = safe_pair.replace("_", "/")
+    await show_screen(
+        bot, call.message.chat.id,
+        f"⚡ <b>INSTANCE SIGNAL</b>  ·  <b>{pair}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "Step 2 of 3 — Select timeframe:",
+        instance_isig_tf_kb(pair),
+    )
+
+
+# ── Back from TF step → re-show pair selection ───────────────────────────────
+@router.callback_query(F.data.startswith("isig:tf_back:"))
+async def cb_isig_tf_back(call: CallbackQuery, bot: Bot):
+    await call.answer()
+    await show_screen(
+        bot, call.message.chat.id,
+        "⚡ <b>INSTANCE SIGNAL</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "Step 1 of 3 — Select your pair:",
+        instance_isig_pair_kb(),
+    )
+
+
+# ── Step 2: TF selected → show TP selection ──────────────────────────────────
+@router.callback_query(F.data.startswith("isig:tf:"))
+async def cb_isig_tf(call: CallbackQuery, bot: Bot):
+    await call.answer()
+    parts   = call.data.split(":", 3)   # ["isig", "tf", safe_pair, tf_code]
+    if len(parts) < 4:
+        return
+    safe_pair = parts[2]
+    tf_code   = parts[3]
+    pair      = safe_pair.replace("_", "/")
+    await show_screen(
+        bot, call.message.chat.id,
+        f"⚡ <b>INSTANCE SIGNAL</b>  ·  <b>{pair}</b>  ·  <b>{tf_code}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "Step 3 of 3 — Select Take Profit level:",
+        instance_isig_tp_kb(pair, tf_code),
+    )
+
+
+# ── Step 3: TP selected → run full analysis → fire signal ────────────────────
+@router.callback_query(F.data.startswith("isig:tp:"))
+async def cb_isig_tp(call: CallbackQuery, bot: Bot):
+    """All three selections confirmed. Run analysis and send the signal."""
+    import os as _os
+    from instant_signal_engine import instant_scan, format_instant_signal
+    from aiogram.types import FSInputFile
+
+    await call.answer("⚡ Analysing… signal ready in 6-7 sec", show_alert=False)
+
+    parts = call.data.split(":")   # ["isig","tp",safe_pair,tf_code,pips]
+    if len(parts) < 5:
+        return
+    safe_pair = parts[2]
+    tf_code   = parts[3]
+    try:
+        pip_target = int(parts[4])
+    except ValueError:
+        pip_target = 30
+    pair    = safe_pair.replace("_", "/")
+    user_id = call.from_user.id
+
+    # Convert pip target → TP count
+    tp_count = _tp_pip_to_count(pip_target)
+
+    # ── Scanning placeholder ──────────────────────────────────────────────
+    scan_msg = None
+    try:
+        scan_msg = await call.message.answer(
+            f"⚡ <b>SUPREME AI — Analysing {pair} on {tf_code} ...</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    await asyncio.sleep(1.0)
+
+    # ── Run analysis (thread pool so event loop stays responsive) ─────────
+    loop = asyncio.get_event_loop()
+    try:
+        sig = await loop.run_in_executor(None, lambda: instant_scan(
+            user_pairs  = [pair],
+            strict      = True,
+            max_tp      = tp_count,
+            tf_override = tf_code,
+            max_sl_pips = 20,      # Task 3 requirement: max 20-pip SL
+        ))
+    except Exception as e:
+        if scan_msg:
+            try:
+                await scan_msg.edit_text(
+                    "⚠️ <b>Scan failed</b> — market data unavailable. Try again.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        return
+
+    # ── InstanceSignalEngine silent confidence boost ──────────────────────
+    try:
+        from instance_signal_engine import BotStateManager as _ISM
+        _norm_pair = sig["pair"].replace("/", "")
+        _ism = _ISM()
+        _ism.select_pairs([_norm_pair])
+        _ism.select_tp(min(6, max(1, len(sig.get("tps") or [{}]))))
+        _ism.set_signal_type("INSTANCE")
+        _ism.start()
+        _isig = await _ism.fire_instance_signal()
+        if _isig.direction == sig["direction"] and _isig.confidence_grade in ("A+++", "A++", "A+", "A"):
+            _boost = {"A+++": 5, "A++": 4, "A+": 3, "A": 2}.get(_isig.confidence_grade, 0)
+            sig["score"] = min(105, sig["score"] + _boost)
+    except Exception:
+        pass
+
+    # ── Analysis delay (6-7 s total including the 1 s above) ─────────────
+    await asyncio.sleep(5.5)
+
+    # ── Format signal card ────────────────────────────────────────────────
+    caption = format_instant_signal(sig, user_id=user_id)
+
+    # ── Register in DB for I'M IN / tracking ─────────────────────────────
+    sig_id = None
+    try:
+        sig_id = db.create_forex_signal(
+            user_id   = user_id,
+            chat_id   = call.message.chat.id,
+            pair      = sig["pair"],
+            direction = sig["direction"],
+            entry     = sig["entry"],
+            tp_prices = [t["price"] for t in sig["tps"]],
+            sl_price  = sig["sl"],
+            max_tp    = len(sig["tps"]),
+            kind      = "INSTANCE",
+        )
+    except Exception:
+        pass
+
+    kb = instance_signal_result_kb(sig_id) if sig_id else _instant_signal_kb()
+
+    # ── Banner photo ──────────────────────────────────────────────────────
+    _base       = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    banner_buy  = _os.path.join(_base, "assets", "forex_buy.jpg")
+    banner_sell = _os.path.join(_base, "assets", "forex_sell.jpg")
+    photo_path  = banner_buy if sig["direction"] == "BUY" else banner_sell
+
+    # Delete placeholder
+    if scan_msg:
+        try:
+            await scan_msg.delete()
+        except Exception:
+            pass
+
+    # ── Send signal card ──────────────────────────────────────────────────
+    sent_msg = None
+    try:
+        if _os.path.exists(photo_path):
+            sent_msg = await bot.send_photo(
+                chat_id=call.message.chat.id,
+                photo=FSInputFile(photo_path),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        else:
+            sent_msg = await call.message.answer(
+                caption, parse_mode="HTML", reply_markup=kb,
+            )
+    except Exception:
+        try:
+            sent_msg = await call.message.answer(caption, parse_mode="HTML")
+        except Exception:
+            pass
+
+    # Track message for I'M IN wipe
+    if sig_id and sent_msg:
+        try:
+            db.set_forex_signal_msg(sig_id, sent_msg.message_id)
+        except Exception:
+            pass
+
+    # The create_forex_signal call above with kind='INSTANCE' is sufficient
+    # for count_instance_signals_today() to enforce the free daily cap.

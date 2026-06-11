@@ -46,7 +46,7 @@ CHECK_EVERY = 300        # 5 minutes
 CLAUDE_EVERY = 900       # 15 minutes
 
 # ── SSID probe settings ───────────────────────────────────────────────────────
-SSID_PROBE_INTERVAL = 45         # probe every 45 seconds
+SSID_PROBE_INTERVAL = 20         # probe every 20 s — responsive backup for OTC sessions
 SSID_EXPIRY_BUFFER  = 240        # refresh if < 4 minutes remain (seconds)
 SSID_PROBE_URL      = "https://api-l.po.market/socket.io/?EIO=4&transport=websocket"
 _SSID_LAST_OK: dict  = {"ts": 0.0, "consecutive_fails": 0}

@@ -422,10 +422,11 @@ def _candle_patterns(candles: list[dict]) -> list[str]:
 # PAIR ANALYSER — scores a single pair 0-100 and picks direction
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _analyse_pair(pair: str) -> dict | None:
-    """Fetches 5m candles and runs full PA analysis. Returns score dict or None."""
+def _analyse_pair(pair: str, tf: str = "5m") -> dict | None:
+    """Fetches candles and runs full PA analysis. Returns score dict or None.
+    tf: yfinance interval ('1m','3m','5m','15m','30m','1h','4h','1d')."""
     try:
-        candles = _fetch_candles(pair, "5m", 80)
+        candles = _fetch_candles(pair, tf, 80)
         if len(candles) < 25:
             candles = _fetch_candles(pair, "1m", 80)
         if len(candles) < 15:
@@ -554,13 +555,15 @@ def _analyse_pair(pair: str) -> dict | None:
 # TP / SL CALCULATOR — always minimum 30 pips on TP1
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _calculate_levels(analysis: dict, max_tp: int | None = None) -> dict:
+def _calculate_levels(analysis: dict, max_tp: int | None = None,
+                      max_sl_pips: int | None = None) -> dict:
     """Calculate entry zone, SL, and TP ladder from the best setup.
 
     Parameters
     ----------
-    analysis : result dict from _analyse_pair
-    max_tp   : override TP count (from user's forex setup). None = auto.
+    analysis    : result dict from _analyse_pair
+    max_tp      : override TP count (from user's forex setup). None = auto.
+    max_sl_pips : hard cap on SL distance in pips. Instance Signal uses 20.
 
     Rules:
       • SL  : beyond nearest opposing liquidity pool + 0.25×ATR buffer
@@ -612,6 +615,10 @@ def _calculate_levels(analysis: dict, max_tp: int | None = None) -> dict:
             sl_min, sl_max = 6, 9
 
     sl_pips = max(sl_min, min(sl_pips, sl_max))
+    # Hard cap from caller (Instance Signal enforces 20-pip max SL)
+    if max_sl_pips is not None:
+        sl_pips = min(sl_pips, float(max_sl_pips))
+        sl_pips = max(sl_pips, 1.0)   # floor at 1 pip so SL is never at entry
     sl = (price - sl_pips * pip) if direction == "BUY" else (price + sl_pips * pip)
 
     # ── Entry zone (mid ± 3 pips) ─────────────────────────────────────────
@@ -753,20 +760,26 @@ def _win_rate_icon(wr: int) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def instant_scan(user_pairs: list[str] | None = None, strict: bool = False,
-                 max_tp: int | None = None) -> dict:
+                 max_tp: int | None = None, tf_override: str | None = None,
+                 max_sl_pips: int | None = None) -> dict:
     """Scan eligible pairs, pick the best current setup, and return the
     complete signal dict.  Always returns a signal — never fails silently.
 
     Parameters
     ----------
-    user_pairs : list of pair strings the user configured, or None to use
-                 the built-in ranked fallback list.
-    strict     : if True and user_pairs is non-empty, scan ONLY those pairs
-                 (no fallback fill).  Set by the INSTANCE SIGNAL handler so
-                 the scan is limited to the user's already-selected pair(s).
-    max_tp     : TP level count from user's forex setup. When provided the
-                 TP ladder is generated to exactly this many levels instead
-                 of being auto-scaled by session/score.
+    user_pairs  : list of pair strings the user configured, or None to use
+                  the built-in ranked fallback list.
+    strict      : if True and user_pairs is non-empty, scan ONLY those pairs
+                  (no fallback fill).  Set by the INSTANCE SIGNAL handler so
+                  the scan is limited to the user's already-selected pair(s).
+    max_tp      : TP level count from user's forex setup. When provided the
+                  TP ladder is generated to exactly this many levels instead
+                  of being auto-scaled by session/score.
+    tf_override : yfinance interval to use for candle analysis
+                  ('1m','3m','5m','15m','30m','1h','4h','1d').
+                  None = default 5m.
+    max_sl_pips : hard cap on SL distance in pips.
+                  Instance Signal guided flow uses 20.
 
     Returns
     -------
@@ -791,9 +804,10 @@ def instant_scan(user_pairs: list[str] | None = None, strict: bool = False,
                 break
 
     # ── Analyse each pair ─────────────────────────────────────────────────
+    _tf = tf_override or "5m"
     results = []
     for pair in pairs_to_scan:
-        r = _analyse_pair(pair)
+        r = _analyse_pair(pair, tf=_tf)
         if r:
             results.append(r)
 
@@ -831,7 +845,7 @@ def instant_scan(user_pairs: list[str] | None = None, strict: bool = False,
 
     # ── Pick best result by composite score ───────────────────────────────
     best = max(results, key=lambda r: r["score"] * 0.7 + r["sess_score"] * 3)
-    levels = _calculate_levels(best, max_tp=max_tp)
+    levels = _calculate_levels(best, max_tp=max_tp, max_sl_pips=max_sl_pips)
 
     # ── Build analysis signal summary (shown in signal card) ───────────────
     sigs = []

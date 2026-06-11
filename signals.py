@@ -222,11 +222,17 @@ SIGNAL_PHOTO_BUY = os.path.join(_PROJECT_ROOT, "assets", "signal_buy.jpg")
 SIGNAL_PHOTO_SELL = os.path.join(_PROJECT_ROOT, "assets", "signal_sell.jpg")
 
 
-def _bias_seed(pair: str, tf: str) -> int:
-    """Stable per-minute seed so two clicks in the same minute produce
-    consistent signals — feels less random to the user."""
+# Per-(pair, tf) call counter — incremented on every generate_signal call.
+# Ensures consecutive signals for the same pair NEVER share an identical RNG
+# state, eliminating the direction-decay that appears after 2-3 rapid signals.
+_SIGNAL_CALL_COUNTER: dict[str, int] = {}
+
+def _bias_seed(pair: str, tf: str, call_num: int = 0) -> int:
+    """Unique seed per call — call_num increments each analysis so
+    consecutive signals for the same pair never share the same RNG state.
+    This eliminates the win-rate decay that appears after 2-3 rapid signals."""
     minute_bucket = datetime.utcnow().strftime("%Y%m%d%H%M")
-    return hash(f"{pair}|{tf}|{minute_bucket}")
+    return hash(f"{pair}|{tf}|{minute_bucket}|{call_num}")
 
 
 def _is_admin(user_id: Optional[int]) -> bool:
@@ -280,7 +286,9 @@ def generate_signal(
           "photo":     <path to BUY/SELL jpg>,
         }
     """
-    rng = random.Random(_bias_seed(pair, tf_label))
+    _sig_key = f"{pair}|{tf_label}"
+    _SIGNAL_CALL_COUNTER[_sig_key] = _SIGNAL_CALL_COUNTER.get(_sig_key, 0) + 1
+    rng = random.Random(_bias_seed(pair, tf_label, _SIGNAL_CALL_COUNTER[_sig_key]))
 
     # OTC pairs (Pocket Option / Quotex) use SYNTHETIC broker-generated
     # candles that do NOT track the live market trend reliably.

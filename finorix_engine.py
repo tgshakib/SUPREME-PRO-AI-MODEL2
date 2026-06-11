@@ -56,7 +56,7 @@ _TICKER_MAP: dict[str, str] = {
 
 # ── Cache to avoid hammering Yahoo ───────────────────────────────────────────
 _CANDLE_CACHE: dict[str, tuple[float, list[dict]]] = {}  # key → (ts, candles)
-_CACHE_TTL = 60.0   # seconds
+_CACHE_TTL = 25.0   # seconds — short TTL ensures rapid consecutive signals always get fresh data
 
 # ═════════════════════════════════════════════════════════════════════════════
 # MODULE A  —  SMART MONEY CONCEPTS  (EXPANDED)
@@ -834,12 +834,59 @@ def finorix_analyse(pair: str, market_type: str = "OTC") -> dict:
         result = _master.run(candles, market_type)
         ai     = result.get("ai", {})
         conf   = result["confidence"]
+        decision = result["decision"]
+
+        # ── QX Expert + FX Expert fusion votes ───────────────────────────────
+        # Each expert that agrees with finorix direction adds a confidence
+        # boost; disagreement pulls confidence down slightly (keeps the
+        # engine honest — not just self-confirming).
+        _extra_conf = 0.0
+        _fusion_agrees = 0
+
+        # QX Expert — non-repainting binary reversal engine
+        try:
+            from qx_expert import qx_analyze as _qx
+            is_otc = "OTC" in market_type.upper()
+            _qx_res = _qx(pair, is_otc=is_otc)
+            if _qx_res and _qx_res.get("direction") not in (None, "WAIT"):
+                if _qx_res["direction"] == decision:
+                    _extra_conf  += 4.0 + _qx_res.get("grade", 0) * 0.04
+                    _fusion_agrees += 1
+                else:
+                    _extra_conf -= 2.0
+        except Exception:
+            pass
+
+        # FX Expert Imtiaz 4.0 Pro — multi-confluence forex engine
+        try:
+            from fx_expert import fx_analyze as _fxe
+            _fx_res = _fxe(pair)
+            if _fx_res and _fx_res.get("direction") not in (None, "WAIT"):
+                if _fx_res["direction"] == decision:
+                    _agree_bonus = min(_fx_res.get("agree", 0) * 0.4, 3.5)
+                    _extra_conf  += 3.0 + _agree_bonus
+                    _fusion_agrees += 1
+                    if _fx_res.get("elite"):
+                        _extra_conf += 2.0
+                else:
+                    _extra_conf -= 1.5
+        except Exception:
+            pass
+
+        # Apply fusion boost — capped so we never inflate past 99
+        if _fusion_agrees == 2:
+            conf = min(99.0, conf + _extra_conf)
+        elif _fusion_agrees == 1:
+            conf = min(99.0, conf + _extra_conf * 0.6)
+        else:
+            conf = max(50.0, conf + _extra_conf)  # small penalty when both disagree
+
         g      = _grade(conf)
         ok     = result["profile"]["passed"] and not result.get("veto", False) and conf >= 65
 
         return {
             "ok":          ok,
-            "direction":   result["decision"],
+            "direction":   decision,
             "confidence":  conf,
             "grade":       g,
             "agree":       ai.get("model_agreement", 0),
@@ -847,11 +894,12 @@ def finorix_analyse(pair: str, market_type: str = "OTC") -> dict:
             "models_sell": ai.get("sell_models", 0),
             "veto":        result.get("veto", False),
             "raw_score":   result["score"],
+            "fusion_agrees": _fusion_agrees,
         }
     except Exception as e:
         _log.debug(f"[finorix] analyse error for {pair}: {e}")
         return {
             "ok": True, "direction": "WAIT", "confidence": 50.0,
             "grade": "WEAK", "agree": 0, "models_buy": 0, "models_sell": 0,
-            "veto": False, "raw_score": 0.0,
+            "veto": False, "raw_score": 0.0, "fusion_agrees": 0,
         }
