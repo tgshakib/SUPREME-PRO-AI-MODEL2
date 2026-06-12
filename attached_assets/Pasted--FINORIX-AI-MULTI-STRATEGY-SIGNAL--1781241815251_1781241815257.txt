@@ -1,0 +1,770 @@
+# ============================================================
+# FINORIX AI — MULTI-STRATEGY SIGNAL ENGINE
+# Drop-in addition. Zero changes to existing signal text/formatting.
+# Compatible with: Quotex OTC, Pocket Option OTC, Forex/Live
+# ============================================================
+
+import asyncio
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+
+# ──────────────────────────────────────────────
+#  ENUMS & CONFIG
+# ──────────────────────────────────────────────
+
+class StrategyID(Enum):
+    SNIPER         = "sniper"          # S1: Liquidity grab + double bottom
+    FRVP_GOLD      = "frvp_gold"       # S2: Fixed Range Volume Profile
+    TURNING_POINT  = "turning_point"   # S3: HTF zones + significant candle
+    PREMARKET_SR   = "premarket_sr"    # S4: Pre-market S/R + gap classification
+    BREAKOUT       = "breakout"        # S5: Real vs fake breakout filter
+    LIQ_SCALP      = "liq_scalp"       # S6: Daily high/low liquidity scalp
+
+class Signal(Enum):
+    BUY  = "BUY"
+    SELL = "SELL"
+    WAIT = "WAIT"
+
+class MarketTrend(Enum):
+    BULLISH  = "bullish"
+    BEARISH  = "bearish"
+    SIDEWAYS = "sideways"
+
+@dataclass
+class StrategyConfig:
+    # S1 Sniper
+    sniper_lookback:        int   = 30
+    sniper_shakeout_pct:    float = 0.003   # 0.3% drop = shakeout
+    sniper_db_tolerance:    float = 0.001   # double-bottom match within 0.1%
+
+    # S2 FRVP
+    frvp_session_bars:      int   = 390     # 5m bars in a prior trading day
+    frvp_value_area_pct:    float = 0.70    # 70% of volume = value area
+    frvp_sl_pips:           float = 8.0    # $7-$10 sl range in gold pips
+
+    # S3 Turning Point
+    tp_htf_bars:            int   = 100     # higher-TF lookback for zone detection
+    tp_zone_tolerance:      float = 0.002
+
+    # S4 Pre-market
+    premarket_heavy_gap:    float = 0.005   # 0.5% gap = heavy gap
+    premarket_normal_gap:   float = 0.002
+
+    # S5 Breakout
+    bo_momentum_bars:       int   = 5
+    bo_revisit_tolerance:   float = 0.0005  # tight revisit = fake
+
+    # S6 Liquidity Scalp
+    liq_confirmation_bars:  int   = 3       # bars to confirm after level touch
+
+
+# ──────────────────────────────────────────────
+#  SHARED UTILITIES
+# ──────────────────────────────────────────────
+
+def calc_ema(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False).mean()
+
+def calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    hl  = df['high'] - df['low']
+    hc  = (df['high'] - df['close'].shift()).abs()
+    lc  = (df['low']  - df['close'].shift()).abs()
+    tr  = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
+
+def detect_trend(df: pd.DataFrame, ema_fast: int = 20, ema_slow: int = 50) -> MarketTrend:
+    """EMA cross + higher-highs/lows structure."""
+    fast = calc_ema(df['close'], ema_fast)
+    slow = calc_ema(df['close'], ema_slow)
+    last = df.tail(10)
+    hh = last['high'].max() > df['high'].iloc[-20:-10].max()
+    hl = last['low'].min()  > df['low'].iloc[-20:-10].min()
+    lh = last['high'].max() < df['high'].iloc[-20:-10].max()
+    ll = last['low'].min()  < df['low'].iloc[-20:-10].min()
+    if fast.iloc[-1] > slow.iloc[-1] and hh and hl:
+        return MarketTrend.BULLISH
+    if fast.iloc[-1] < slow.iloc[-1] and lh and ll:
+        return MarketTrend.BEARISH
+    return MarketTrend.SIDEWAYS
+
+def find_support_resistance(df: pd.DataFrame, lookback: int = 50) -> tuple[float, float]:
+    """Pivot-based S/R."""
+    window = df.tail(lookback)
+    resistance = window['high'].nlargest(3).mean()
+    support    = window['low'].nsmallest(3).mean()
+    return support, resistance
+
+
+# ──────────────────────────────────────────────
+#  S1 — SNIPER STRATEGY
+# ──────────────────────────────────────────────
+
+@dataclass
+class SniperResult:
+    signal:     Signal
+    confidence: float   # 0-1
+    shakeout:   bool
+    liq_grab:   bool
+    double_bot: bool
+    support_zone: float
+
+class SniperStrategy:
+    """
+    S1 logic:
+    1. Confirm bullish trend
+    2. Detect shakeout below recent support
+    3. Price returns into support zone
+    4. Double-bottom or rejection candle confirmation
+    5. Enter LONG
+    """
+    def __init__(self, cfg: StrategyConfig):
+        self.cfg = cfg
+
+    def analyze(self, df: pd.DataFrame) -> SniperResult:
+        cfg  = self.cfg
+        c    = df['close']
+        h    = df['high']
+        l    = df['low']
+        n    = len(df)
+        if n < cfg.sniper_lookback + 5:
+            return SniperResult(Signal.WAIT, 0, False, False, False, 0)
+
+        trend = detect_trend(df)
+        if trend != MarketTrend.BULLISH:
+            return SniperResult(Signal.WAIT, 0, False, False, False, 0)
+
+        window         = df.iloc[-cfg.sniper_lookback:-1]
+        support_zone   = window['low'].nsmallest(5).mean()
+        recent_high    = window['high'].max()
+        shakeout_level = support_zone * (1 - cfg.sniper_shakeout_pct)
+
+        # Step 2: shakeout — recent candle broke below support
+        shakeout = l.iloc[-3] < shakeout_level or l.iloc[-4] < shakeout_level
+
+        # Step 3: price returned back above support
+        liq_grab = shakeout and c.iloc[-1] > support_zone
+
+        # Step 4: double bottom detection
+        recent_lows = l.iloc[-8:]
+        sorted_lows = recent_lows.nsmallest(2)
+        double_bot  = False
+        if len(sorted_lows) == 2:
+            diff = abs(sorted_lows.iloc[0] - sorted_lows.iloc[1]) / sorted_lows.iloc[0]
+            double_bot = diff < cfg.sniper_db_tolerance
+
+        # Rejection candle: large lower wick at support
+        last_c    = df.iloc[-1]
+        body      = abs(last_c['close'] - last_c['open'])
+        lower_wick = last_c['open'] - last_c['low'] if last_c['close'] > last_c['open'] else last_c['close'] - last_c['low']
+        rejection_candle = lower_wick > body * 1.5
+
+        confidence = sum([
+            0.25 if shakeout else 0,
+            0.25 if liq_grab  else 0,
+            0.30 if double_bot else (0.20 if rejection_candle else 0),
+            0.20,   # trend confirmed
+        ])
+
+        signal = Signal.BUY if (liq_grab and (double_bot or rejection_candle) and confidence >= 0.70) else Signal.WAIT
+
+        return SniperResult(signal, confidence, shakeout, liq_grab, double_bot, support_zone)
+
+
+# ──────────────────────────────────────────────
+#  S2 — FRVP (Fixed Range Volume Profile)
+# ──────────────────────────────────────────────
+
+@dataclass
+class FRVPResult:
+    signal:  Signal
+    vah:     float
+    val:     float
+    poc:     float
+    trap:    bool
+    confidence: float
+
+class FRVPStrategy:
+    """
+    S2 logic:
+    1. Build volume profile over previous session
+    2. Derive VAH / VAL / POC
+    3. After 4pm candle: wait for price to break outside range and TRAP
+    4. Short at VAH trap, Long at VAL trap
+    """
+    def __init__(self, cfg: StrategyConfig):
+        self.cfg = cfg
+
+    def build_profile(self, df: pd.DataFrame, session_bars: int) -> tuple[float, float, float]:
+        session = df.tail(session_bars)
+        price_min = session['low'].min()
+        price_max = session['high'].max()
+        buckets   = 100
+        bins      = np.linspace(price_min, price_max, buckets)
+
+        vol_dist = np.zeros(buckets - 1)
+        for _, row in session.iterrows():
+            lo, hi, vol = row['low'], row['high'], row.get('volume', 1)
+            for i, (b1, b2) in enumerate(zip(bins[:-1], bins[1:])):
+                overlap = max(0, min(hi, b2) - max(lo, b1))
+                if overlap > 0:
+                    vol_dist[i] += vol * (overlap / (hi - lo + 1e-9))
+
+        total_vol   = vol_dist.sum()
+        target_vol  = total_vol * self.cfg.frvp_value_area_pct
+        poc_idx     = vol_dist.argmax()
+        poc         = (bins[poc_idx] + bins[poc_idx + 1]) / 2
+
+        # Expand from POC outward to capture value area
+        lo_idx = hi_idx = poc_idx
+        accumulated = vol_dist[poc_idx]
+        while accumulated < target_vol:
+            lo_expand = vol_dist[lo_idx - 1] if lo_idx > 0              else 0
+            hi_expand = vol_dist[hi_idx + 1] if hi_idx < len(vol_dist)-1 else 0
+            if lo_expand >= hi_expand and lo_idx > 0:
+                lo_idx -= 1
+                accumulated += lo_expand
+            elif hi_idx < len(vol_dist) - 1:
+                hi_idx += 1
+                accumulated += hi_expand
+            else:
+                break
+
+        val = (bins[lo_idx] + bins[lo_idx + 1]) / 2
+        vah = (bins[hi_idx] + bins[hi_idx + 1]) / 2
+        return vah, val, poc
+
+    def analyze(self, df: pd.DataFrame) -> FRVPResult:
+        cfg = self.cfg
+        if len(df) < cfg.frvp_session_bars + 20:
+            return FRVPResult(Signal.WAIT, 0, 0, 0, False, 0)
+
+        vah, val, poc = self.build_profile(df, cfg.frvp_session_bars)
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        price = last['close']
+
+        # Trap logic: price broke outside then snapped back
+        broke_above = prev['high'] > vah and price < vah
+        broke_below = prev['low']  < val and price > val
+
+        # Ensure it's not a straight reversal — needs candle conviction
+        trap_candle_up   = broke_below and (last['close'] > last['open'])
+        trap_candle_down = broke_above and (last['close'] < last['open'])
+
+        trap = trap_candle_up or trap_candle_down
+
+        if trap_candle_up:
+            signal = Signal.BUY
+        elif trap_candle_down:
+            signal = Signal.SELL
+        else:
+            signal = Signal.WAIT
+
+        confidence = 0.80 if trap else 0.0
+
+        return FRVPResult(signal, vah, val, poc, trap, confidence)
+
+
+# ──────────────────────────────────────────────
+#  S3 — TURNING POINT (HTF Zones)
+# ──────────────────────────────────────────────
+
+@dataclass
+class TurningPointResult:
+    signal:     Signal
+    htf_zone:   float
+    at_zone:    bool
+    sig_candle: bool
+    confidence: float
+
+class TurningPointStrategy:
+    """
+    S3 logic:
+    1. Identify HTF significant lows/highs (weekly equiv. lookback)
+    2. Price reaches zone on LTF
+    3. Wait for "significant candle" (big player footprint)
+    4. Enter in direction of reversal
+    """
+    def __init__(self, cfg: StrategyConfig):
+        self.cfg = cfg
+
+    def _find_htf_zones(self, df: pd.DataFrame) -> list[float]:
+        htf = df.tail(self.cfg.tp_htf_bars)
+        pivots = []
+        for i in range(2, len(htf) - 2):
+            row = htf.iloc[i]
+            # Pivot high
+            if (htf.iloc[i]['high'] > htf.iloc[i-1]['high'] and
+                htf.iloc[i]['high'] > htf.iloc[i-2]['high'] and
+                htf.iloc[i]['high'] > htf.iloc[i+1]['high'] and
+                htf.iloc[i]['high'] > htf.iloc[i+2]['high']):
+                pivots.append(row['high'])
+            # Pivot low
+            if (htf.iloc[i]['low'] < htf.iloc[i-1]['low'] and
+                htf.iloc[i]['low'] < htf.iloc[i-2]['low'] and
+                htf.iloc[i]['low'] < htf.iloc[i+1]['low'] and
+                htf.iloc[i]['low'] < htf.iloc[i+2]['low']):
+                pivots.append(row['low'])
+        return pivots
+
+    def analyze(self, df: pd.DataFrame) -> TurningPointResult:
+        if len(df) < self.cfg.tp_htf_bars + 10:
+            return TurningPointResult(Signal.WAIT, 0, False, False, 0)
+
+        zones = self._find_htf_zones(df)
+        if not zones:
+            return TurningPointResult(Signal.WAIT, 0, False, False, 0)
+
+        price = df['close'].iloc[-1]
+        tol   = self.cfg.tp_zone_tolerance
+
+        nearest_zone = min(zones, key=lambda z: abs(z - price))
+        at_zone = abs(price - nearest_zone) / price < tol
+
+        if not at_zone:
+            return TurningPointResult(Signal.WAIT, nearest_zone, False, False, 0)
+
+        # Significant candle: large body relative to recent avg body
+        last      = df.iloc[-1]
+        body      = abs(last['close'] - last['open'])
+        avg_body  = abs(df['close'] - df['open']).rolling(20).mean().iloc[-1]
+        sig_candle = body > avg_body * 1.8
+
+        # Determine direction — is zone a support (buy) or resistance (sell)?
+        recent_price = df['close'].iloc[-10]
+        is_support    = nearest_zone < recent_price
+        is_resistance = nearest_zone > recent_price
+
+        if sig_candle and is_support:
+            signal = Signal.BUY
+        elif sig_candle and is_resistance:
+            signal = Signal.SELL
+        else:
+            signal = Signal.WAIT
+
+        confidence = 0.75 if sig_candle else 0.40
+
+        return TurningPointResult(signal, nearest_zone, at_zone, sig_candle, confidence)
+
+
+# ──────────────────────────────────────────────
+#  S4 — PRE-MARKET S/R + GAP CLASSIFICATION
+# ──────────────────────────────────────────────
+
+class GapType(Enum):
+    FLAT         = "flat"
+    NORMAL_UP    = "normal_gap_up"
+    NORMAL_DOWN  = "normal_gap_down"
+    HEAVY_UP     = "heavy_gap_up"
+    HEAVY_DOWN   = "heavy_gap_down"
+
+@dataclass
+class PreMarketResult:
+    signal:    Signal
+    gap_type:  GapType
+    support:   float
+    resistance:float
+    confidence:float
+
+class PreMarketStrategy:
+    """
+    S4 logic:
+    1. Classify opening gap
+    2. Mark S/R from prior 15m session
+    3. Gap Up near resistance → watch for rejection
+    4. Gap Down near support  → watch for bounce
+    5. Flat                   → range trade S/R
+    """
+    def __init__(self, cfg: StrategyConfig):
+        self.cfg = cfg
+
+    def classify_gap(self, prev_close: float, open_price: float) -> GapType:
+        gap_pct = (open_price - prev_close) / prev_close
+        cfg     = self.cfg
+        if abs(gap_pct) < cfg.premarket_normal_gap:
+            return GapType.FLAT
+        if cfg.premarket_normal_gap <= gap_pct < cfg.premarket_heavy_gap:
+            return GapType.NORMAL_UP
+        if -cfg.premarket_heavy_gap < gap_pct <= -cfg.premarket_normal_gap:
+            return GapType.NORMAL_DOWN
+        if gap_pct >= cfg.premarket_heavy_gap:
+            return GapType.HEAVY_UP
+        return GapType.HEAVY_DOWN
+
+    def analyze(self, df: pd.DataFrame) -> PreMarketResult:
+        if len(df) < 30:
+            return PreMarketResult(Signal.WAIT, GapType.FLAT, 0, 0, 0)
+
+        prev_close   = df['close'].iloc[-2]
+        open_price   = df['open'].iloc[-1]
+        current_price= df['close'].iloc[-1]
+
+        gap_type   = self.classify_gap(prev_close, open_price)
+        support, resistance = find_support_resistance(df, lookback=40)
+
+        tol = self.cfg.tp_zone_tolerance * 2
+        near_resistance = abs(current_price - resistance) / resistance < tol
+        near_support    = abs(current_price - support)    / support    < tol
+
+        bearish_candle = df['close'].iloc[-1] < df['open'].iloc[-1]
+        bullish_candle = df['close'].iloc[-1] > df['open'].iloc[-1]
+
+        signal = Signal.WAIT
+        confidence = 0.0
+
+        if gap_type in (GapType.NORMAL_UP, GapType.HEAVY_UP):
+            if near_resistance and bearish_candle:
+                signal, confidence = Signal.SELL, 0.70
+            elif near_support and bullish_candle:
+                signal, confidence = Signal.BUY, 0.60
+        elif gap_type in (GapType.NORMAL_DOWN, GapType.HEAVY_DOWN):
+            if near_support and bullish_candle:
+                signal, confidence = Signal.BUY, 0.70
+            elif near_resistance and bearish_candle:
+                signal, confidence = Signal.SELL, 0.60
+        elif gap_type == GapType.FLAT:
+            # Range trade
+            if near_resistance and bearish_candle:
+                signal, confidence = Signal.SELL, 0.55
+            elif near_support and bullish_candle:
+                signal, confidence = Signal.BUY, 0.55
+
+        return PreMarketResult(signal, gap_type, support, resistance, confidence)
+
+
+# ──────────────────────────────────────────────
+#  S5 — BREAKOUT FILTER (Real vs Fake)
+# ──────────────────────────────────────────────
+
+@dataclass
+class BreakoutResult:
+    signal:     Signal
+    real_break: bool
+    fake_break: bool
+    breakout_level: float
+    momentum_score: float
+    confidence: float
+
+class BreakoutStrategy:
+    """
+    S5 logic:
+    1. Only breakouts in trending market
+    2. Measure momentum approaching level
+    3. Easy entries = fake, aggressive push = real
+    4. Avoid sideways entirely
+    """
+    def __init__(self, cfg: StrategyConfig):
+        self.cfg = cfg
+
+    def measure_momentum(self, df: pd.DataFrame, bars: int) -> float:
+        """Momentum = sum of directional moves over last N bars."""
+        recent = df.tail(bars)
+        moves  = (recent['close'] - recent['open']).sum()
+        atr    = calc_atr(df, 14).iloc[-1]
+        return moves / (atr * bars + 1e-9)   # normalized
+
+    def analyze(self, df: pd.DataFrame) -> BreakoutResult:
+        if len(df) < 30:
+            return BreakoutResult(Signal.WAIT, False, False, 0, 0, 0)
+
+        trend = detect_trend(df)
+        if trend == MarketTrend.SIDEWAYS:
+            return BreakoutResult(Signal.WAIT, False, False, 0, 0, 0)
+
+        support, resistance = find_support_resistance(df)
+        last   = df.iloc[-1]
+        prev2  = df.iloc[-3:-1]
+        price  = last['close']
+
+        broke_up   = prev2['high'].max() < resistance < price
+        broke_down = prev2['low'].min()  > support    > price
+
+        if not (broke_up or broke_down):
+            return BreakoutResult(Signal.WAIT, False, False, 0, 0, 0)
+
+        level = resistance if broke_up else support
+
+        # Momentum pre-breakout
+        momentum = self.measure_momentum(df, self.cfg.bo_momentum_bars)
+
+        # Easy entry test: candle body < 30% of its range → likely fake
+        body_pct = abs(last['close'] - last['open']) / (last['high'] - last['low'] + 1e-9)
+        small_body = body_pct < 0.30
+
+        # Quick revisit = fake
+        atr        = calc_atr(df, 14).iloc[-1]
+        revisit    = abs(price - level) < atr * self.cfg.bo_revisit_tolerance * 100
+
+        real_break = abs(momentum) > 0.5 and not small_body and not revisit
+        fake_break = small_body or revisit
+
+        if broke_up and trend == MarketTrend.BULLISH and real_break:
+            signal, confidence = Signal.BUY, min(0.85, 0.60 + abs(momentum) * 0.15)
+        elif broke_down and trend == MarketTrend.BEARISH and real_break:
+            signal, confidence = Signal.SELL, min(0.85, 0.60 + abs(momentum) * 0.15)
+        else:
+            signal, confidence = Signal.WAIT, 0.0
+
+        return BreakoutResult(signal, real_break, fake_break, level, momentum, confidence)
+
+
+# ──────────────────────────────────────────────
+#  S6 — LIQUIDITY SCALP (Daily H/L Grab)
+# ──────────────────────────────────────────────
+
+@dataclass
+class LiqScalpResult:
+    signal:       Signal
+    prev_day_high: float
+    prev_day_low:  float
+    liq_touched:  bool
+    direction:    Optional[str]
+    confidence:   float
+
+class LiqScalpStrategy:
+    """
+    S6 logic:
+    1. Mark previous day's high and low
+    2. Wait for price to touch a liquidity line
+    3. 1m TF: confirmation candle in opposite direction
+    4. Enter with tight SL above/below the level
+    """
+    def __init__(self, cfg: StrategyConfig):
+        self.cfg = cfg
+
+    def analyze(self, df: pd.DataFrame, daily_bars: int = 288) -> LiqScalpResult:
+        # daily_bars = 288 for 5m candles in one day
+        if len(df) < daily_bars + 20:
+            return LiqScalpResult(Signal.WAIT, 0, 0, False, None, 0)
+
+        prev_day   = df.iloc[-(daily_bars + daily_bars): -daily_bars]
+        if len(prev_day) < 10:
+            return LiqScalpResult(Signal.WAIT, 0, 0, False, None, 0)
+
+        pd_high = prev_day['high'].max()
+        pd_low  = prev_day['low'].min()
+
+        last     = df.iloc[-1]
+        price    = last['close']
+        atr      = calc_atr(df, 14).iloc[-1]
+        zone     = atr * 0.1   # proximity zone
+
+        touched_high = abs(price - pd_high) < zone or last['high'] >= pd_high
+        touched_low  = abs(price - pd_low)  < zone or last['low']  <= pd_low
+
+        if not (touched_high or touched_low):
+            return LiqScalpResult(Signal.WAIT, pd_high, pd_low, False, None, 0)
+
+        # Confirmation candle window
+        confirm_window = df.tail(self.cfg.liq_confirmation_bars)
+
+        if touched_high:
+            # Need red (bearish) confirmation after touching high
+            bearish_confirm = (confirm_window['close'] < confirm_window['open']).sum() >= 2
+            if bearish_confirm:
+                return LiqScalpResult(Signal.SELL, pd_high, pd_low, True, "short", 0.78)
+        
+        if touched_low:
+            # Need green (bullish) confirmation after touching low
+            bullish_confirm = (confirm_window['close'] > confirm_window['open']).sum() >= 2
+            if bullish_confirm:
+                return LiqScalpResult(Signal.BUY, pd_high, pd_low, True, "long", 0.78)
+
+        return LiqScalpResult(Signal.WAIT, pd_high, pd_low, True, None, 0.30)
+
+
+# ──────────────────────────────────────────────
+#  MASTER VOTING ENGINE — combines all 6
+# ──────────────────────────────────────────────
+
+@dataclass
+class MasterSignal:
+    final_signal:  Signal
+    confidence:    float          # 0–1
+    grade:         str            # A+++, A++, A+, A, B, C
+    votes_buy:     int
+    votes_sell:    int
+    active_strats: list[str]
+    strategy_breakdown: dict
+    sl_distance:   float          # ATR-based suggested SL
+    tp_distance:   float          # SL * RR ratio
+
+    def as_dict(self) -> dict:
+        return {
+            "signal":     self.final_signal.value,
+            "grade":      self.grade,
+            "confidence": round(self.confidence * 100, 1),
+            "votes":      {"BUY": self.votes_buy, "SELL": self.votes_sell},
+            "strategies": self.active_strats,
+            "breakdown":  self.strategy_breakdown,
+            "sl_pips":    round(self.sl_distance, 5),
+            "tp_pips":    round(self.tp_distance, 5),
+        }
+
+def confidence_to_grade(conf: float, votes: int) -> str:
+    if conf >= 0.90 and votes >= 4: return "A+++"
+    if conf >= 0.82 and votes >= 3: return "A++"
+    if conf >= 0.74 and votes >= 3: return "A+"
+    if conf >= 0.65 and votes >= 2: return "A"
+    if conf >= 0.55 and votes >= 2: return "B"
+    return "C"
+
+
+class MasterSignalEngine:
+    def __init__(self, cfg: Optional[StrategyConfig] = None):
+        cfg = cfg or StrategyConfig()
+        self.sniper    = SniperStrategy(cfg)
+        self.frvp      = FRVPStrategy(cfg)
+        self.turning   = TurningPointStrategy(cfg)
+        self.premarket = PreMarketStrategy(cfg)
+        self.breakout  = BreakoutStrategy(cfg)
+        self.liq_scalp = LiqScalpStrategy(cfg)
+        self._cfg      = cfg
+
+    def analyze(self, df: pd.DataFrame, pair: str = "XAUUSD") -> MasterSignal:
+        """
+        Run all 6 strategies, collect votes, weight by confidence, return final.
+        df must have columns: open, high, low, close, volume (volume optional)
+        """
+        if 'volume' not in df.columns:
+            df = df.copy()
+            df['volume'] = 1.0
+
+        results = {}
+        votes_buy  = 0
+        votes_sell = 0
+        weighted_sum = 0.0
+        weight_total = 0.0
+        active = []
+
+        def _register(name: str, signal: Signal, conf: float):
+            nonlocal votes_buy, votes_sell, weighted_sum, weight_total
+            results[name] = {"signal": signal.value, "confidence": round(conf * 100, 1)}
+            if signal == Signal.BUY:
+                votes_buy  += 1
+                weighted_sum += conf
+                weight_total += 1
+                active.append(name)
+            elif signal == Signal.SELL:
+                votes_sell += 1
+                weighted_sum += conf
+                weight_total += 1
+                active.append(name)
+
+        # S1
+        s1 = self.sniper.analyze(df)
+        _register("S1_Sniper", s1.signal, s1.confidence)
+
+        # S2
+        s2 = self.frvp.analyze(df)
+        _register("S2_FRVP", s2.signal, s2.confidence)
+
+        # S3
+        s3 = self.turning.analyze(df)
+        _register("S3_TurningPoint", s3.signal, s3.confidence)
+
+        # S4
+        s4 = self.premarket.analyze(df)
+        _register("S4_PreMarket", s4.signal, s4.confidence)
+
+        # S5
+        s5 = self.breakout.analyze(df)
+        _register("S5_Breakout", s5.signal, s5.confidence)
+
+        # S6
+        s6 = self.liq_scalp.analyze(df)
+        _register("S6_LiqScalp", s6.signal, s6.confidence)
+
+        # Majority vote with confidence weighting
+        avg_conf = (weighted_sum / weight_total) if weight_total > 0 else 0.0
+
+        if votes_buy > votes_sell and votes_buy >= 2:
+            final = Signal.BUY
+        elif votes_sell > votes_buy and votes_sell >= 2:
+            final = Signal.SELL
+        else:
+            final = Signal.WAIT
+            avg_conf = 0.0
+
+        votes_max = max(votes_buy, votes_sell) if final != Signal.WAIT else 0
+        grade     = confidence_to_grade(avg_conf, votes_max) if final != Signal.WAIT else "C"
+
+        # ATR-based SL/TP
+        atr = calc_atr(df, 14).iloc[-1]
+        sl  = atr * 1.5
+        tp  = sl * 2.0   # default 1:2 RR; funded traders use 1:1.5
+
+        return MasterSignal(
+            final_signal        = final,
+            confidence          = avg_conf,
+            grade               = grade,
+            votes_buy           = votes_buy,
+            votes_sell          = votes_sell,
+            active_strats       = active,
+            strategy_breakdown  = results,
+            sl_distance         = sl,
+            tp_distance         = tp,
+        )
+
+
+# ──────────────────────────────────────────────
+#  BOT INTEGRATION ADAPTER
+#  Drop this into your existing signal flow.
+#  Call get_strategy_signal(df, pair) and
+#  attach the result metadata to your signal
+#  without touching signal text.
+# ──────────────────────────────────────────────
+
+_engine = MasterSignalEngine()
+
+def get_strategy_signal(df: pd.DataFrame, pair: str = "XAUUSD") -> dict:
+    """
+    Public entry point for your Telegram bot.
+    Returns a dict — attach to your signal object as metadata.
+    Does NOT modify any signal text.
+
+    Usage in your bot:
+        meta = get_strategy_signal(candle_df, selected_pair)
+        # meta["grade"]      → "A+++" to "C"
+        # meta["signal"]     → "BUY" / "SELL" / "WAIT"
+        # meta["confidence"] → 0-100
+        # meta["strategies"] → list of triggering strategies
+    """
+    result = _engine.analyze(df, pair)
+    return result.as_dict()
+
+
+# ──────────────────────────────────────────────
+#  QUICK TEST (remove before prod)
+# ──────────────────────────────────────────────
+
+if __name__ == "__main__":
+    np.random.seed(42)
+    n = 600
+    price = 2000 + np.cumsum(np.random.randn(n) * 2)
+    df_test = pd.DataFrame({
+        "open":   price - np.random.rand(n),
+        "high":   price + np.random.rand(n) * 3,
+        "low":    price - np.random.rand(n) * 3,
+        "close":  price,
+        "volume": np.random.rand(n) * 1000 + 500,
+    })
+
+    out = get_strategy_signal(df_test, "XAUUSD")
+    print("=" * 50)
+    print(f"Signal     : {out['signal']}")
+    print(f"Grade      : {out['grade']}")
+    print(f"Confidence : {out['confidence']}%")
+    print(f"Votes      : BUY={out['votes']['BUY']}  SELL={out['votes']['SELL']}")
+    print(f"Strategies : {', '.join(out['strategies'])}")
+    print(f"SL/TP pips : {out['sl_pips']} / {out['tp_pips']}")
+    print("\nBreakdown:")
+    for k, v in out['breakdown'].items():
+        print(f"  {k:<22} → {v['signal']:<5} ({v['confidence']}%)")

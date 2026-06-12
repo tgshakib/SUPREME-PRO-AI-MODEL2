@@ -172,6 +172,14 @@ except Exception as _felee:
     _FINORIX_ELITE_OK = False
 
 try:
+    from finorix_multi_strategy import finorix_multi_analyze as _finorix_multi_analyze
+    _FINORIX_MULTI_OK = True
+except Exception as _fmse:
+    print(f"[signals] finorix_multi_strategy import failed: {_fmse}")
+    _finorix_multi_analyze = None  # type: ignore
+    _FINORIX_MULTI_OK = False
+
+try:
     from binary_master_filter import binary_master_check as _master_check
     _MASTER_OK = True
 except Exception as _mfe:
@@ -820,6 +828,42 @@ def generate_signal(
                 # Veto: hard split consensus detected by elite engine
                 if _fe.get("veto") and not elite_confirmed:
                     confidence = max(88, (confidence or 97) - 4)
+            except Exception:
+                pass
+
+        # ── FINORIX AI MULTI-STRATEGY ENGINE — 6-strategy vote ────────────
+        # S1 Sniper (liq grab + double bottom) · S2 FRVP (VAH/VAL/POC trap)
+        # S3 Turning Point (HTF zone + conviction candle)
+        # S4 Pre-Market S/R (gap classification + level trade)
+        # S5 Breakout filter (real vs fake momentum gate)
+        # S6 Liquidity Scalp (daily H/L grab + confirmation)
+        # Majority vote (≥2 strategies agree) drives the extra vote(s).
+        # A+++ grade (≥4 strategies, conf ≥90%) → triple vote — very rare, near-certain.
+        # A++ / A+ → double vote. A / B → single vote.
+        # Contract: zero side-effects — never modifies signal text.
+        if _FINORIX_MULTI_OK and _finorix_multi_analyze is not None and direction is not None:
+            try:
+                _fm = _finorix_multi_analyze(pair, is_otc=is_otc)
+                if _fm is not None and _fm.get("direction") not in ("WAIT", None):
+                    _fm_dir  = _fm["direction"]
+                    _fm_grade = _fm.get("grade", "C")
+                    _fm_conf  = _fm.get("confidence", 0)
+                    _engine_votes.append(_fm_dir)
+                    # Grade-based extra votes
+                    if _fm_grade == "A+++":
+                        _engine_votes.append(_fm_dir)
+                        _engine_votes.append(_fm_dir)   # triple — 4 strategies unanimous
+                    elif _fm_grade in ("A++", "A+"):
+                        _engine_votes.append(_fm_dir)   # double — 3+ strategies agree
+                    # Direction + confidence boost when multi-strategy agrees
+                    if _fm_dir == direction and _fm_conf >= 74:
+                        confidence = min(100, (confidence or 97) + 2)
+                        if _fm_grade == "A+++":
+                            elite_confirmed = True
+                    # Mild dip if 3+ strategies point opposite to current direction
+                    elif _fm_dir != direction and _fm.get("votes_sell" if direction == "BUY" else "votes_buy", 0) >= 3:
+                        if not elite_confirmed:
+                            confidence = max(90, (confidence or 97) - 3)
             except Exception:
                 pass
 
