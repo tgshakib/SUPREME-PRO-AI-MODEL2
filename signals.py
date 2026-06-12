@@ -180,6 +180,14 @@ except Exception as _fmse:
     _FINORIX_MULTI_OK = False
 
 try:
+    from day_structure_engine import day_structure_vote as _day_structure_vote
+    _DAY_STRUCT_OK = True
+except Exception as _dse:
+    print(f"[signals] day_structure_engine import failed: {_dse}")
+    _day_structure_vote = None  # type: ignore
+    _DAY_STRUCT_OK = False
+
+try:
     from binary_master_filter import binary_master_check as _master_check
     _MASTER_OK = True
 except Exception as _mfe:
@@ -864,6 +872,39 @@ def generate_signal(
                     elif _fm_dir != direction and _fm.get("votes_sell" if direction == "BUY" else "votes_buy", 0) >= 3:
                         if not elite_confirmed:
                             confidence = max(90, (confidence or 97) - 3)
+            except Exception:
+                pass
+
+        # ── DAY-OF-WEEK MARKET STRUCTURE PLAYBOOK ─────────────────────────
+        # Monday:Range · Tuesday:Breakout · Wednesday:Continuation
+        # Thursday:Reversal (supply/demand + volume profile + absorption)
+        # Friday:Fakeout (delta/volume divergence, fade traps, +15% threshold)
+        # Self-backtest gate: passes only when pattern win-rate ≥50% in last
+        # 50-100 candles. WAIT / weekend → no vote emitted.
+        # Grade mapping same as finorix_multi (A+++ triple, A++/A+ double, etc.)
+        # Contract: zero side-effects — signal text never modified.
+        if _DAY_STRUCT_OK and _day_structure_vote is not None and direction is not None:
+            try:
+                _ds = _day_structure_vote(pair, is_otc=is_otc)
+                if _ds is not None and _ds.get("signal") not in ("WAIT", None):
+                    _ds_dir   = _ds["signal"]
+                    _ds_grade = _ds.get("grade", "C")
+                    _ds_conf  = _ds.get("confidence", 0)
+                    _engine_votes.append(_ds_dir)
+                    # Grade-based extra votes
+                    if _ds_grade == "A+++":
+                        _engine_votes.append(_ds_dir)
+                        _engine_votes.append(_ds_dir)
+                    elif _ds_grade in ("A++", "A+"):
+                        _engine_votes.append(_ds_dir)
+                    # Confidence adjustment
+                    if _ds_dir == direction and _ds_conf >= 74:
+                        confidence = min(100, (confidence or 97) + 2)
+                        if _ds_grade == "A+++":
+                            elite_confirmed = True
+                    elif _ds_dir != direction and _ds_conf >= 78:
+                        if not elite_confirmed:
+                            confidence = max(90, (confidence or 97) - 2)
             except Exception:
                 pass
 

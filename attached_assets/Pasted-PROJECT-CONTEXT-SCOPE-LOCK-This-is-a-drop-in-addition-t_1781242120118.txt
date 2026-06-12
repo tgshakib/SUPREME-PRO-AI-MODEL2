@@ -1,0 +1,65 @@
+PROJECT CONTEXT / SCOPE LOCK:
+This is a drop-in addition to my existing Telegram trading signal bot (FINORIX AI engine, Smart Money Concepts based). DO NOT edit, refactor, reformat, or rewrite any existing files, functions, signal message templates, Telegram send logic, websocket feed, candle aggregation, or the existing confidence grading system. Create ONLY new file(s). If integration requires touching an existing file, make the SMALLEST possible addition (one new import + one new optional function call with a safe default) and show me that diff separately before applying it.
+
+OBJECTIVE:
+Create a new module `day_structure_engine.py` implementing a "Day-of-Week Market Structure Playbook" for Gold (XAUUSD) as the primary instrument, reusable across Silver (XAGUSD) and every other pair already active in the bot's pair list.
+
+HARD CONSTRAINT — NO GENERIC INDICATORS:
+Do not import or use RSI, MACD, Stochastic, Bollinger Bands, ADX, or any TA-Lib/pandas-ta wrapper. Every signal must come from raw OHLCV price-action / market-structure math computed directly in Python: swing high/low detection, support & resistance, break of structure (BOS), change of character (CHoCH), supply & demand zone detection, volume profile (POC / value area high / value area low), and footprint-style cumulative volume delta. Build these as reusable helper functions at the top of the file — your own "smart money" toolkit built from scratch.
+
+WEEKDAY PLAYBOOK (select block via datetime.now().weekday(), Mon=0):
+
+[MONDAY = 0 — RANGE DAY]
+1. Build the day's range from the first 4-6 hours of candles (Asian + early session): range_high, range_low.
+2. Treat range_high/range_low as live S/R.
+3. Only fire when price taps range_high or range_low AND prints a rejection candle (wick >= 1.5x body, opposite-direction close).
+4. SELL on range_high rejection, BUY on range_low rejection.
+5. If a candle closes outside the range with body > 1.5x the 20-bar average body (expansion), suppress range signals and flag a possible early breakout for Tuesday's logic.
+
+[TUESDAY = 1 — BREAKOUT DAY]
+1. Pull Monday's stored range_high/range_low as the breakout reference.
+2. Detect breakout candle: close beyond range_high/range_low with body size AND volume both above their 20-bar averages.
+3. Confirm with either a successful retest (price returns to the broken level and holds) OR an immediate continuation candle in the same direction.
+4. Fake-breakout filter: if price closes back inside the range within 1-2 candles of the "breakout," discard — no signal.
+5. Confirmed signal = breakout direction (BUY on upside break, SELL on downside break).
+
+[WEDNESDAY = 2 — TREND CONTINUATION DAY]
+1. Determine prevailing trend from the last 20-30 candles using swing structure: HH+HL = uptrend, LH+LL = downtrend.
+2. Wait for a pullback into a prior structure level / order block in the trend direction.
+3. Require BOS confirmation: price must break the most recent swing high (uptrend) or swing low (downtrend) after the pullback.
+4. Signal = continuation in trend direction once BOS confirms. No counter-trend signals on Wednesday.
+
+[THURSDAY = 3 — REVERSAL DAY]
+1. Scan recent higher-timeframe data (last 100+ candles, or 4H/D1 if available) for supply/demand zones — small consolidations immediately followed by a strong directional move.
+2. Compute a session volume profile: POC, VAH, VAL.
+3. When price enters a zone aligned with VAH or VAL, check for an absorption candle: high relative volume/delta but small net price progress (stall/rejection).
+4. Signal = reversal AGAINST the current short-term direction, in the direction implied by the zone (demand zone + absorption = BUY, supply zone + absorption = SELL).
+
+[FRIDAY = 4 — FAKEOUT DAY]
+1. For any recent break of a swing high/low/liquidity pool, compute the volume/delta that accompanied the move vs. the price distance covered.
+2. REAL MOVE = break + volume/delta expansion in the same direction + 1-2 candle follow-through. Signal WITH the break direction.
+3. FAKEOUT = sharp wick through the level + weak/divergent volume/delta + immediate reversal candle. Signal AGAINST the spike direction (fade the trap).
+4. Require higher confidence (raise internal threshold ~15% vs other days) — Friday should output fewer, cleaner signals.
+
+MULTI-PAIR SCAN + SELF-BACKTEST GATE:
+1. Implement `analyze_day_structure(df: pd.DataFrame, pair: str, weekday: int) -> dict` — runs the matching weekday block for ONE pair's dataframe.
+2. Implement `scan_all_pairs(pair_data: dict[str, pd.DataFrame], weekday: int) -> dict[str, dict]` — loops over XAUUSD, XAGUSD, and every other pair already configured in the bot, calling `analyze_day_structure` for each.
+3. Before allowing a signal through for any pair, run a quick self-check over the last 50-100 candles of that pair: did this weekday's pattern type (range/breakout/continuation/reversal/fakeout) occur recently, and did price move favorably afterward by at least 1x the computed SL distance? Require >=50% recent win-rate as the gate.
+4. If a pair fails the gate or the day's pattern doesn't trigger at all, that pair returns signal: "WAIT" and is skipped — no message generated for it this cycle.
+
+RETURN SHAPE (internal use only — not sent to Telegram directly):
+{
+  "pair": "XAUUSD",
+  "weekday": "thursday",
+  "playbook": "reversal",
+  "signal": "BUY" | "SELL" | "WAIT",
+  "confidence": 0-100,
+  "reasoning": ["demand zone reached", "absorption candle", "VAL aligned"],
+  "sl_price": float,
+  "tp_price": float
+}
+
+INTEGRATION:
+- Feed this dict into the existing A+++ -> C confidence grading as ONE additional weighted vote — do not change how the final grade or signal message text is built, just add this as another input the grading function can consider.
+- Any change to an existing file must be additive only (new optional parameter with a safe default, new import). Show me that diff separately, don't auto-merge.
+- Output a single new file: day_structure_engine.py, fully self-contained, importing only pandas/numpy (already in the project).
