@@ -475,6 +475,10 @@ def po_otc_analyze(pair: str) -> Optional[dict]:
     try:
         import pandas as pd
 
+        # ── DATA SOURCE PRIORITY ──────────────────────────────────────────
+        # 1. Real PO WebSocket candles (pocket_option_ws — actual broker feed)
+        # 2. Live broker WS candles (otc_realtime_bridge — PO+QX combined)
+        # 3. yfinance fallback
         po_candles = _get_candles_po(pair, 60)
         if len(po_candles) >= 30:
             df = pd.DataFrame(po_candles).sort_values("time").tail(200)
@@ -489,24 +493,44 @@ def po_otc_analyze(pair: str) -> Optional[dict]:
                 print(f"[po_otc] ✅ REAL PO DATA: {pair} → {result['direction']} "
                       f"score={result['score']} signals={result['signals']}")
         else:
-            df_yf = _get_candles_yf(pair, "1m", "2d")
-            if df_yf is not None and len(df_yf) >= 30:
-                op  = _df_col(df_yf, "open").squeeze().astype(float)
-                hi  = _df_col(df_yf, "high").squeeze().astype(float)
-                lo  = _df_col(df_yf, "low").squeeze().astype(float)
-                cl  = _df_col(df_yf, "close").squeeze().astype(float)
-                vol_raw = None
-                try:
-                    vol_raw = _df_col(df_yf, "volume").squeeze().astype(float)
-                except Exception:
-                    import pandas as pd
-                    vol_raw = pd.Series([0.0] * len(cl), index=cl.index)
-                result = _analyze_arrays(op, hi, lo, cl, vol_raw)
-                using_po_data = False
+            # Priority 2 — live broker WS feed (otc_realtime_bridge)
+            rt_df = None
+            try:
+                from otc_realtime_bridge import get_otc_df as _rt_get
+                rt_df = _rt_get(pair, "1m", count=200)
+            except Exception:
+                rt_df = None
+
+            if rt_df is not None and len(rt_df) >= 30:
+                op  = rt_df["open"].astype(float)
+                hi  = rt_df["high"].astype(float)
+                lo  = rt_df["low"].astype(float)
+                cl  = rt_df["close"].astype(float)
+                vol = rt_df["volume"].astype(float) if "volume" in rt_df.columns else pd.Series([0.0] * len(cl))
+                result = _analyze_arrays(op, hi, lo, cl, vol)
+                using_po_data = True  # real broker candles — no mirror needed
                 if result:
-                    print(f"[po_otc] 📊 yfinance: {pair} → {result['direction']} "
-                          f"score={result['score']} signals={result['signals']} "
-                          f"(mirror will apply)")
+                    print(f"[po_otc] ✅ REALTIME BRIDGE: {pair} → {result['direction']} "
+                          f"score={result['score']} signals={result['signals']}")
+            else:
+                # Priority 3 — yfinance fallback
+                df_yf = _get_candles_yf(pair, "1m", "2d")
+                if df_yf is not None and len(df_yf) >= 30:
+                    op  = _df_col(df_yf, "open").squeeze().astype(float)
+                    hi  = _df_col(df_yf, "high").squeeze().astype(float)
+                    lo  = _df_col(df_yf, "low").squeeze().astype(float)
+                    cl  = _df_col(df_yf, "close").squeeze().astype(float)
+                    vol_raw = None
+                    try:
+                        vol_raw = _df_col(df_yf, "volume").squeeze().astype(float)
+                    except Exception:
+                        vol_raw = pd.Series([0.0] * len(cl), index=cl.index)
+                    result = _analyze_arrays(op, hi, lo, cl, vol_raw)
+                    using_po_data = False
+                    if result:
+                        print(f"[po_otc] 📊 yfinance: {pair} → {result['direction']} "
+                              f"score={result['score']} signals={result['signals']} "
+                              f"(mirror will apply)")
     except Exception as exc:
         logger.warning(f"[po_otc] Analysis error for {pair}: {exc}")
         result = None

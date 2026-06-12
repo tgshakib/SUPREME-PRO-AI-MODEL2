@@ -156,6 +156,21 @@ def _flatten(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Data fetch ────────────────────────────────────────────────────────────────
 
+def _fetch_rt(pair: str) -> Optional[pd.DataFrame]:
+    """Fetch 1m candles from the live broker WS feed (highest priority)."""
+    try:
+        from otc_realtime_bridge import get_otc_df as _rt_get
+        df = _rt_get(pair, "1m", count=QX_CANDLES)
+        if df is not None and len(df) >= 40:
+            for col in ("open", "high", "low", "close"):
+                if col not in df.columns:
+                    return None
+            return df.copy()
+    except Exception:
+        pass
+    return None
+
+
 def _fetch(ticker: str) -> Optional[pd.DataFrame]:
     if not _OK or yf is None:
         return None
@@ -473,16 +488,24 @@ def qx_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
     if cached and (now - cached[0]) < _TTL:
         return cached[1]
 
-    # ── OTC Feed (Twelve Data + drift model) — primary source for OTC pairs ──
-    # Gives real OHLCV bars adjusted to match Quotex synthetic pricing.
-    # Falls back to yfinance silently when key not set or API fails.
+    # ── DATA SOURCE PRIORITY ──────────────────────────────────────────────────
+    # 1. Live broker WS candles (otc_realtime_bridge → otc_feed_combined)
+    # 2. Twelve Data drift model (otc_feed) — secondary OTC source
+    # 3. yfinance — fallback when broker feed is dark / pair unsupported
     df = None
-    if is_otc or "〔OTC〕" in pair or "(OTC)" in pair.upper():
-        try:
-            from otc_feed import get_otc_df as _otc_df
-            df = _otc_df(pair, "1m", count=QX_CANDLES + 20)
-        except Exception:
-            df = None
+    _is_otc_qx = is_otc or "〔OTC〕" in pair or "(OTC)" in pair.upper()
+
+    if _is_otc_qx:
+        # Priority 1 — real-time broker WS candles
+        df = _fetch_rt(pair)
+
+        # Priority 2 — Twelve Data drift model
+        if df is None:
+            try:
+                from otc_feed import get_otc_df as _otc_df
+                df = _otc_df(pair, "1m", count=QX_CANDLES + 20)
+            except Exception:
+                df = None
 
     if df is None:
         if not ticker:

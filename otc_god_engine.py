@@ -248,34 +248,48 @@ def otc_god_analyze(pair: str) -> Optional[dict]:
     if cached and (now - cached[0]) < _TTL:
         return cached[1]
 
-    # ── OTC Feed (Twelve Data + drift model) — primary source for OTC pairs ──
-    # Real OHLCV candles adjusted to match Quotex synthetic pricing.
-    # Falls back to yfinance silently when key not set or pair unsupported.
-    _otc_df_fn = None
-    if "〔OTC〕" in pair or "(OTC)" in pair.upper():
-        try:
-            from otc_feed import get_otc_df as _otc_df_fn
-        except Exception:
-            _otc_df_fn = None
+    # ── DATA SOURCE PRIORITY ──────────────────────────────────────────────────
+    # 1. Live broker WebSocket candles (otc_feed_combined — PO + QX feeds)
+    #    These are REAL broker-generated tick streams — most accurate for OTC.
+    # 2. Twelve Data + drift model (otc_feed) — secondary OTC source
+    # 3. yfinance — fallback when broker feed is dark or pair unsupported
 
     df1 = df5 = df15 = df30 = None
 
-    if _otc_df_fn is not None:
+    # Priority 1 — Real-time broker WS candles (highest accuracy)
+    _is_otc_pair = "〔OTC〕" in pair or "(OTC)" in pair.upper()
+    if _is_otc_pair:
         try:
-            df1  = _otc_df_fn(pair, "1m",  count=300)
-            df5  = _otc_df_fn(pair, "5m",  count=300)
-            df15 = _otc_df_fn(pair, "15m", count=150)
-            df30 = _otc_df_fn(pair, "30m", count=100)
+            from otc_realtime_bridge import get_otc_df as _rt_get
+            df1  = _rt_get(pair, "1m",  count=300)
+            df5  = _rt_get(pair, "5m",  count=300)
+            df15 = _rt_get(pair, "15m", count=150)
+            df30 = _rt_get(pair, "30m", count=100)
+            if df5 is not None and len(df5) >= 30:
+                pass  # real-time data acquired — skip lower-priority sources
+            else:
+                df1 = df5 = df15 = df30 = None  # not enough — fall through
         except Exception:
             pass
 
-    # Fall back to yfinance for any timeframes the OTC feed couldn't fill
+    # Priority 2 — Twelve Data drift model (otc_feed)
+    if _is_otc_pair and df5 is None:
+        try:
+            from otc_feed import get_otc_df as _otc_df_fn
+            if df1  is None: df1  = _otc_df_fn(pair, "1m",  count=300)
+            if df5  is None: df5  = _otc_df_fn(pair, "5m",  count=300)
+            if df15 is None: df15 = _otc_df_fn(pair, "15m", count=150)
+            if df30 is None: df30 = _otc_df_fn(pair, "30m", count=100)
+        except Exception:
+            pass
+
+    # Priority 3 — yfinance (fallback for any timeframes still missing)
     if ticker:
         if df1  is None: df1  = _fetch_tf(ticker, "1m",  "2d")
         if df5  is None: df5  = _fetch_tf(ticker, "5m",  "3d")
         if df15 is None: df15 = _fetch_tf(ticker, "15m", "7d")
         if df30 is None: df30 = _fetch_tf(ticker, "30m", "14d")
-    elif _otc_df_fn is None:
+    elif not _is_otc_pair:
         return None   # no data source at all
 
     if df5 is None or "close" not in df5.columns or len(df5) < 30:

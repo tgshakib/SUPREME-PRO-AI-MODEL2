@@ -132,26 +132,71 @@ def _inside_bar(prev_h, prev_l, curr_h, curr_l) -> bool:
 
 def candle_master_analyze(pair: str, is_otc: bool = False) -> Optional[dict]:
     """Return {direction, grade, votes_bull, votes_bear, elite, reasons} or None."""
-    if not _OK or yf is None:
-        return None
-
-    ticker = yf_ticker(pair)
-    if not ticker:
-        return None
-
-    cache_key = f"{ticker}|{is_otc}"
+    ticker    = yf_ticker(pair)
+    cache_key = ticker or pair
+    cache_key = f"{cache_key}|{is_otc}"
     now = time.time()
     if cache_key in _CACHE:
         ts, res = _CACHE[cache_key]
         if now - ts < _TTL:
             return res
 
-    try:
-        df = yf.download(ticker, period=_PERIOD, interval=_INTERVAL,
-                         progress=False, auto_adjust=True)
-        if df is None or df.empty or len(df) < 20:
+    df = None
+    _is_otc_cm = is_otc or "〔OTC〕" in pair or "(OTC)" in pair.upper()
+
+    # Priority 1 — live broker WS candles (most accurate for OTC)
+    if _is_otc_cm:
+        try:
+            from otc_realtime_bridge import get_otc_df as _rt_get
+            df = _rt_get(pair, "1m", count=_CANDLES + 20)
+        except Exception:
+            df = None
+
+        # Priority 2 — Twelve Data drift model
+        if df is None:
+            try:
+                from otc_feed import get_otc_df as _otc_df
+                df = _otc_df(pair, "1m", count=_CANDLES + 20)
+            except Exception:
+                df = None
+
+    # Priority 3 — yfinance
+    if df is None:
+        if not _OK or yf is None or not ticker:
+            _CACHE[cache_key] = (now, None)
+            return None
+        try:
+            df = yf.download(ticker, period=_PERIOD, interval=_INTERVAL,
+                             progress=False, auto_adjust=True)
+            if df is None or df.empty or len(df) < 20:
+                _CACHE[cache_key] = (now, None)
+                return None
+            # Flatten multi-index if present
+            if hasattr(df.columns, "get_level_values"):
+                df.columns = [
+                    str(c[0]).lower() if isinstance(c, tuple) else str(c).lower()
+                    for c in df.columns
+                ]
+            else:
+                df.columns = [str(c).lower() for c in df.columns]
+        except Exception:
+            _CACHE[cache_key] = (now, None)
             return None
 
+    if df is None or len(df) < 20:
+        _CACHE[cache_key] = (now, None)
+        return None
+
+    # Ensure lowercase columns
+    if hasattr(df.columns, "get_level_values"):
+        df.columns = [
+            str(c[0]).lower() if isinstance(c, tuple) else str(c).lower()
+            for c in df.columns
+        ]
+    else:
+        df.columns = [str(c).lower() for c in df.columns]
+
+    try:
         def _col(name: str) -> pd.Series:
             lo, cap = name.lower(), name.capitalize()
             cols = df.columns
