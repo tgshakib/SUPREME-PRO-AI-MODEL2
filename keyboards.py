@@ -32,10 +32,6 @@ def main_menu_kb(is_admin: bool = False,
             text="🟢 YOUR ACTIVE Fx -Signal",
             callback_data="fx:active_view",
         )])
-        rows.append([InlineKeyboardButton(
-            text="⚡ INSTANCE SIGNAL",
-            callback_data="isig:start",
-        )])
     rows += [
         [InlineKeyboardButton(text="📊 BINARY TRADING",  callback_data="m:binary"),
          InlineKeyboardButton(text="💹 FOREX TRADING",   callback_data="m:forex")],
@@ -515,9 +511,6 @@ def fx_active_view_kb(signals: list | None = None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(
         text="🎯 NEW SIGNAL — 100% AI SNIPER", callback_data="fx:new",
     )])
-    rows.append([InlineKeyboardButton(
-        text="⚡ INSTANCE SIGNAL", callback_data="fx:instant",
-    )])
     rows.append([
         InlineKeyboardButton(text="🛑 STOP", callback_data="fx:stop"),
     ])
@@ -526,21 +519,6 @@ def fx_active_view_kb(signals: list | None = None) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="❌ CLOSE", callback_data="fx:close_view"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def instance_signal_result_kb(signal_id: int) -> InlineKeyboardMarkup:
-    """Keyboard shown under an Instance Signal card.
-    I'M IN + STOP | BACK — same structure as normal forex signal."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="🟢 I'M IN",
-            callback_data=f"fxin:{signal_id}",
-        )],
-        [
-            InlineKeyboardButton(text="🛑 STOP",   callback_data="fx:stop"),
-            InlineKeyboardButton(text="⬅️ BACK",   callback_data="fx:active_view"),
-        ],
-    ])
 
 
 # ── Timezone picker ──────────────────────────────────────
@@ -940,68 +918,3 @@ def at_drawdown_confirm_kb() -> InlineKeyboardMarkup:
     ])
 
 
-# ── Instance Signal guided flow keyboards ─────────────────────────────────────
-
-# Curated pair list for Instance Signal — majors + top crosses + metals + crypto
-_ISIG_PAIRS = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD",
-    "EUR/JPY", "GBP/JPY", "EUR/GBP", "EUR/AUD", "GBP/AUD", "AUD/JPY",
-    "XAU/USD", "XAG/USD",
-    "NAS100", "DJ30",
-    "BTC/USD", "ETH/USD",
-]
-
-def instance_isig_pair_kb() -> InlineKeyboardMarkup:
-    """Pair selection grid for the guided Instance Signal flow."""
-    rows = []
-    row = []
-    for pair in _ISIG_PAIRS:
-        safe = pair.replace("/", "_")
-        row.append(InlineKeyboardButton(text=pair, callback_data=f"isig:pair:{safe}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton(text="⬅️ BACK", callback_data="m:home")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def instance_isig_tf_kb(selected_pair: str) -> InlineKeyboardMarkup:
-    """Timeframe selector for the guided Instance Signal flow."""
-    from config import FOREX_TIMEFRAMES
-    safe_pair = selected_pair.replace("/", "_")
-    rows = []
-    row = []
-    for label, code in FOREX_TIMEFRAMES:
-        row.append(InlineKeyboardButton(
-            text=label, callback_data=f"isig:tf:{safe_pair}:{code}",
-        ))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton(text="⬅️ BACK", callback_data="isig:start")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def instance_isig_tp_kb(selected_pair: str, selected_tf: str) -> InlineKeyboardMarkup:
-    """TP level selector for the guided Instance Signal flow."""
-    from config import TP_LEVELS
-    safe_pair = selected_pair.replace("/", "_")
-    rows = []
-    row = []
-    for label, pips in TP_LEVELS:
-        row.append(InlineKeyboardButton(
-            text=label, callback_data=f"isig:tp:{safe_pair}:{selected_tf}:{pips}",
-        ))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton(
-        text="⬅️ BACK", callback_data=f"isig:tf_back:{safe_pair}",
-    )])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
