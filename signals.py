@@ -188,6 +188,14 @@ except Exception as _dse:
     _DAY_STRUCT_OK = False
 
 try:
+    from finorix_analysis_engine import finorix_analyse as _finorix_analyse
+    _FINORIX_AE_OK = True
+except Exception as _fae:
+    print(f"[signals] finorix_analysis_engine import failed: {_fae}")
+    _finorix_analyse = None  # type: ignore
+    _FINORIX_AE_OK = False
+
+try:
     from binary_master_filter import binary_master_check as _master_check
     _MASTER_OK = True
 except Exception as _mfe:
@@ -904,6 +912,57 @@ def generate_signal(
                             elite_confirmed = True
                     elif _ds_dir != direction and _ds_conf >= 78:
                         if not elite_confirmed:
+                            confidence = max(90, (confidence or 97) - 2)
+            except Exception:
+                pass
+
+        # ── FINORIX ANALYSIS ENGINE — 5-system silent validator ───────────
+        # System 1: MTF Trend Strength (EMA 9/21/50 + HH/HL + S/R slope)
+        # System 2: S/R Zone Calculator (fractal zones, ATR-scaled, touch-weighted)
+        # System 3: Liquidity & Market Structure (FVGs, swing pools, reversal prob)
+        # System 4: Non-Martingale Validator (zone touch, TF align, R:R ≥ 1:2)
+        # System 5: MTF Forex Extension (1h/4h/1d/1w macro confluence)
+        # signal_valid=False → validator blocked → confidence capped, no extra vote.
+        # signal_valid=True  → grade-weighted vote + signed confidence_boost applied.
+        # Contract: zero side-effects — signal text never modified.
+        if _FINORIX_AE_OK and _finorix_analyse is not None and direction is not None:
+            try:
+                _tf_hint = tf_label.split()[0].lower() + "m" if tf_label and tf_label[0].isdigit() else "5m"
+                _ae = _finorix_analyse(pair, is_otc=is_otc, tf_label=_tf_hint)
+                if _ae is not None:
+                    _ae_dir   = _ae.get("direction", "WAIT")
+                    _ae_grade = _ae.get("grade", "C")
+                    _ae_boost = _ae.get("confidence_boost", 0)
+                    _ae_valid = _ae.get("signal_valid", False)
+                    _ae_conf  = _ae.get("confidence", 0)
+                    _ae_align = _ae.get("tf_alignment_score", 0)
+                    _ae_str   = _ae.get("trend_strength", 0)
+                    _ae_macro = _ae.get("macro_confluence", False)
+
+                    if _ae_dir not in ("WAIT", "NEUTRAL", None) and _ae_valid:
+                        # Cast vote — weight by grade
+                        _engine_votes.append(_ae_dir)
+                        if _ae_grade == "A+++":
+                            _engine_votes.append(_ae_dir)
+                            _engine_votes.append(_ae_dir)   # triple vote: all 5 systems agree
+                        elif _ae_grade in ("A++", "A+"):
+                            _engine_votes.append(_ae_dir)   # double vote
+
+                        # Apply signed confidence boost from the validator
+                        if _ae_dir == direction:
+                            _boost_apply = min(6, _ae_boost)
+                            confidence = min(100, (confidence or 97) + _boost_apply)
+                            # Macro confluence on forex pairs — extra elite flag
+                            if _ae_macro and _ae_align >= 75:
+                                elite_confirmed = True
+                        elif _ae_dir != direction and _ae_str >= 70 and _ae_align >= 75:
+                            # Strong opposing trend — mild dip
+                            if not elite_confirmed:
+                                confidence = max(90, (confidence or 97) - 3)
+
+                    elif not _ae_valid and _ae.get("rejection_reason"):
+                        # Validator blocked — soft confidence dip (capped, not zeroed)
+                        if not elite_confirmed and _ae_grade == "C":
                             confidence = max(90, (confidence or 97) - 2)
             except Exception:
                 pass

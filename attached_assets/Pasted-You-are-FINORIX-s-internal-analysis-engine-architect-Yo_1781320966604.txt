@@ -1,0 +1,73 @@
+You are FINORIX's internal analysis engine architect. Your job is to write Python code that integrates seamlessly into an existing Telegram trading bot on Replit. This code works SILENTLY—no messages, no images, no signal text modifications. It only feeds analysis data to the bot's decision layer.
+
+CONSTRAINTS:
+- NEVER modify signal text output under any circumstances
+- NEVER send images or additional messages to users
+- NEVER add lagging indicators
+- NEVER touch existing bot structure
+- Work completely silent, internal-only
+
+ANALYSIS SYSTEM REQUIREMENTS:
+
+1. MULTI-TIMEFRAME TREND STRENGTH DETECTOR
+   - Scan 1m, 5m, 15m, 1h, 1d, 1w (auto-select based on pair type)
+   - Identify primary trend direction using:
+     * EMA 9/21/50 alignment (no visualization, just direction)
+     * Candle structure (Higher Highs/Lows for uptrend, vice versa)
+     * Support/Resistance slope angle (steeper = stronger)
+   - Output: trend_direction, trend_strength (0-100%), tf_alignment_score
+
+2. INTELLIGENT SUPPORT/RESISTANCE ZONE CALCULATOR
+   - Extract pivot highs/lows from last 20-50 candles (dynamic window)
+   - Calculate fractal zones (not just single lines—zones with width)
+   - Weight zones by:
+     * Number of touches (confluence = stronger zone)
+     * Candle rejection patterns at zone
+     * Volume profile if available
+   - Auto-adjust for pair volatility (ATR-based zone width scaling)
+   - Output: [zone_high, zone_low, strength_rating, reject_count]
+
+3. LIQUIDITY & MARKET STRUCTURE ANALYZER
+   - Detect Fair Value Gaps (FVGs) and liquidity voids
+   - Identify recent swing highs/lows that could be wick-hunted
+   - Calculate distance from current price to nearest untested level
+   - Flag reversal zones (previous support becoming resistance, etc.)
+   - Output: liquidity_flow_direction, next_untested_level, reversal_prob
+
+4. NON-MARTINGALE SIGNAL VALIDATION ENGINE
+   - Before bot sends ANY signal, this engine validates:
+     * Trend alignment across minimum 2 timeframes
+     * Zone confluence (signal origin must touch identified support/resistance)
+     * Trend strength > 60% (configurable threshold)
+     * Candle structure confirmation (no fading candles at entry)
+     * Risk-to-reward setup (1:2 minimum from zone to next untested level)
+   - Output: signal_valid (True/False), confidence_boost, rejection_reason
+
+5. MULTI-TIMEFRAME FOREX EXTENSION
+   - For Forex pairs: analyze 1h, 4h, 1d, 1w simultaneously
+   - Detect confluence across timeframes (1h trend aligns with 1d structure)
+   - Calculate macro support/resistance from weekly/daily
+   - Only allow signals when lower tf (1h) aligns with higher tf (1d+) trend
+   - Output: forex_tf_score, macro_zone_confluence
+
+INTEGRATION POINTS:
+- Feed all analysis outputs to bot's signal decision function (not user-facing)
+- Hook into signal generation BEFORE signal is formatted for user
+- Use analysis data to weight signal confidence silently
+- Auto-select best TF based on pair volatility and current market structure
+
+CODE STYLE:
+- Async-compatible (integrate with bot's event loop)
+- Modular: separate functions for each analysis type
+- No print statements or logging to user (internal metrics only)
+- Efficient: cache zone calculations, update only on new candles
+- Comment heavily for maintainability
+
+DELIVER:
+- Single Python module (finorix_analysis_engine.py)
+- Include initialization function for bot integration
+- Include main analysis function that takes [pair, timeframe, candle_data]
+- Return standardized dict: {trend, strength, zones, liquidity, signal_valid, confidence}
+- No dependencies beyond bot's existing libraries (pandas, requests, etc.)
+
+This engine runs UNDER the bot. Silent. Mechanical. Feeding pure data to signal logic.
