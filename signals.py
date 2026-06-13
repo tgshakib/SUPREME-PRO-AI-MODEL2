@@ -7,6 +7,7 @@ filename) so the handler can attach the matching BUY/SELL image.
 """
 import os
 import random
+import time
 from datetime import datetime
 from typing import Dict, Optional
 
