@@ -232,27 +232,27 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         call.bot, chat_id, loading, reply_markup=None,
     )
 
-    # Hard-locked scan window: MAX 6-7 seconds total.
-    # Step 1: snapshot price at T=0 for real-time sync
+    # Hard-locked scan window: MAX 5–6 seconds total — ALL users/modes.
+    # Live, OTC, non-MG, MTG, free and paid users all share the same timer.
+    # Step 1: snapshot price at T=0 for volatility probe
     _px_t0: float | None = None
     try:
         from live_prices import get_live_price as _glp
         _px_t0 = _glp(pair)
     except Exception:
         pass
-    await asyncio.sleep(2.0)   # first 2 seconds — minimum scan floor
-    # Step 2: measure price movement to pick scan depth (hard cap: 7s total)
-    _extra = 4.0   # default: 2+4 = 6s total (hard floor at 6s)
+    await asyncio.sleep(2.0)   # 2 s — minimum scan floor (same for everyone)
+    # Step 2: pick remaining depth from price movement (hard cap: 6 s total)
+    _extra = 3.0   # default: 2+3 = 5 s  ← standard (calm market)
     try:
         from live_prices import get_live_price as _glp2
         _px_t2 = _glp2(pair)
         if _px_t0 and _px_t2 and _px_t0 > 0:
             _move_pct = abs(_px_t2 - _px_t0) / _px_t0
-            if _move_pct > 0.0003:   # elevated volatility → use full 7s
-                _extra = 5.0         # total: 2+5 = 7s  ← hard MAX
-            # else: calm market → _extra stays 4.0 (total 6s)
+            if _move_pct > 0.0003:   # elevated volatility → add 1 extra second
+                _extra = 4.0         # total: 2+4 = 6 s  ← hard MAX
     except Exception:
-        pass   # fallback keeps _extra=4.0 → 6s total
+        pass   # fallback keeps _extra=3.0 → 5 s total
     await asyncio.sleep(_extra)
 
     sig = generate_signal(pair, market_name, tf_label, user_id=user_id, broker=broker)
