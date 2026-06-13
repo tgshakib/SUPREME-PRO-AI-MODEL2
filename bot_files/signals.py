@@ -10,7 +10,7 @@ import random
 from datetime import datetime
 from typing import Dict, Optional
 
-from tz_utils import short_time_for_user
+from tz_utils import short_time_for_user, next_candle_time_for_user
 
 import database as db
 from live_prices import get_market_bias, get_live_price
@@ -986,9 +986,11 @@ def generate_signal(
             pass
 
     if user_id is not None:
-        now_str = short_time_for_user(user_id)
+        now_str = next_candle_time_for_user(user_id)
     else:
-        now_str = datetime.utcnow().strftime("%H:%M:%S UTC")
+        _un = datetime.utcnow().replace(second=0, microsecond=0)
+        from datetime import timedelta as _td
+        now_str = (_un + _td(minutes=1)).strftime("%H:%M UTC")
 
     # ── BINARY ENTRY TIME INSTRUCTION ─────────────────────────────────────
     # Signal fires at now_str (e.g. 12:30:45). User enters at 12:31:00
