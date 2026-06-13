@@ -36,6 +36,7 @@ AUTO-OUTCOME DETECTION
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
@@ -315,96 +316,136 @@ def _detect_candle_pattern(c_open: float, c_high: float,
 
 
 async def _check_and_record_outcome(
-    signal_id:      int,
-    pair:           str,
-    market:         str,
-    direction:      str,
-    entry_price:    float,
-    expiry_minutes: int,
-    engine:         str,
-    user_id:        int  = 0,
-    bot              = None,
-    chat_id:        int  = 0,
+    signal_id:        int,
+    pair:             str,
+    market:           str,
+    direction:        str,
+    entry_price:      float,
+    expiry_minutes:   int,
+    engine:           str,
+    user_id:          int  = 0,
+    bot                    = None,
+    chat_id:          int  = 0,
+    signal_timestamp: int  = 0,
 ) -> None:
-    """Wait expiry + 45 s buffer then evaluate outcome via candle colour.
+    """Wait until the ENTRY candle closes + 45 s buffer, then evaluate outcome.
+
+    CANDLE TIMING FIX
+    ─────────────────
+    Signal fires at T (e.g. 12:09:30).  The user enters the NEXT fresh candle:
+      • 1-min signal → enters 12:10:00 candle, which closes at 12:11:00
+      • 5-min signal → enters 12:10:00 candle, which closes at 12:15:00
+
+    We therefore wait until that specific candle has CLOSED (+ 45 s buffer)
+    and then fetch the candle matching that interval — NOT df.iloc[-2] of a
+    fixed "1m" download, which was fetching the wrong bar for 2m/3m/5m signals
+    and marking wins as losses.
 
     Resolution order:
-      1. Fetch the last completed 1-minute candle at expiry time.
-      2. If candle is Doji / Dragon Fly / Small Weak Doji → REFUND (no alert).
-      3. Check candle colour: CALL wins on green candle, PUT wins on red candle.
-      4. Fallback: price-based comparison (close vs entry) when candle data
-         is unavailable (OTC pairs, data gaps, yfinance outage, etc.).
+      1. Fetch the entry candle (correct interval) from yfinance.
+      2. Doji / Dragon Fly / Small Weak Doji → REFUND (no alert).
+      3. Candle colour: CALL wins on green candle, PUT wins on red candle.
+      4. Fallback: price-based comparison when candle data is unavailable
+         (OTC pairs, data gaps, yfinance outage, etc.).
 
     Runs as a fire-and-forget asyncio task — never raises to the caller.
     When user_id / bot / chat_id are supplied the daily alert system is
-    notified of the outcome so it can fire loss / win streak messages.
+    notified of the outcome so it can fire streak-based messages.
     """
-    await asyncio.sleep(expiry_minutes * 60 + 45)
+    # ── Compute when to wake up ──────────────────────────────────────────
+    # entry_interval = duration of one candle in seconds
+    entry_interval_sec = max(60, expiry_minutes * 60)
+    now_ts = time.time()
+
+    if signal_timestamp > 0:
+        # Round signal time UP to the next candle boundary
+        entry_candle_open_ts  = math.ceil(signal_timestamp / entry_interval_sec) * entry_interval_sec
+        entry_candle_close_ts = entry_candle_open_ts + entry_interval_sec
+        # Remaining sleep = time until candle close + 45 s buffer
+        wait_sec = max(10.0, entry_candle_close_ts + 45 - now_ts)
+    else:
+        # Fallback: old behaviour (no timestamp supplied)
+        wait_sec = float(expiry_minutes * 60 + 45)
+
+    await asyncio.sleep(wait_sec)
+
+    # yfinance interval to use for candle fetch — must match the signal TF
+    # so we get the exact candle the user traded, not a sub-candle of it.
+    _YF_INTERVAL = {1: "1m", 2: "2m", 3: "5m", 5: "5m"}.get(expiry_minutes, "5m")
 
     try:
         from live_prices import get_live_price, yf_ticker
         price_now = get_live_price(pair)
 
-        # ── Candle-colour primary check ───────────────────────────────────
+        # ── Candle-colour primary check (OTC excluded — synthetic prices) ─
+        _is_otc = ("〔OTC〕" in pair or "(OTC)" in (pair or "").upper()
+                   or "_otc" in (pair or "").lower())
         candle_outcome: Optional[str] = None   # "win" | "loss" | "refund"
-        try:
-            import yfinance as _yf
-            ticker_sym = yf_ticker(pair)
-            if ticker_sym:
-                df = _yf.download(ticker_sym, period="1d", interval="1m",
-                                  progress=False, auto_adjust=True)
-                if df is not None and len(df) >= 2:
-                    # Use the last *completed* candle (second-to-last row;
-                    # the last row is the still-forming current candle).
-                    row = df.iloc[-2]
-                    cols = df.columns
+        if not _is_otc:
+            try:
+                import yfinance as _yf
+                ticker_sym = yf_ticker(pair)
+                if ticker_sym:
+                    df = _yf.download(ticker_sym, period="1d",
+                                      interval=_YF_INTERVAL,
+                                      progress=False, auto_adjust=True)
+                    if df is not None and len(df) >= 2:
+                        # df.iloc[-2] is the last COMPLETED candle.
+                        # Because we waited until the entry candle CLOSED
+                        # + 45 s buffer (using signal_timestamp above),
+                        # this is exactly the candle the user traded —
+                        # not some sub-candle of it.
+                        row  = df.iloc[-2]
+                        cols = df.columns
 
-                    def _gcol(name: str) -> Optional[float]:
-                        lo = name.lower()
-                        hi = name.capitalize()
-                        if lo in cols:
-                            return float(row[lo])
-                        if hi in cols:
-                            return float(row[hi])
-                        for c in cols:
-                            if isinstance(c, tuple) and c[0].lower() == lo:
-                                return float(row[c])
-                        return None
+                        def _gcol(name: str) -> Optional[float]:
+                            lo = name.lower()
+                            hi = name.capitalize()
+                            if lo in cols:
+                                return float(row[lo])
+                            if hi in cols:
+                                return float(row[hi])
+                            for c in cols:
+                                if isinstance(c, tuple) and c[0].lower() == lo:
+                                    return float(row[c])
+                            return None
 
-                    c_o = _gcol("open")
-                    c_h = _gcol("high")
-                    c_l = _gcol("low")
-                    c_c = _gcol("close")
+                        c_o = _gcol("open")
+                        c_h = _gcol("high")
+                        c_l = _gcol("low")
+                        c_c = _gcol("close")
 
-                    if all(v is not None for v in [c_o, c_h, c_l, c_c]):
-                        pattern = _detect_candle_pattern(
-                            c_o, c_h, c_l, c_c,      # type: ignore[arg-type]
-                            entry_price or 0.0,
-                        )
-                        if pattern == "refund":
-                            db.mark_signal_outcome(signal_id, "refund")
-                            log.info(
-                                "[SelfImprove] Signal #%d %s %s → REFUND "
-                                "(Doji/DragonFly/WeakDoji — no alert sent)",
-                                signal_id, pair, direction,
+                        if all(v is not None for v in [c_o, c_h, c_l, c_c]):
+                            pattern = _detect_candle_pattern(
+                                c_o, c_h, c_l, c_c,   # type: ignore[arg-type]
+                                entry_price or 0.0,
                             )
-                            return   # skip daily-alert hook entirely
+                            if pattern == "refund":
+                                db.mark_signal_outcome(signal_id, "refund")
+                                log.info(
+                                    "[SelfImprove] Signal #%d %s %s → REFUND "
+                                    "(Doji/DragonFly/WeakDoji — no alert sent)",
+                                    signal_id, pair, direction,
+                                )
+                                return   # skip daily-alert hook entirely
 
-                        # CALL/BUY wins on green candle; PUT/SELL wins on red
-                        if direction == "BUY":
-                            won = (pattern == "green")
-                        else:
-                            won = (pattern == "red")
+                            # CALL/BUY wins on green candle; PUT/SELL wins on red
+                            if direction == "BUY":
+                                won = (pattern == "green")
+                            else:
+                                won = (pattern == "red")
 
-                        candle_outcome = "win" if won else "loss"
-                        log.info(
-                            "[SelfImprove] Signal #%d %s %s candle=%s → %s",
-                            signal_id, pair, direction,
-                            pattern.upper(), candle_outcome.upper(),
-                        )
-        except Exception as _ce:
-            log.debug("[SelfImprove] Candle pattern check failed for %s: %s",
-                      pair, _ce)
+                            candle_outcome = "win" if won else "loss"
+                            log.info(
+                                "[SelfImprove] Signal #%d %s %s "
+                                "candle=%s → %s  (interval=%s)",
+                                signal_id, pair, direction,
+                                pattern.upper(), candle_outcome.upper(),
+                                _YF_INTERVAL,
+                            )
+            except Exception as _ce:
+                log.debug("[SelfImprove] Candle pattern check failed for %s: %s",
+                          pair, _ce)
 
         # ── Price-based fallback (OTC / data gap) ─────────────────────────
         if candle_outcome is not None:
@@ -452,22 +493,25 @@ async def _check_and_record_outcome(
 
 
 def schedule_outcome_check(
-    signal_id:      int,
-    pair:           str,
-    market:         str,
-    direction:      str,
-    entry_price:    Optional[float],
-    expiry_minutes: int,
-    engine:         str,
-    user_id:        int  = 0,
-    bot              = None,
-    chat_id:        int  = 0,
+    signal_id:        int,
+    pair:             str,
+    market:           str,
+    direction:        str,
+    entry_price:      Optional[float],
+    expiry_minutes:   int,
+    engine:           str,
+    user_id:          int  = 0,
+    bot                    = None,
+    chat_id:          int  = 0,
+    signal_timestamp: int  = 0,
 ) -> None:
     """Fire-and-forget — schedule the outcome check coroutine.
 
     Safe to call from sync code; grabs the running loop automatically.
     Skips if entry_price is unavailable (can't evaluate outcome).
     Pass user_id / bot / chat_id to enable daily-alert notifications.
+    Pass signal_timestamp (Unix seconds) so the outcome check waits until
+    the exact entry candle closes before evaluating win/loss.
     """
     if signal_id < 0 or entry_price is None or entry_price <= 0:
         return
@@ -478,6 +522,7 @@ def schedule_outcome_check(
                 signal_id, pair, market, direction,
                 entry_price, expiry_minutes, engine,
                 user_id=user_id, bot=bot, chat_id=chat_id,
+                signal_timestamp=signal_timestamp,
             )
         )
     except RuntimeError:

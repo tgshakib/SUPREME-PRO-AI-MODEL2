@@ -376,10 +376,83 @@ def _fetch_stooq(stooq_sym: str) -> Optional[float]:
     return None
 
 
+# ── Binance — real-time crypto prices (no API key, sub-second latency) ──────
+# Binance is the world's largest crypto exchange. Their public REST API
+# requires no authentication and returns the live last traded price for
+# any spot or perpetual-futures symbol with <200ms latency.
+#
+# Source priority per symbol:
+#   A. Binance Futures perp (fapi) → matches TradingView "BTCUSD.P" Binance chart
+#   B. Binance Spot               → matches TradingView "BTCUSDT" Binance chart
+# Used BEFORE yfinance and CoinGecko so prices are never stale.
+
+_BINANCE_SPOT_MAP: dict[str, str] = {
+    "BTC":  "BTCUSDT",
+    "ETH":  "ETHUSDT",
+    "SOL":  "SOLUSDT",
+    "BNB":  "BNBUSDT",
+    "LTC":  "LTCUSDT",
+    "BCH":  "BCHUSDT",
+    "DOT":  "DOTUSDT",
+    "AVAX": "AVAXUSDT",
+    "LINK": "LINKUSDT",
+    "DASH": "DASHUSDT",
+    "ETC":  "ETCUSDT",
+    "AXS":  "AXSUSDT",
+}
+
+_BINANCE_CACHE: dict[str, tuple[float, float]] = {}  # symbol → (ts, price)
+_BINANCE_TTL = 1.0  # seconds — Binance updates ~100ms; 1 s keeps it fresh without hammering
+
+
+def _fetch_binance(binance_symbol: str) -> Optional[float]:
+    """Fetch real-time price from Binance public REST API (no key required).
+
+    Tries Binance Futures perpetual endpoint first (matches TradingView
+    BTCUSD.P Binance chart), then falls back to Binance Spot.
+    Result cached for 1 second."""
+    now = time.time()
+    cached = _BINANCE_CACHE.get(binance_symbol)
+    if cached and (now - cached[0]) < _BINANCE_TTL:
+        return cached[1]
+
+    # Source A — Binance Futures perpetual (TradingView BTCUSD.P)
+    body = _http_get(
+        f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={binance_symbol}",
+        timeout=3.0,
+    )
+    if body:
+        try:
+            d = json.loads(body)
+            px = float(d.get("price", 0))
+            if px > 0:
+                _BINANCE_CACHE[binance_symbol] = (now, px)
+                return px
+        except Exception:
+            pass
+
+    # Source B — Binance Spot
+    body = _http_get(
+        f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}",
+        timeout=3.0,
+    )
+    if body:
+        try:
+            d = json.loads(body)
+            px = float(d.get("price", 0))
+            if px > 0:
+                _BINANCE_CACHE[binance_symbol] = (now, px)
+                return px
+        except Exception:
+            pass
+
+    return None
+
+
 # ── CoinGecko — real-time crypto prices (no API key required) ────────────
 # CoinGecko's public /simple/price endpoint is free, requires no key, and
 # returns live prices updated every ~30 s. Used as a fallback for all
-# crypto pairs when yfinance is unavailable or returns a stale close.
+# crypto pairs when Binance is unavailable.
 
 _CG_ID_MAP = {
     "BTC":   "bitcoin",
@@ -575,7 +648,19 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
         if cached and (now - cached[0]) < _TTL:
             return cached[1]
 
-    # ── 2. Stooq.com — genuinely REAL-TIME forex & index (NO delay, NO key) ──
+    # ── 2. Binance — Priority 1 for crypto (sub-second, no key, matches TradingView) ──
+    # For BTC/ETH/SOL etc. Binance is the canonical source — it's what
+    # TradingView shows as "BTCUSD.P" (Binance perp). Try it BEFORE
+    # Stooq / yfinance so crypto prices are never stale.
+    crypto_base_early = _crypto_base(pair)
+    if crypto_base_early and crypto_base_early in _BINANCE_SPOT_MAP:
+        bn_sym = _BINANCE_SPOT_MAP[crypto_base_early]
+        bn_px = _fetch_binance(bn_sym)
+        if bn_px is not None and bn_px > 0:
+            _CACHE[ticker] = (now, bn_px)
+            return bn_px
+
+    # ── 3. Stooq.com — genuinely REAL-TIME forex & index (NO delay, NO key) ──
     #
     # *** BUG FIX: previously yfinance was tried FIRST, but Yahoo Finance's
     #     free forex API has a known 15-minute delay — "fast_info.last_price"
@@ -589,13 +674,13 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
             _CACHE[ticker] = (now, stooq_px)
             return stooq_px
 
-    # ── 3. yfinance fast_info.last_price (fallback — may be delayed for forex)
+    # ── 4. yfinance fast_info.last_price (fallback — may be delayed for forex)
     price = _fetch_yf(ticker)
     if price is not None and price > 0:
         _CACHE[ticker] = (now, price)
         return price
 
-    # ── 4. CoinGecko — crypto only ──────────────────────────────────
+    # ── 5. CoinGecko — crypto fallback (Binance was tried above; this catches outages)
     crypto_base = _crypto_base(pair)
     if crypto_base:
         cg_id = _CG_ID_MAP.get(crypto_base)
@@ -605,7 +690,7 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
                 _CACHE[ticker] = (now, cg_px)
                 return cg_px
 
-    # ── 5 & 6. Stale cache — never return None to the signal engine ─
+    # ── 6. Stale cache — never return None to the signal engine ─────
     cached = _CACHE.get(ticker)
     return cached[1] if cached else None
 

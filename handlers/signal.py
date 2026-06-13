@@ -266,16 +266,17 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
     if _SI_OK and _si_schedule is not None:
         try:
             _si_schedule(
-                signal_id      = sig.get("signal_id", -1),
-                pair           = pair,
-                market         = market_name,
-                direction      = sig.get("direction", "BUY"),
-                entry_price    = sig.get("entry_price"),
-                expiry_minutes = sig.get("expiry_min", 5),
-                engine         = sig.get("engine", "unknown"),
-                user_id        = user_id,
-                bot            = call.bot,
-                chat_id        = chat_id,
+                signal_id        = sig.get("signal_id", -1),
+                pair             = pair,
+                market           = market_name,
+                direction        = sig.get("direction", "BUY"),
+                entry_price      = sig.get("entry_price"),
+                expiry_minutes   = sig.get("expiry_min", 5),
+                engine           = sig.get("engine", "unknown"),
+                user_id          = user_id,
+                bot              = call.bot,
+                chat_id          = chat_id,
+                signal_timestamp = sig.get("signal_ts", 0),
             )
         except Exception:
             pass

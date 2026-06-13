@@ -1955,10 +1955,12 @@ def generate_signal(
     )
     _pa_weighted = float((pa_sniper or {}).get("weighted", 0))
 
-    # Fetch live entry price for outcome tracking (non-blocking best-effort)
+    # Fetch live entry price for outcome tracking (force_fresh so we never
+    # feed a stale cached price into the outcome-tracking engine).
     _entry_price: Optional[float] = None
+    _signal_ts = int(time.time())
     try:
-        _entry_price = get_live_price(pair)
+        _entry_price = get_live_price(pair, force_fresh=True)
     except Exception:
         pass
 
@@ -2004,8 +2006,9 @@ def generate_signal(
         "photo":        photo,
         "signal_id":    _signal_id,        # for outcome tracking
         "engine":       _driven_by,        # which engine fired
-        "entry_price":  _entry_price,      # live price at signal time
+        "entry_price":  _entry_price,      # live price at signal time (force_fresh)
         "expiry_min":   _expiry_min,       # for scheduling outcome check
+        "signal_ts":    _signal_ts,        # unix timestamp when signal fired (for candle timing)
         "vol_mode":     _si_vol_mode,      # current volatility regime
         "atr_pct":      _si_atr_pct,       # current ATR %
     }
