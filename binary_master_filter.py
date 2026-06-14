@@ -222,7 +222,7 @@ def _is_doji(df: "pd.DataFrame") -> bool:
     if total_range < 1e-10:
         return True
     body = abs(c - o)
-    return (body / total_range) < 0.22
+    return (body / total_range) < 0.28
 
 
 def _conviction_close(df: "pd.DataFrame", direction: str) -> bool:
@@ -436,7 +436,7 @@ def binary_master_check(
     if total_engines >= 3:
         oppose_ratio = engine_oppose / max(total_engines, 1)
         agree_ratio  = engine_agree  / max(total_engines, 1)
-        if oppose_ratio > 0.60:
+        if oppose_ratio > 0.45:
             result["approved"]     = False
             result["quality_tier"] = "BLOCKED"
             result["block_reason"] = (
@@ -445,7 +445,7 @@ def binary_master_check(
             )
             result["confidence_adj"] = -25
             return result
-        if oppose_ratio > 0.40:
+        if oppose_ratio > 0.30:
             result["confidence_adj"] -= 12
             reasons.append(f"⚠️ Engine conflict: {engine_oppose}/{total_engines} oppose")
         elif agree_ratio >= 0.75 and engine_oppose == 0:
@@ -462,10 +462,36 @@ def binary_master_check(
         df = _get_df(ticker, interval=interval, period="3h")
 
     if df is None:
-        # No candle data — downgrade to STANDARD without blocking
-        result["quality_tier"]  = "STANDARD"
-        result["regime"]        = "NO_DATA"
-        result["confidence_adj"] = max(result["confidence_adj"] - 5, -25)
+        # No candle data — quality determined purely by engine consensus.
+        result["regime"] = "NO_DATA"
+        _agree  = engine_agree  if isinstance(engine_agree,  int) else 0
+        _oppose = engine_oppose if isinstance(engine_oppose, int) else 0
+        _total  = total_engines if isinstance(total_engines, int) else 0
+
+        if _total < 2:
+            # Not enough engine votes and no candle data → weak, penalise
+            result["quality_tier"]   = "WEAK"
+            result["confidence_adj"] = max(result["confidence_adj"] - 12, -25)
+        elif _oppose >= 2:
+            # 2+ engines oppose the direction — block regardless of agree count
+            result["approved"]       = False
+            result["quality_tier"]   = "BLOCKED"
+            result["block_reason"]   = (
+                f"Engine conflict (no candle data): {_agree} agree, {_oppose} oppose"
+            )
+            result["confidence_adj"] = -25
+        elif _oppose == 1:
+            result["quality_tier"]   = "WEAK"
+            result["confidence_adj"] = max(result["confidence_adj"] - 8, -25)
+        elif _agree >= 5 and _oppose == 0:
+            result["quality_tier"]   = "HIGH"
+            result["confidence_adj"] = min(result["confidence_adj"] + 6, 15)
+        elif _agree >= 3 and _oppose == 0:
+            result["quality_tier"]   = "STANDARD"
+            result["confidence_adj"] = max(result["confidence_adj"] - 2, -25)
+        else:
+            result["quality_tier"]   = "STANDARD"
+            result["confidence_adj"] = max(result["confidence_adj"] - 5, -25)
         return result
 
     df = _norm_cols(df)
@@ -482,7 +508,7 @@ def binary_master_check(
     try:
         if _is_doji(df):
             reasons.append("⚠️ Last candle doji — indecision, penalty applied")
-            result["confidence_adj"] -= 8
+            result["confidence_adj"] -= 12
     except Exception:
         pass
 
@@ -492,21 +518,30 @@ def binary_master_check(
         result["otc_gate_score"] = otc_score
         reasons.extend(otc_reasons)
 
-        if otc_score >= 3:
+        if otc_score >= 4:
             result["quality_tier"]  = "ELITE"
-            result["confidence_adj"] += 12
+            result["confidence_adj"] += 15
             result["regime"]         = "OTC_REVERSAL_ELITE"
-        elif otc_score >= 2:
+        elif otc_score >= 3:
             result["quality_tier"]  = "HIGH"
-            result["confidence_adj"] += 6
+            result["confidence_adj"] += 8
             result["regime"]         = "OTC_REVERSAL_HIGH"
-        elif otc_score == 1:
+        elif otc_score >= 2:
             result["quality_tier"]  = "STANDARD"
-            result["confidence_adj"] += 0
+            result["confidence_adj"] += 2
             result["regime"]         = "OTC_STANDARD"
+        elif otc_score == 1:
+            # Only 1 gate passed — weak OTC setup, penalise
+            result["quality_tier"]  = "WEAK"
+            result["confidence_adj"] -= 8
+            result["regime"]         = "OTC_WEAK"
+            reasons.append("⚠️ Only 1 OTC reversal gate passed — weak setup")
         else:
-            # Zero reversal gates passed — OTC direction very uncertain
-            result["confidence_adj"] -= 15
+            # Zero reversal gates passed — block OTC signal
+            result["approved"]       = False
+            result["quality_tier"]   = "BLOCKED"
+            result["block_reason"]   = "No OTC reversal setup — zero gates passed"
+            result["confidence_adj"] = -25
             result["regime"]         = "OTC_NO_SETUP"
             reasons.append("❌ No OTC reversal setup — zero gates passed")
 
@@ -518,20 +553,26 @@ def binary_master_check(
 
         if live_score >= 4:
             result["quality_tier"]  = "ELITE"
-            result["confidence_adj"] += 12
+            result["confidence_adj"] += 15
             result["regime"]         = "LIVE_ELITE"
         elif live_score >= 3:
             result["quality_tier"]  = "HIGH"
-            result["confidence_adj"] += 6
+            result["confidence_adj"] += 8
             result["regime"]         = "LIVE_HIGH"
-        elif live_score == 2:
+        elif live_score >= 2:
             result["quality_tier"]  = "STANDARD"
-            result["confidence_adj"] += 0
+            result["confidence_adj"] += 2
             result["regime"]         = "LIVE_STANDARD"
         else:
-            result["confidence_adj"] -= 10
-            result["regime"]         = "LIVE_WEAK"
-            reasons.append("⚠️ LIVE market quality gates: only 1/4 passed")
+            # 0 or 1 gate passed on LIVE — block to prevent poor-quality entries
+            result["approved"]       = False
+            result["quality_tier"]   = "BLOCKED"
+            result["block_reason"]   = (
+                f"LIVE quality gates: only {live_score}/4 passed — setup too weak"
+            )
+            result["confidence_adj"] = -25
+            result["regime"]         = "LIVE_BLOCKED"
+            reasons.append(f"❌ LIVE market quality gates: {live_score}/4 passed — blocked")
 
     # ── 8. FINAL APPROVAL DECISION ───────────────────────────────────
     if result["confidence_adj"] <= -20:

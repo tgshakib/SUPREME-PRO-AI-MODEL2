@@ -115,8 +115,8 @@ PIPS_COMMAND_MIN_RR = 2.5   # GOLD V8: elite R:R floor (was 1.8)
 # For standard forex, SL distance MUST be in [20, 45] pips.
 # Tighter SL = higher R:R = better expected value per trade.
 # For metals / crypto / indices ATR-based clamps remain unchanged.
-SL_MIN_PIPS_FOREX = 20   # GOLD V8: was 25 (tighter = better R:R)
-SL_MAX_PIPS_FOREX = 45   # GOLD V8: was 60 (less slack = sniper exits)
+SL_MIN_PIPS_FOREX = 10   # tighter SL = better RR for sniper entries
+SL_MAX_PIPS_FOREX = 20   # hard cap: max 20 pips SL
 
 
 def _is_metal_pair(pair: str) -> bool:
@@ -289,7 +289,7 @@ _SNIPER_TP_INDEX  = [120.0, 200.0, 400.0, 1000.0]
 
 # Standard forex — tiers are in PIPS (multiplied by pip_size below)
 _SNIPER_SL_FOREX  = [10.0, 14.0, 20.0]
-_SNIPER_TP_FOREX  = [60.0, 100.0, 200.0, 500.0]
+_SNIPER_TP_FOREX  = [100.0, 160.0, 280.0, 500.0]  # min 100-pip TP1
 
 
 def _sniper_rr_levels(pair: str, direction: str, entry: float,

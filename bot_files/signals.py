@@ -256,7 +256,7 @@ def generate_signal(
             _si_thresholds = {}
     # GOD LEVEL: raised thresholds across the board
     _pa_thr  = float(_si_thresholds.get("pa_threshold", 7.0))   # was 5.0
-    _otc_min = int(_si_thresholds.get("otc_vote_min", 4))       # was 3
+    _otc_min = int(_si_thresholds.get("otc_vote_min", 6))       # was 4 — raised to 6 for tighter OTC gate
 
     # Win Rate Guardian boost — tightens thresholds when 2-day win rate < 89%
     try:

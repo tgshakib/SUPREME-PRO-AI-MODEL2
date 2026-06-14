@@ -113,6 +113,14 @@ except Exception as _fxe:
     _fx_analyze = None  # type: ignore
     _FX_EXPERT_OK = False
 
+try:
+    from forex_quick_engine import forex_quick_sniper as _fqs
+    _FQS_OK = True
+except Exception as _fqse:
+    print(f"[forex_engine] forex_quick_engine import failed: {_fqse}")
+    _fqs    = None   # type: ignore
+    _FQS_OK = False
+
 # "Pips command" — the minimum reward:risk we will ship. The pattern
 # engine already enforces MIN_RR=1.6 on its own; this is the engine-wide
 # floor used when constructing the TP ladder from a pattern's measured
@@ -123,8 +131,8 @@ PIPS_COMMAND_MIN_RR = 2.5   # GOLD V8: elite R:R floor (was 1.8)
 # Standard forex SL: 20–30 pips hard cap.
 # A+ sniper (smart engine grade ≥ 90): 8 pip ultra-tight SL.
 # Metals / crypto / indices use ATR-based clamps (unchanged).
-SL_MIN_PIPS_FOREX = 20
-SL_MAX_PIPS_FOREX = 30   # hard cap: no signal wider than 30 pips SL
+SL_MIN_PIPS_FOREX = 10   # tighter SL = better RR for sniper entries
+SL_MAX_PIPS_FOREX = 20   # hard cap: max 20 pips SL (was 30)
 
 
 def _confidence_grade(score: int) -> str:
@@ -306,8 +314,8 @@ _SNIPER_SL_INDEX  = [20.0, 28.0, 40.0]
 _SNIPER_TP_INDEX  = [120.0, 200.0, 400.0, 1000.0]
 
 # Standard forex — tiers are in PIPS (multiplied by pip_size below)
-_SNIPER_SL_FOREX  = [10.0, 14.0, 20.0]
-_SNIPER_TP_FOREX  = [60.0, 100.0, 200.0, 500.0]
+_SNIPER_SL_FOREX  = [8.0, 10.0, 14.0]       # tighter SL tiers (was 10/14/20)
+_SNIPER_TP_FOREX  = [100.0, 160.0, 280.0, 500.0]  # min 100-pip TP1 (was 60)
 
 
 def _sniper_rr_levels(pair: str, direction: str, entry: float,
@@ -611,6 +619,28 @@ def _generate_levels_raw(pair: str, max_tp: int,
     pattern: dict | None = None
     _LAST_SMART_BY_PAIR.pop(pair, None)        # clear stale packet
 
+    # ── QUICK SNIPER GATE (Priority -1, first check) ──────────────
+    # Fast multi-source consensus: runs all available engines in < 1s.
+    # If grade ≥ 80 AND engines agree on direction → lock direction here
+    # before the slower SMART AI / sniper paths run.
+    # Detects: hunt/fakeout/real-move setups, enforces min-TP floor.
+    _quick_result    = None
+    _quick_direction = None
+    _quick_min_tp    = 100.0   # pip floor (pips for forex, $ for others)
+    if _FQS_OK and _fqs is not None:
+        try:
+            _quick_result = _fqs(pair)
+            if _quick_result and _quick_result.get("grade", 0) >= 80:
+                _quick_direction = _quick_result["direction"]
+                _quick_min_tp    = float(_quick_result.get("min_tp", 100))
+                print(f"[forex_engine] ⚡ QUICK SNIPER fired for {pair}: "
+                      f"{_quick_direction} grade={_quick_result['grade']} "
+                      f"type={_quick_result.get('signal_type','?')} "
+                      f"agree={_quick_result.get('engines_agree','?')}/"
+                      f"{_quick_result.get('engines_total','?')}")
+        except Exception as _qe:
+            print(f"[forex_engine] quick sniper error for {pair}: {_qe}")
+
     # ── 0. SMART AI · Sweep ▸ BoS ▸ MS (Pine v6 port) ──
     # The single best filter we have for live forex. If a fresh,
     # confirmed entry is on the table we OVERRIDE direction / entry /
@@ -760,6 +790,24 @@ def _generate_levels_raw(pair: str, max_tp: int,
                         direction = _fx["direction"]
         except Exception as _fxerr:
             print(f"[forex_engine] fx_expert call failed: {_fxerr}")
+
+    # ── QUICK SNIPER FALLBACK — if all normal paths failed ────────────
+    # When SMART AI / sniper / bias / FX Expert all failed to produce a
+    # direction, use the quick sniper's consensus direction (if it fired).
+    # Also: if quick sniper agrees with an existing direction → mark it
+    # as a higher-conviction entry so the SL stays tight.
+    if direction is None and _quick_direction is not None:
+        direction = _quick_direction
+        live = get_live_price(pair, force_fresh=True)
+        entry = float(live) if live is not None else 0.0
+        if entry == 0.0:
+            try:
+                from config import price_band as _pb
+                mid, _, _ = _pb(pair)
+                entry = float(mid)
+            except Exception:
+                pass
+        print(f"[forex_engine] 🎯 QUICK SNIPER set direction={direction} for {pair}")
 
     if direction is None:
         return None, 0.0, [], 0.0, 5, None
@@ -949,6 +997,28 @@ def _generate_levels(pair: str, max_tp: int,
                 tps = new_tps
         except Exception:
             pass
+
+        # ── MINIMUM TP FLOOR (Quick Sniper requirement) ───────────────
+        # Enforce minimum first-TP distance so every forex signal carries
+        # at least 100 pips / $100 / $500 profit target (per asset class).
+        if tps and entry and entry > 0:
+            pip2 = live_pip_size(pair)
+            if _is_metal_pair(pair) or _is_crypto_pair(pair) or _is_index_pair(pair):
+                _tp_floor_dist = float(_quick_min_tp)   # literal $ / points
+            else:
+                _tp_floor_dist = float(_quick_min_tp) * pip2  # pips → price
+            _current_tp1_dist = abs(tps[0] - entry)
+            if _current_tp1_dist < _tp_floor_dist and _tp_floor_dist > 0:
+                # Scale all TPs proportionally to meet the floor
+                _scale = _tp_floor_dist / max(_current_tp1_dist, pip2)
+                new_tps = []
+                for tp in tps:
+                    tp_dist = abs(tp - entry) * _scale
+                    new_tps.append(
+                        round((entry + tp_dist) if direction == "BUY"
+                              else (entry - tp_dist), dec)
+                    )
+                tps = new_tps
 
     return direction, entry, tps, sl, dec, pattern
 
