@@ -72,6 +72,60 @@ class ForexState(StatesGroup):
     awaiting_pairs = State()
 
 
+# ── QUICK ANALYSIS HELPER ───────────────────────────────────────────────────
+async def _fx_quick_analyze_and_signal(
+    bot: Bot, chat_id: int, user_id: int, *, wipe_first: bool = False
+):
+    """Show a 6-7 second 'Quick AI Scan' screen then fire a forex signal.
+
+    Called on first activation AND every time the user taps NEW SIGNAL.
+    Signal text, buttons, and all downstream formatting are UNCHANGED.
+    Supports all pairs — Forex, XAU/USD (Gold), BTC, all crypto/indices.
+    """
+    import random as _rnd
+
+    if wipe_first:
+        try:
+            for s in db.list_open_forex_signals(user_id):
+                db.update_forex_signal_progress(
+                    int(s["id"]), int(s.get("tps_hit") or 0),
+                    "replaced", "closed",
+                )
+        except Exception:
+            pass
+        try:
+            await wipe_user_signals(bot, user_id)
+        except Exception:
+            pass
+        db.set_more_signal_requested(user_id, True)
+
+    scan_secs = _rnd.choice([6.0, 7.0])
+    _analyze_text = (
+        "⚡ <b>SUPREME PRO AI — QUICK SCAN</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "🔍 <b>Scanning all markets...</b>\n"
+        "📊 Forex · XAU/USD · BTC · Indices · All Pairs\n"
+        "🤖 Detecting: Hunt · Fakeout · Real Move\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "⏳ <b>AI analysis in progress...</b>"
+    )
+    loading_id = await show_screen(bot, chat_id, _analyze_text, reply_markup=None)
+
+    await asyncio.sleep(scan_secs)
+
+    try:
+        await bot.delete_message(chat_id, loading_id)
+    except Exception:
+        pass
+    db.clear_active_msg(chat_id)
+
+    try:
+        from forex_engine import trigger_immediate_scan
+        await trigger_immediate_scan(bot, user_id)
+    except Exception as _qe:
+        print(f"[forex] _fx_quick_analyze_and_signal error: {_qe}")
+
+
 def _tf_label(code: str) -> str:
     for label, c in FOREX_TIMEFRAMES:
         if c == code:
@@ -297,6 +351,12 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
     await show_screen(call.bot, call.message.chat.id, text,
                       forex_active_kb(gold_king=gold_on))
 
+    asyncio.create_task(
+        _fx_quick_analyze_and_signal(
+            call.bot, call.message.chat.id, call.from_user.id
+        )
+    )
+
 
 # ── STOP ──────────────────────────────────────────────────
 @router.callback_query(F.data == "fx:stop")
@@ -406,31 +466,12 @@ async def cb_fx_new(call: CallbackQuery, bot: Bot):
                 show_alert=True,
             )
             return
-    await call.answer(
-        "🎯 Searching for a fresh A+ sniper entry…", show_alert=False,
+    await call.answer("⚡ Quick AI Scan starting…", show_alert=False)
+    asyncio.create_task(
+        _fx_quick_analyze_and_signal(
+            bot, call.message.chat.id, user_id, wipe_first=True
+        )
     )
-    # 1) Close any still-open signals so the engine isn't blocked by them
-    try:
-        for s in db.list_open_forex_signals(user_id):
-            db.update_forex_signal_progress(
-                int(s["id"]), int(s.get("tps_hit") or 0),
-                "replaced", "closed",
-            )
-    except Exception:
-        pass
-    # 2) Wipe every previous signal card from the chat (open + closed)
-    try:
-        await wipe_user_signals(bot, user_id)
-    except Exception:
-        pass
-    # 3) Re-open the one-at-a-time gate so the next loop tick fires.
-    db.set_more_signal_requested(user_id, True)
-    # 4) Force an immediate scan instead of waiting for the next loop tick
-    try:
-        from forex_engine import trigger_immediate_scan
-        asyncio.create_task(trigger_immediate_scan(bot, user_id))
-    except Exception:
-        pass
 
 
 # ── I'M IN — opt in to live updates ───────────────────────
