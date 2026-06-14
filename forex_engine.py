@@ -1671,7 +1671,7 @@ def _smart_limit_entry(pair: str, direction: str, current_price: float,
     return entry, sl, tps
 
 
-async def _send_signal(bot: Bot, setup: dict):
+async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     user_id = setup["user_id"]
     pairs_idx = [int(i) for i in setup["pairs"].split(",") if i != ""]
     pairs_idx = _filter_open_pairs(pairs_idx)
@@ -1777,7 +1777,7 @@ async def _send_signal(bot: Bot, setup: dict):
     # ── GOD LEVEL: SUPREME FOREX GATE ────────────────────────────
     # Final session + anti-whipsaw + ADX gate before the signal goes out.
     # Any failure = skip this iteration and wait for a cleaner setup.
-    if _forex_gate is not None:
+    if not force_signal and _forex_gate is not None:
         _gate = _forex_gate(pair, direction)
         if not _gate["approved"]:
             print(f"[forex_engine] gate rejected {pair} {direction}: {_gate['reason']}")
@@ -1832,10 +1832,10 @@ async def _send_signal(bot: Bot, setup: dict):
         except Exception:
             pass
 
-    if not _inst_agrees and not _has_sniper:
+    if not force_signal and not _inst_agrees and not _has_sniper:
         return   # institutional flow opposes AND we have no sniper — skip
 
-    if not _has_sniper and not _has_pattern and not _has_liq_anchor:
+    if not force_signal and not _has_sniper and not _has_pattern and not _has_liq_anchor:
         print(f"[forex_engine] 🚫 ELITE BLOCKED {pair} {direction} — "
               f"no sniper/pattern/liq anchor (pure bias fallback < 75% quality)")
         return   # skip — below elite threshold
@@ -1847,7 +1847,7 @@ async def _send_signal(bot: Bot, setup: dict):
     try:
         from forex_hidden_power import forex_power_analyze as _fhp_analyze
         _fhp = _fhp_analyze(pair, direction)
-        if not _fhp.get("approved", True):
+        if not force_signal and not _fhp.get("approved", True):
             print(f"[forex_engine] ⛔ FHP BLOCK {pair} {direction} — "
                   f"power_score={_fhp['power_score']} tier={_fhp['quality_tier']}")
             return
@@ -1865,7 +1865,7 @@ async def _send_signal(bot: Bot, setup: dict):
     if _FINORIX_FX_OK and _finorix_analyse is not None:
         try:
             _fx = _finorix_analyse(pair, "FOREX")
-            if _fx.get("veto") and not _has_sniper:
+            if not force_signal and _fx.get("veto") and not _has_sniper:
                 print(f"[forex_engine] 🔮 FINORIX VETO {pair} {direction} — "
                       f"12-model split, no sniper backing → skipping")
                 return
@@ -2105,7 +2105,7 @@ async def trigger_immediate_scan(bot: Bot, user_id: int):
                 return
         except Exception:
             pass
-        await _send_signal(bot, setup)
+        await _send_signal(bot, setup, force_signal=True)
     except Exception as e:
         print(f"[forex_engine] immediate scan error: {e}")
     finally:

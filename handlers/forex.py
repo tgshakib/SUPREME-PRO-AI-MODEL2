@@ -104,19 +104,12 @@ async def _fx_quick_analyze_and_signal(
             await wipe_user_signals(bot, user_id)
         except Exception:
             pass
-        db.set_more_signal_requested(user_id, True)
+        # NOTE: do NOT set more_signal_requested here — the background loop
+        # would pick it up during our sleep and fire a duplicate, blocking us.
 
     # ── Show Quick Analysis screen ────────────────────────────────────────
     scan_secs = _rnd.choice([6.0, 7.0])
-    _analyze_text = (
-        "⚡ <b>SUPREME PRO AI — QUICK SCAN</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "🔍 <b>Scanning all markets...</b>\n"
-        "📊 Forex · XAU/USD · BTC · Indices · All Pairs\n"
-        "🤖 Detecting: Hunt · Fakeout · Real Move\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        "⏳ <b>AI analysis in progress...</b>"
-    )
+    _analyze_text = "⏳  <b>Fx Supreme pro Ai analysing Quick signal ...</b>"
     loading_id = await show_screen(bot, chat_id, _analyze_text, reply_markup=None)
 
     await asyncio.sleep(scan_secs)
@@ -365,14 +358,6 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
     gold_on = bool(int(setup_now.get("gold_king_mode") or 0))
     await show_screen(call.bot, call.message.chat.id, text,
                       forex_active_kb(gold_king=gold_on))
-
-    # Immediately trigger the Quick Analysis → signal flow so the user
-    # gets a signal right away instead of waiting for the background loop.
-    asyncio.create_task(
-        _fx_quick_analyze_and_signal(
-            call.bot, call.message.chat.id, call.from_user.id
-        )
-    )
 
 
 # ── STOP ──────────────────────────────────────────────────
