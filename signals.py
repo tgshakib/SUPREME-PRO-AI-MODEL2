@@ -1545,7 +1545,9 @@ def generate_signal(
     if not _is_otc_pair:
         try:
             from live_prices import format_price as _fp
-            _cpx = get_live_price(pair, force_fresh=True)
+            # Try fresh first; fall back to cached value so the line always
+            # shows even when the first network fetch returns None.
+            _cpx = get_live_price(pair, force_fresh=True) or get_live_price(pair)
             if _cpx is not None:
                 _cpx_fmt = _fp(pair, float(_cpx))
                 _current_px_line = f"💰 Current Price: <b>{_cpx_fmt}</b>\n"

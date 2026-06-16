@@ -460,6 +460,9 @@ def forex_signal_kb(signal_id: int, kind: str = "LIVE",
             text=f"🟢 I'M IN{label_suffix}",
             callback_data=f"fxin:{signal_id}",
         )])
+    rows.append([InlineKeyboardButton(
+        text="🎯 NEW SIGNAL — 100% AI SNIPER", callback_data="fx:new",
+    )])
     rows.append([
         InlineKeyboardButton(text="🛑 STOP",  callback_data="fx:stop"),
         InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home"),
@@ -480,10 +483,11 @@ def forex_tp_locked_kb() -> InlineKeyboardMarkup:
 
 
 def forex_more_signal_kb() -> InlineKeyboardMarkup:
-    """Buttons shown after a forex signal CLOSES (TP / SL hit). The
-    NEW SIGNAL button now lives on the WORKPLACE / home menu under the
-    🟢 YOUR ACTIVE Fx-Signal button — tap WORKPLACE to find it."""
+    """Buttons shown after a forex signal CLOSES (TP / SL hit)."""
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🎯 NEW SIGNAL — 100% AI SNIPER", callback_data="fx:new",
+        )],
         [InlineKeyboardButton(text="🛑 STOP",      callback_data="fx:stop")],
         [InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")],
     ])
