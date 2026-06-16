@@ -1068,22 +1068,7 @@ def generate_signal(
         except Exception:
             pass
 
-    # ── CURRENT PRICE LINE — broker OTC price for OTC, live tick for LIVE ──
-    # For OTC pairs  : get_live_price now returns the actual broker price
-    #                  (from pocket_option_ws candle buffer or QX stream) —
-    #                  NEVER yfinance, which would give a wrong real-market price.
-    # For LIVE pairs : yfinance fast_info.last_price (<5 s latency).
-    _current_px_line = ""
-    try:
-        from live_prices import format_price as _fp
-        # Try fresh first; fall back to cached value so the line always
-        # shows even when the first network fetch returns None.
-        _cpx = get_live_price(pair, force_fresh=True) or get_live_price(pair)
-        if _cpx is not None:
-            _cpx_fmt = _fp(pair, float(_cpx))
-            _current_px_line = f"💰 Current Price: <b>{_cpx_fmt}</b>\n"
-    except Exception:
-        pass
+    _current_px_line = ""   # removed from binary signal display
 
     grade = _grade_label(user_id)
     mtg = _mtg_label(user_id)

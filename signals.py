@@ -1538,21 +1538,7 @@ def generate_signal(
         except Exception:
             pass
 
-    # ── CURRENT PRICE LINE — live tick for LIVE pairs only, never OTC ──
-    # OTC pairs use broker-synthetic prices that differ from any real feed.
-    # We only show the live price for real LIVE market pairs.
-    _current_px_line = ""
-    if not _is_otc_pair:
-        try:
-            from live_prices import format_price as _fp
-            # Try fresh first; fall back to cached value so the line always
-            # shows even when the first network fetch returns None.
-            _cpx = get_live_price(pair, force_fresh=True) or get_live_price(pair)
-            if _cpx is not None:
-                _cpx_fmt = _fp(pair, float(_cpx))
-                _current_px_line = f"💰 Current Price: <b>{_cpx_fmt}</b>\n"
-        except Exception:
-            pass
+    _current_px_line = ""   # removed from binary signal display
 
     grade = _grade_label(user_id)
     mtg = _mtg_label(user_id)
