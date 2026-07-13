@@ -237,6 +237,30 @@ except Exception as _30se:
     _30S_OK = False
 
 try:
+    from stockley_ai import stockley_analyze as _stockley
+    _STOCKLEY_OK = True
+except Exception as _ste:
+    print(f"[signals] stockley_ai import failed: {_ste}")
+    _stockley = None  # type: ignore
+    _STOCKLEY_OK = False
+
+try:
+    from offx_ai import offx_analyze as _offx
+    _OFFX_OK = True
+except Exception as _oxe:
+    print(f"[signals] offx_ai import failed: {_oxe}")
+    _offx = None  # type: ignore
+    _OFFX_OK = False
+
+try:
+    from katcher_ai import katcher_analyze as _katcher
+    _KATCHER_OK = True
+except Exception as _kae:
+    print(f"[signals] katcher_ai import failed: {_kae}")
+    _katcher = None  # type: ignore
+    _KATCHER_OK = False
+
+try:
     from candle_master_engine import candle_master_analyze as _cm_analyze
     _CM_OK = True
 except Exception as _cme:
@@ -1023,6 +1047,51 @@ def generate_signal(
                     _engine_votes.append(_rv_dir)   # 3 votes — strong reversal override
                     print(f"[signals] ⚡ REVERSAL OVERRIDE {pair}: "
                           f"{direction}→{_rv_dir} quality={_rv_quality}")
+            except Exception:
+                pass
+
+        # ── STOCKLEY AI 2.5 — RSI(14)+MACD+BB+Pattern+OrderFlow ─────────
+        # High-precision model using 3 non-lagging indicators + microstructure.
+        # Works for OTC and LIVE. Contract: zero side-effects.
+        if _STOCKLEY_OK and _stockley is not None and direction is not None:
+            try:
+                _st = _stockley(pair, is_otc=is_otc)
+                if _st.get("ok") and _st.get("direction") == direction:
+                    _engine_votes.append(direction)
+                    if _st.get("elite"):
+                        _engine_votes.append(direction)   # double for elite
+                    if _st.get("confidence", 0) >= 90:
+                        confidence = min(100, (confidence or 97) + 1)
+            except Exception:
+                pass
+
+        # ── OFF-X AI — Pocket Option OTC real-time specialist ────────────
+        # Tuned for synthetic OTC pairs with anti-chop gate and fast refresh.
+        # Contract: zero side-effects.
+        if _OFFX_OK and _offx is not None and direction is not None:
+            try:
+                _ox = _offx(pair, is_otc=is_otc)
+                if _ox.get("ok") and _ox.get("direction") == direction:
+                    _engine_votes.append(direction)
+                    if _ox.get("elite"):
+                        _engine_votes.append(direction)   # double for elite OTC
+                elif _ox.get("ok") and _ox.get("direction") and _ox["direction"] != direction:
+                    # OFF-X disagrees strongly — mild confidence dip
+                    if not elite_confirmed:
+                        confidence = max(90, (confidence or 97) - 1)
+            except Exception:
+                pass
+
+        # ── KATCHER AI BETA — momentum catcher (continuation+breakout) ───
+        # 3 catch modes: trend continuation, BB breakout, reversal catch.
+        # Contract: zero side-effects.
+        if _KATCHER_OK and _katcher is not None and direction is not None:
+            try:
+                _ka = _katcher(pair, is_otc=is_otc)
+                if _ka.get("ok") and _ka.get("direction") == direction:
+                    _engine_votes.append(direction)
+                    if _ka.get("elite"):
+                        _engine_votes.append(direction)   # double for elite catch
             except Exception:
                 pass
 

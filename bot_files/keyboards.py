@@ -137,12 +137,14 @@ def pair_by_index(market: str, idx: int) -> str:
 
 
 # ── Binary timeframe ──────────────────────────────────────
-def binary_tf_kb(market: str, broker: str, pair_idx: int) -> InlineKeyboardMarkup:
+def binary_tf_kb(market: str, broker: str, pair_idx: int,
+                 has_access: bool = False) -> InlineKeyboardMarkup:
     rows = []
     # ⚡ 15-second timeframe — OTC only (Pocket Option / Quotex)
     if market == "otc":
+        _15s_text = "⚡ 15 Seconds" if has_access else "⚡ 15 Seconds  🔒 VIP"
         rows.append([InlineKeyboardButton(
-            text="⚡ 15 Seconds  🔒 VIP",
+            text=_15s_text,
             callback_data=f"tf:{market}:{broker}:{pair_idx}:15s",
         )])
     for label, code in BINARY_TIMEFRAMES:

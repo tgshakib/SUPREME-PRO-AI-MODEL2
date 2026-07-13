@@ -123,16 +123,17 @@ async def cb_pair(call: CallbackQuery):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"<b>SELECT ▸ TRADING TIME</b>"
     )
+    _has_access = db.has_active_access(user_id) or _is_admin(user_id)
     if os.path.exists(_TIME_PHOTO):
         await show_photo_screen(
             call.bot, call.message.chat.id,
             photo_path=_TIME_PHOTO,
             caption=_tf_caption,
-            reply_markup=binary_tf_kb(market, broker, int(idx)),
+            reply_markup=binary_tf_kb(market, broker, int(idx), has_access=_has_access),
         )
     else:
         await show_screen(call.bot, call.message.chat.id, _tf_caption,
-                          binary_tf_kb(market, broker, int(idx)))
+                          binary_tf_kb(market, broker, int(idx), has_access=_has_access))
 
 
 @router.callback_query(F.data.startswith("tf:"))
