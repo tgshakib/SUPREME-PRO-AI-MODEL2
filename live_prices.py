@@ -376,6 +376,63 @@ def _fetch_stooq(stooq_sym: str) -> Optional[float]:
     return None
 
 
+# ── Stooq micro-momentum — compare two sequential price reads ────────────────
+# Used by the 1m binary signal engine as a live-tape direction check when
+# all other engines (yfinance, tradingview-ta) are unavailable.
+
+_STOOQ_MOMENTUM_CACHE: dict[str, tuple[float, str, float]] = {}
+_STOOQ_MOMENTUM_TTL = 12.0  # seconds — 1m candles need fresh reads
+
+
+def get_stooq_momentum(pair: str) -> Optional[tuple[str, float]]:
+    """Return ('BUY'/'SELL', strength 0-1) from live Stooq price change.
+
+    Compares the currently-cached Stooq price (older read) with a forced-fresh
+    fetch to detect real-time micro-movement.  No sleep required — the cache
+    already holds a stale price from the last candle cycle.
+    Returns None when no Stooq symbol exists or the move is too small to
+    determine direction (noise / spread)."""
+    yf_tk = yf_ticker(pair)
+    stooq_sym: Optional[str] = None
+    if yf_tk:
+        stooq_sym = _stooq_sym_for_ticker(yf_tk)
+    if not stooq_sym:
+        # Try to derive from pair name directly (OTC pairs, exotic pairs)
+        clean = re.sub(r"[\s\(\)〔〕/]", "", pair.upper())
+        clean = re.sub(r"OTC$", "", clean)
+        if len(clean) == 6 and clean.isalpha():
+            stooq_sym = clean.lower()
+    if not stooq_sym:
+        return None
+
+    now = time.time()
+    cached_mom = _STOOQ_MOMENTUM_CACHE.get(stooq_sym)
+    if cached_mom and (now - cached_mom[0]) < _STOOQ_MOMENTUM_TTL:
+        return (cached_mom[1], cached_mom[2])
+
+    # p_old = last price already in cache (may be a few seconds old)
+    old_entry = _STOOQ_FX_CACHE.get(stooq_sym)
+    p_old = old_entry[1] if old_entry else None
+
+    # p_new = forced-fresh Stooq fetch
+    _STOOQ_FX_CACHE.pop(stooq_sym, None)
+    p_new = _fetch_stooq(stooq_sym)
+
+    if p_old is None or p_new is None or p_old <= 0 or p_new <= 0:
+        return None
+
+    pip = pip_size(pair)
+    diff = p_new - p_old
+    if abs(diff) < pip * 0.5:   # below half a pip — noise / spread
+        return None
+
+    direction = "BUY" if diff > 0 else "SELL"
+    strength  = min(1.0, abs(diff) / max(pip * 0.0001, pip * 4))
+    strength  = max(0.30, strength)
+    _STOOQ_MOMENTUM_CACHE[stooq_sym] = (now, direction, strength)
+    return (direction, strength)
+
+
 # ── Binance — real-time crypto prices (no API key, sub-second latency) ──────
 # Binance is the world's largest crypto exchange. Their public REST API
 # requires no authentication and returns the live last traded price for

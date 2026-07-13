@@ -35,7 +35,8 @@ from config import (
     FOREX_PAIRS, FOREX_TIMEFRAMES, FP_ACCOUNT_SIZES,
 )
 from forex_engine import (
-    _generate_levels, _signal_text, _shift_for_limit, _ai_analysis_block,
+    _generate_levels, _generate_levels_force_fallback,
+    _signal_text, _shift_for_limit, _ai_analysis_block,
     last_smart as _fx_last_smart, _SIGNAL_SMART as _FX_SIGNAL_SMART,
     _KIND_TITLE, _KIND_TAGLINE, _is_pair_24_7, _is_weekend,
 )
@@ -385,8 +386,15 @@ async def _send_fp_signal(bot: Bot, fp: dict):
     pair = fp["pair"]
     tf_label = _tf_label(fp["tf"] or "")
 
-    # Generate levels using the live chart bias just like normal forex
-    direction, entry, tps, sl, dec, _pat = _generate_levels(pair, max_tp=1)
+    # Generate levels using the live chart bias just like normal forex.
+    # Fall back to Stooq-based force-fallback if yfinance / bias unavailable.
+    _lvls = _generate_levels(pair, max_tp=1)
+    if _lvls is None or _lvls[0] is None:
+        _lvls = _generate_levels_force_fallback(pair, 1)
+    if _lvls is None or _lvls[0] is None:
+        print(f"[funded_pass] no levels available for {pair} — skipping signal")
+        return
+    direction, entry, tps, sl, dec, _pat = _lvls
     pip = live_pip_size(pair)
 
     # Funded-pass SL clamp — standard forex only: 15–25 pips hard cap.

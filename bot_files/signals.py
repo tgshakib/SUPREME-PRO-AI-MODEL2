@@ -369,6 +369,53 @@ def generate_signal(
         except Exception:
             one_min = None
 
+    # ── 1m TradingView TA ENGINE — real-time fill when yfinance absent ────
+    if _is_1m_tf and one_min is None:
+        try:
+            from candle_feed import get_single_tf as _tv_single
+            _tv_1m  = _tv_single(pair, "1m")
+            _tv_5m  = _tv_single(pair, "5m")
+            _tv_15m = _tv_single(pair, "15m")
+            if _tv_1m and _tv_1m.get("ok") and _tv_1m.get("bias") not in ("NEUTRAL", None):
+                _tv1_dir = _tv_1m["bias"]
+                _tv1_str = float(_tv_1m.get("strength", 0.5))
+                _tv1_rsi = float(_tv_1m.get("rsi", 50))
+                _tv_agree = 1
+                if _tv_5m  and _tv_5m.get("bias")  == _tv1_dir: _tv_agree += 1
+                if _tv_15m and _tv_15m.get("bias") == _tv1_dir: _tv_agree += 1
+                _rsi_ok = ((_tv1_dir == "BUY"  and _tv1_rsi < 78) or
+                           (_tv1_dir == "SELL" and _tv1_rsi > 22))
+                if _tv_agree >= 2 and _rsi_ok:
+                    _tv_wt = _tv_agree * 7
+                    one_min = {
+                        "direction": _tv1_dir,
+                        "weighted":  _tv_wt,
+                        "elite":     _tv_agree >= 3,
+                        "reasons":   [
+                            f"TV 1m {_tv1_dir} strength={_tv1_str:.2f}",
+                            f"{_tv_agree}/3 TF agree (1m+5m+15m)",
+                        ],
+                        "tv_based":  True,
+                    }
+        except Exception:
+            pass
+
+    # ── Stooq live-tape momentum — ultimate 1m fallback ─────────────────
+    if _is_1m_tf and one_min is None:
+        try:
+            from live_prices import get_stooq_momentum as _sq_mom
+            _sq = _sq_mom(pair)
+            if _sq is not None:
+                one_min = {
+                    "direction": _sq[0],
+                    "weighted":  int(round(_sq[1] * 14)),
+                    "elite":     _sq[1] >= 0.7,
+                    "reasons":   [f"Stooq live tape: {_sq[0]} strength={_sq[1]:.2f}"],
+                    "stooq_based": True,
+                }
+        except Exception:
+            pass
+
     # ── PO OTC ENGINE — Pocket Option exclusive, highest priority ────────
     # Analyzes real PO WebSocket candles when PO_SSID is set (using_po_data=True
     # → no mirror needed). Falls back to yfinance with PO-tuned algorithms

@@ -376,6 +376,52 @@ def _fetch_stooq(stooq_sym: str) -> Optional[float]:
     return None
 
 
+# ── Stooq micro-momentum — compare two sequential price reads ────────────────
+_STOOQ_MOMENTUM_CACHE: dict[str, tuple[float, str, float]] = {}
+_STOOQ_MOMENTUM_TTL = 12.0
+
+
+def get_stooq_momentum(pair: str) -> Optional[tuple[str, float]]:
+    """Return ('BUY'/'SELL', strength 0-1) from live Stooq price change."""
+    import re as _re
+    yf_tk = yf_ticker(pair)
+    stooq_sym: Optional[str] = None
+    if yf_tk:
+        stooq_sym = _stooq_sym_for_ticker(yf_tk)
+    if not stooq_sym:
+        clean = _re.sub(r"[\s\(\)〔〕/]", "", pair.upper())
+        clean = _re.sub(r"OTC$", "", clean)
+        if len(clean) == 6 and clean.isalpha():
+            stooq_sym = clean.lower()
+    if not stooq_sym:
+        return None
+
+    now = time.time()
+    cached_mom = _STOOQ_MOMENTUM_CACHE.get(stooq_sym)
+    if cached_mom and (now - cached_mom[0]) < _STOOQ_MOMENTUM_TTL:
+        return (cached_mom[1], cached_mom[2])
+
+    old_entry = _STOOQ_FX_CACHE.get(stooq_sym)
+    p_old = old_entry[1] if old_entry else None
+
+    _STOOQ_FX_CACHE.pop(stooq_sym, None)
+    p_new = _fetch_stooq(stooq_sym)
+
+    if p_old is None or p_new is None or p_old <= 0 or p_new <= 0:
+        return None
+
+    pip = pip_size(pair)
+    diff = p_new - p_old
+    if abs(diff) < pip * 0.5:
+        return None
+
+    direction = "BUY" if diff > 0 else "SELL"
+    strength  = min(1.0, abs(diff) / max(pip * 0.0001, pip * 4))
+    strength  = max(0.30, strength)
+    _STOOQ_MOMENTUM_CACHE[stooq_sym] = (now, direction, strength)
+    return (direction, strength)
+
+
 # ── CoinGecko — real-time crypto prices (no API key required) ────────────
 # CoinGecko's public /simple/price endpoint is free, requires no key, and
 # returns live prices updated every ~30 s. Used as a fallback for all
