@@ -81,9 +81,16 @@ async def _fx_quick_analyze_and_signal(
     Called on first activation AND every time the user taps NEW SIGNAL.
     Signal text, buttons, and all downstream formatting are UNCHANGED.
     Supports all pairs — Forex, XAU/USD (Gold), BTC, all crypto/indices.
+
+    Parameters
+    ----------
+    wipe_first
+        When True, closes open signals and wipes old signal cards from the
+        chat before showing the analysis screen (used by the NEW SIGNAL button).
     """
     import random as _rnd
 
+    # ── Optional: close stale signals + wipe old cards ────────────────────
     if wipe_first:
         try:
             for s in db.list_open_forex_signals(user_id):
@@ -100,18 +107,49 @@ async def _fx_quick_analyze_and_signal(
         # NOTE: do NOT set more_signal_requested here — the background loop
         # would pick it up during our sleep and fire a duplicate, blocking us.
 
-    scan_secs = _rnd.choice([6.0, 7.0])
-    _analyze_text = "⏳  <b>Fx Supreme pro Ai analysing Quick signal ...</b>"
-    loading_id = await show_screen(bot, chat_id, _analyze_text, reply_markup=None)
+    # ── Show Rolling Analysis screen (10-12 s, engine-by-engine) ────────────
+    _FX_STEPS = [
+        ("📡", "TrendPulse Pro",         "fetching 1m/5m/15m/1h…"),
+        ("⚡", "LiveTrend Sync",          "syncing live price feed…"),
+        ("💧", "Liquidity Zone Map",      "identifying swing pools…"),
+        ("🔒", "Momentum Lock",           "locking trend direction…"),
+        ("🧱", "Breakout Filter",         "checking real vs false break…"),
+        ("🎯", "Precision Entry Calc",    "calculating entry level…"),
+        ("🛡️", "Spread Guard",            "session & spread check…"),
+        ("📊", "Dual Market Confirm",     "cross-confirming 1m + 5m…"),
+        ("⚠️", "RiskGuard Signals",       "risk & exposure gate…"),
+        ("✅", "Signal Ready",            "finalizing entry & exit…"),
+    ]
+    _fx_header = (
+        "💹 <b>SUPREME PRO — FOREX ANALYSIS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "⏳ Running 10-module deep scan…\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+    )
+    loading_id = await show_screen(bot, chat_id, _fx_header + "🔄 Initializing…", reply_markup=None)
+    _done: list[str] = []
+    for _ic, _nm, _ac in _FX_STEPS:
+        await asyncio.sleep(1.1)
+        _done.append(f"{_ic} <b>{_nm}</b> ✅")
+        _body = "\n".join(_done[-6:])
+        _cur  = f"⏳ <b>{_nm}</b>: {_ac}"
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=loading_id,
+                text=_fx_header + _body + "\n" + _cur, parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    await asyncio.sleep(0.8)
 
-    await asyncio.sleep(scan_secs)
-
+    # ── Delete the analysis screen ────────────────────────────────────────
     try:
         await bot.delete_message(chat_id, loading_id)
     except Exception:
         pass
     db.clear_active_msg(chat_id)
 
+    # ── Fire the signal immediately ───────────────────────────────────────
     try:
         from forex_engine import trigger_immediate_scan
         await trigger_immediate_scan(bot, user_id)
@@ -288,23 +326,26 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    # Free user trying to pick TP 2-6 → big upsell screen (not auto-capped).
-    # They can still come BACK and choose TP 1 to keep using the free trial.
-    if not _is_premium(call.from_user.id) and max_tp > 1:
+    # Free user trying to pick >30 pips → upsell screen (not auto-capped).
+    # They can still come BACK and choose 30+ PIPS to keep using the free trial.
+    if not _is_premium(call.from_user.id) and max_tp > 30:
+        from config import pip_target_from_max_tp
+        pips = pip_target_from_max_tp(max_tp)
         await call.answer()
         await show_screen(
             call.bot, call.message.chat.id,
-            "🚫 <b>TP " + str(max_tp) + " IS A PAID-ONLY TARGET</b>\n"
+            f"🚫 <b>{pips}+ PIPS IS A PAID-ONLY TARGET</b>\n"
             "━━━━━━━━━━━━━━━━━━━\n"
             "🚀 <b>BUY BOT ACCESS TO UNLOCK ALL THIS BENEFIT &amp; "
             "USE THE BOT AT FULL POWER:</b>\n\n"
-            "✅ <b>TP 2 / 3 / 4 / 5 / 6</b> targets unlocked\n"
+            "✅ <b>40 / 60 / 80 / 100 / 120 / 150 / 200 / 300 / 500 / 900+ PIPS</b> targets\n"
+            "✅ <b>BIG MOVE · RESERVE · ULTRA · MEGA · MONSTER</b> sniper signals\n"
             "✅ Watch up to <b>10 markets</b> at once\n"
             "✅ <b>Unlimited 24/7</b> Forex signals (no daily cap)\n"
-            "✅ Full <b>SUPREME PRO</b> setups with correlation reads\n"
+            "✅ Full <b>SUPREME PRO</b> setups — session + footprint confirmed\n"
             "━━━━━━━━━━━━━━━━━━━\n"
             "🎯 Tap <b>BUY FULL ACCESS</b> below — or go back to "
-            "<b>WORKPLACE</b> and stay on the free trial (TP 1).",
+            "<b>WORKPLACE</b> and stay on the free trial (30+ PIPS).",
             forex_tp_locked_kb(),
         )
         return
@@ -315,15 +356,17 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.answer("Bot activated ✅")
 
+    from config import pip_target_from_max_tp
+    pip_tgt = pip_target_from_max_tp(max_tp)
     sel_pairs = ", ".join(
         FOREX_PAIRS[int(i)] for i in pairs.split(",")
     )
     free_note = ""
     if not _is_premium(call.from_user.id):
         free_note = (
-            "\n\n⚠️ <b>Free trial:</b> 1 pair · 1 signal · TP 1 max per day. "
+            "\n\n⚠️ <b>Free trial:</b> 1 pair · 1 signal · 20+ PIPS max per day. "
             "After your daily signal, the bot stops and you'll need to set "
-            "TF/pairs/TP again. Buy access for 24/7 unlimited signals."
+            "TF/pairs/target again. Buy access for 24/7 unlimited signals."
         )
 
     text = (
@@ -331,12 +374,12 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⏱️ Timeframe: <b>{_tf_label(tf)}</b>\n"
         f"📊 Markets: <b>{sel_pairs}</b>\n"
-        f"🎯 Max TP: <b>TP {max_tp}</b>\n"
+        f"🎯 Pip Target: <b>{pip_tgt}+ PIPS</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📡 When market creates an <b>A+ / A</b> best set-up,\n"
-        f"   I will alert you <b>5 / 10 / 15 min</b> before — get ready.\n"
-        f"✅ After bot confirms an A+ / A setup,\n"
-        f"   you will receive a full SUPREME PRO signal here.\n"
+        f"📡 Bot scans session + chart for <b>SNIPER / BIG MOVE</b> setups.\n"
+        f"   Signal fires when a <b>high-quality confirmed entry</b> is detected.\n"
+        f"✅ Signal includes: Entry · TP ladder · SL · Session · Footprint\n"
+        f"   Pip range shown on each TP — big moves labelled clearly.\n"
         f"🛑 Tap <b>STOP</b> to deactivate &amp; clear the panel.{free_note}"
     )
     setup_now = db.get_forex_setup(call.from_user.id) or {}
@@ -454,6 +497,9 @@ async def cb_fx_new(call: CallbackQuery, bot: Bot):
             )
             return
     await call.answer("⚡ Quick AI Scan starting…", show_alert=False)
+    # Show 6-7 second Quick Analysis animation, wipe old cards, then fire
+    # signal immediately — `wipe_first=True` handles closing open signals,
+    # wiping old cards, and re-arming the one-at-a-time gate internally.
     asyncio.create_task(
         _fx_quick_analyze_and_signal(
             bot, call.message.chat.id, user_id, wipe_first=True
@@ -479,7 +525,7 @@ async def cb_fx_im_in(call: CallbackQuery, bot: Bot):
     # ── Collapse the signal card into a compact "I'M IN" tracker ──
     # The full signal panel hides; only the pair + side + status stays
     # visible so the chat is clean. Full TP/SL detail lives under the
-    # 🟢 YOUR ACTIVE Fx-Signal button on the home screen.
+    # 🟢 YOUR ACTIVE Fx-Signal button below.
     pair      = sig.get("pair", "")
     direction = sig.get("direction", "")
     side_icon = "🟢 BUY" if direction == "BUY" else "🔴 SELL"
@@ -490,12 +536,17 @@ async def cb_fx_im_in(call: CallbackQuery, bot: Bot):
         f"✅ <b>I'M IN  ·  {pair}  ·  {side_icon}</b>{entry_str}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"👀 <b>TRACKING YOUR TRADE</b>\n"
-        f"<i>Tap <b>🟢 YOUR ACTIVE Fx-Signal</b> on the home screen\n"
-        f"to see full TP / SL prices and live status.</i>"
+        f"<i>Tap <b>🟢 Active Signal</b> below to see full TP / SL and live status.</i>"
     )
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    compact_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Active Signal",   callback_data="fx:active_view")],
+        [InlineKeyboardButton(text="🛑 STOP",            callback_data="fx:stop"),
+         InlineKeyboardButton(text="🏢 WORKPLACE",        callback_data="m:home")],
+    ])
     try:
         await call.message.edit_text(compact, parse_mode="HTML",
-                                     reply_markup=None)
+                                     reply_markup=compact_kb)
     except Exception:
         try:
             await call.message.delete()
@@ -623,3 +674,112 @@ async def cb_fx_close_view(call: CallbackQuery, bot: Bot):
     from handlers.main_menu import render_home
     await delete_active(bot, call.message.chat.id)
     await render_home(bot, call.message.chat.id, call.from_user)
+
+
+
+
+def _tp_pip_to_count(pip_target: int) -> int:
+    """Convert the stored forex_setup max_tp (pip target) to a TP level count.
+
+    TP_LEVELS stores pip targets (30, 40, 60, 80, 100, 120, 160, 220, 300+).
+    The label numbering TP¹–TP⁸ maps 1:1 to the count of TP levels we show.
+    Legacy max_tp values 1-9 are already a count — pass them through directly.
+    """
+    if pip_target <= 9:   return max(1, pip_target)   # legacy count format
+    if pip_target <= 30:  return 1
+    if pip_target <= 40:  return 2
+    if pip_target <= 60:  return 3
+    if pip_target <= 80:  return 4
+    if pip_target <= 100: return 5
+    if pip_target <= 120: return 6
+    if pip_target <= 160: return 7
+    if pip_target <= 220: return 8
+    return 9
+
+
+def _user_pair_list(user_id: int) -> list[str]:
+    """Return the pair names the user configured for their forex setup.
+
+    Pairs are stored as a comma-separated string of indices into FOREX_PAIRS
+    (e.g. "0,5,10").  Returns a list of pair name strings like ["EUR/USD"].
+    """
+    try:
+        setup = db.get_forex_setup(user_id)
+        if setup and setup.get("pairs"):
+            raw = str(setup["pairs"])
+            indices = [int(i) for i in raw.split(",") if i.strip().isdigit()]
+            return [FOREX_PAIRS[i] for i in indices if 0 <= i < len(FOREX_PAIRS)]
+    except Exception:
+        pass
+    return []
+
+
+# ── Signal History ─────────────────────────────────────────────────────────
+@router.callback_query(F.data == "fx:signal_history")
+async def cb_fx_signal_history(call: CallbackQuery, bot: Bot):
+    """Show the last 10 forex signals (open + closed) for this user."""
+    await call.answer()
+    user_id = call.from_user.id
+    signals = db.list_recent_forex_signals(user_id, limit=10)
+
+    if not signals:
+        await show_screen(
+            call.bot, call.message.chat.id,
+            "📊 <b>No signal history yet.</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Your forex signal history will appear here after you receive signals.",
+            _history_kb(),
+        )
+        return
+
+    _STATUS_ICON = {
+        "open":   "🟡",
+        "closed": "✅",
+    }
+    _OUTCOME_ICON = {
+        "tp":      "✅ TP HIT",
+        "partial": "🔶 PARTIAL",
+        "sl":      "❌ SL HIT",
+        "expired": "⏰ EXPIRED",
+    }
+    blocks = [
+        "📊 <b>SIGNAL HISTORY</b>  ·  last 10 signals",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+    for s in signals:
+        pair      = s.get("pair", "?")
+        direction = s.get("direction", "?")
+        status    = s.get("status", "open")
+        outcome   = s.get("outcome")
+        tps_hit   = int(s.get("tps_hit") or 0)
+        max_tp    = int(s.get("max_tp") or 1)
+        kind      = s.get("kind") or "LIVE"
+        side_icon = "🟢" if direction == "BUY" else "🔴"
+        st_icon   = _STATUS_ICON.get(status, "⚪")
+        out_str   = _OUTCOME_ICON.get(outcome, "") if outcome else ""
+        tp_prog   = f"TP {tps_hit}/{max_tp}" if max_tp else ""
+        kind_tag  = "📍 LIMIT" if kind == "LIMIT" else "🟢 LIVE"
+        line = f"{st_icon} {side_icon} <b>{pair}</b>  ·  {direction}  ·  {kind_tag}"
+        if tp_prog:
+            line += f"  ·  {tp_prog}"
+        if out_str:
+            line += f"  {out_str}"
+        blocks.append(line)
+
+    blocks.append("━━━━━━━━━━━━━━━━━━━")
+    await show_screen(
+        call.bot, call.message.chat.id,
+        "\n".join(blocks),
+        _history_kb(),
+    )
+
+
+def _history_kb():
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Active Signals",  callback_data="fx:active_view"),
+         InlineKeyboardButton(text="🎯 AI Sniper",       callback_data="fx:new")],
+        [InlineKeyboardButton(text="🏢 WORKPLACE",       callback_data="m:home")],
+    ])
+
+

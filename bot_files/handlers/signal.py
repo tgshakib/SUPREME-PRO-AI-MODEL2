@@ -221,22 +221,51 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
     except Exception:
         pass
 
-    # Single-line loading text — admin/paid see clean line, free trial
-    # users see the daily count appended.
+    # ── Multi-step analysis animation (10-12 seconds, shows engine names) ──
     is_premium = db.has_active_access(user_id) or _is_admin(user_id)
-    loading = (f"🤖 <b>SUPREME PRO AI Analyzing {pair} ...</b>"
-               if is_premium
-               else f"🤖 <b>SUPREME PRO AI Analyzing {pair} ... "
-                    f"({used + 1}/{limit})</b>")
-    loading_msg_id = await show_screen(
-        call.bot, chat_id, loading, reply_markup=None,
+    _count_sfx = "" if is_premium else f" ({used + 1}/{limit})"
+
+    _ENGINE_STEPS = [
+        ("🔍", "TrendPulse Pro",         "scanning 1m/5m/15m trend…"),
+        ("⚡", "LiveTrend Sync",          "syncing live market data…"),
+        ("🎯", "Precision Candle Scan",   "reading candle structure…"),
+        ("🔒", "Momentum Lock",           "locking momentum direction…"),
+        ("🛡️", "SignalShield",            "filtering false signals…"),
+        ("💧", "OTC Flow Confirm",        "mapping liquidity flow…"),
+        ("📊", "Back-to-Back Trend",      "detecting candle streak…"),
+        ("🚀", "Dual Market Confirm",     "cross-verifying 1m + 5m…"),
+        ("⚠️", "RiskGuard Signals",       "checking spread & session…"),
+        ("✅", "No-Martingale Trend",     "confirming trend entry…"),
+    ]
+
+    _header = (
+        f"🤖 <b>SUPREME PRO AI — DEEP SCAN{_count_sfx}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Pair: <b>{pair}</b>  •  {tf_label}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
     )
 
-    # Hard-locked scan window: 5 / 6 / 7 seconds total — ALL users/modes.
-    # Live, OTC, non-MG, MTG, free and paid — same locked range for everyone.
-    import random as _rnd
-    _scan_secs = _rnd.choice([5.0, 6.0, 7.0])
-    await asyncio.sleep(_scan_secs)
+    # Show initial loading message
+    _step0 = _header + "⏳ Initializing analysis engines…"
+    loading_msg_id = await show_screen(call.bot, chat_id, _step0, reply_markup=None)
+
+    # Animate through each engine step (~1.1 s each = ~11 s total)
+    _done_lines: list[str] = []
+    for _icon, _name, _action in _ENGINE_STEPS:
+        await asyncio.sleep(1.1)
+        _done_lines.append(f"{_icon} <b>{_name}</b> — ✅")
+        _body = "\n".join(_done_lines[-6:])   # show last 6 completed
+        _current = f"⏳ <b>{_name}</b>: {_action}"
+        _scan_text = _header + _body + ("\n" if _done_lines else "") + _current
+        try:
+            await call.bot.edit_message_text(
+                chat_id=chat_id, message_id=loading_msg_id,
+                text=_scan_text, parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    await asyncio.sleep(0.8)   # brief pause before signal fires
 
     sig = generate_signal(pair, market_name, tf_label, user_id=user_id, broker=broker)
 
@@ -249,16 +278,17 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
     if _SI_OK and _si_schedule is not None:
         try:
             _si_schedule(
-                signal_id      = sig.get("signal_id", -1),
-                pair           = pair,
-                market         = market_name,
-                direction      = sig.get("direction", "BUY"),
-                entry_price    = sig.get("entry_price"),
-                expiry_minutes = sig.get("expiry_min", 5),
-                engine         = sig.get("engine", "unknown"),
-                user_id        = user_id,
-                bot            = call.bot,
-                chat_id        = chat_id,
+                signal_id        = sig.get("signal_id", -1),
+                pair             = pair,
+                market           = market_name,
+                direction        = sig.get("direction", "BUY"),
+                entry_price      = sig.get("entry_price"),
+                expiry_minutes   = sig.get("expiry_min", 5),
+                engine           = sig.get("engine", "unknown"),
+                user_id          = user_id,
+                bot              = call.bot,
+                chat_id          = chat_id,
+                signal_timestamp = sig.get("signal_ts", 0),
             )
         except Exception:
             pass

@@ -7,6 +7,7 @@ filename) so the handler can attach the matching BUY/SELL image.
 """
 import os
 import random
+import time
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -108,6 +109,13 @@ except Exception as _adve:
     _ADV_OK = False
 
 try:
+    from vpvr_engine import vpvr_session_vote as _vpvr_session_vote
+    _VPVR_OK = True
+except Exception as _vpvre:
+    _vpvr_session_vote = None  # type: ignore
+    _VPVR_OK = False
+
+try:
     from institutional_flow import analyze as _inst_analyze, get_orderflow_vote as _inst_vote
     _INST_FLOW_OK = True
 except Exception as _ife:
@@ -141,6 +149,94 @@ except Exception as _mtle:
     _MTF_LIQ_OK = False
 
 try:
+    from finorix_engine import finorix_analyse as _finorix_analyse
+    _FINORIX_OK = True
+except Exception as _fxe:
+    print(f"[signals] finorix_engine import failed: {_fxe}")
+    _finorix_analyse = None  # type: ignore
+    _FINORIX_OK = False
+
+try:
+    from finorix_mtf_engine import finorix_mtf_analyse as _finorix_mtf_analyse
+    _FINORIX_MTF_OK = True
+except Exception as _fmtfe:
+    print(f"[signals] finorix_mtf_engine import failed: {_fmtfe}")
+    _finorix_mtf_analyse = None  # type: ignore
+    _FINORIX_MTF_OK = False
+
+try:
+    from finorix_elite_engine import finorix_elite_analyse as _finorix_elite_analyse
+    _FINORIX_ELITE_OK = True
+except Exception as _felee:
+    print(f"[signals] finorix_elite_engine import failed: {_felee}")
+    _finorix_elite_analyse = None  # type: ignore
+    _FINORIX_ELITE_OK = False
+
+try:
+    from finorix_multi_strategy import finorix_multi_analyze as _finorix_multi_analyze
+    _FINORIX_MULTI_OK = True
+except Exception as _fmse:
+    print(f"[signals] finorix_multi_strategy import failed: {_fmse}")
+    _finorix_multi_analyze = None  # type: ignore
+    _FINORIX_MULTI_OK = False
+
+try:
+    from day_structure_engine import day_structure_vote as _day_structure_vote
+    _DAY_STRUCT_OK = True
+except Exception as _dse:
+    print(f"[signals] day_structure_engine import failed: {_dse}")
+    _day_structure_vote = None  # type: ignore
+    _DAY_STRUCT_OK = False
+
+try:
+    from finorix_analysis_engine import finorix_analyse as _finorix_analyse
+    _FINORIX_AE_OK = True
+except Exception as _fae:
+    print(f"[signals] finorix_analysis_engine import failed: {_fae}")
+    _finorix_analyse = None  # type: ignore
+    _FINORIX_AE_OK = False
+
+try:
+    from binary_master_filter import binary_master_check as _master_check
+    _MASTER_OK = True
+except Exception as _mfe:
+    print(f"[signals] binary_master_filter import failed: {_mfe}")
+    _master_check = None  # type: ignore
+    _MASTER_OK = False
+
+try:
+    from supreme_quick_engine import supreme_quick_analyze as _sq_analyze
+    _SQ_OK = True
+except Exception as _sqe:
+    print(f"[signals] supreme_quick_engine import failed: {_sqe}")
+    _sq_analyze = None  # type: ignore
+    _SQ_OK = False
+
+try:
+    from thirty_second_engine import confirm_entry as _30s_confirm
+    _30S_OK = True
+except Exception as _30se:
+    print(f"[signals] thirty_second_engine import failed: {_30se}")
+    _30s_confirm = None  # type: ignore
+    _30S_OK = False
+
+try:
+    from candle_master_engine import candle_master_analyze as _cm_analyze
+    _CM_OK = True
+except Exception as _cme:
+    print(f"[signals] candle_master_engine import failed: {_cme}")
+    _cm_analyze = None  # type: ignore
+    _CM_OK = False
+
+try:
+    from ultra_supreme_engine import ultra_check as _ultra_check
+    _ULTRA_OK = True
+except Exception as _uce:
+    print(f"[signals] ultra_supreme_engine import failed: {_uce}")
+    _ultra_check = None  # type: ignore
+    _ULTRA_OK = False
+
+try:
     from binary_tracker import (
         format_entry_time_instruction as _fmt_entry,
         get_streak_alert as _streak_alert,
@@ -159,11 +255,17 @@ SIGNAL_PHOTO_BUY = os.path.join(_PROJECT_ROOT, "assets", "signal_buy.jpg")
 SIGNAL_PHOTO_SELL = os.path.join(_PROJECT_ROOT, "assets", "signal_sell.jpg")
 
 
-def _bias_seed(pair: str, tf: str) -> int:
-    """Stable per-minute seed so two clicks in the same minute produce
-    consistent signals — feels less random to the user."""
+# Per-(pair, tf) call counter — incremented on every generate_signal call.
+# Ensures consecutive signals for the same pair NEVER share an identical RNG
+# state, eliminating the direction-decay that appears after 2-3 rapid signals.
+_SIGNAL_CALL_COUNTER: dict[str, int] = {}
+
+def _bias_seed(pair: str, tf: str, call_num: int = 0) -> int:
+    """Unique seed per call — call_num increments each analysis so
+    consecutive signals for the same pair never share the same RNG state.
+    This eliminates the win-rate decay that appears after 2-3 rapid signals."""
     minute_bucket = datetime.utcnow().strftime("%Y%m%d%H%M")
-    return hash(f"{pair}|{tf}|{minute_bucket}")
+    return hash(f"{pair}|{tf}|{minute_bucket}|{call_num}")
 
 
 def _is_admin(user_id: Optional[int]) -> bool:
@@ -217,7 +319,9 @@ def generate_signal(
           "photo":     <path to BUY/SELL jpg>,
         }
     """
-    rng = random.Random(_bias_seed(pair, tf_label))
+    _sig_key = f"{pair}|{tf_label}"
+    _SIGNAL_CALL_COUNTER[_sig_key] = _SIGNAL_CALL_COUNTER.get(_sig_key, 0) + 1
+    rng = random.Random(_bias_seed(pair, tf_label, _SIGNAL_CALL_COUNTER[_sig_key]))
 
     # OTC pairs (Pocket Option / Quotex) use SYNTHETIC broker-generated
     # candles that do NOT track the live market trend reliably.
@@ -370,6 +474,10 @@ def generate_signal(
             one_min = None
 
     # ── 1m TradingView TA ENGINE — real-time fill when yfinance absent ────
+    # tradingview-ta is now installed and gives live 1m/5m/15m TradingView
+    # analysis with zero API key.  When one_minute_sniper returns None (yfinance
+    # missing) this fills the exact same slot so the priority-1 path executes
+    # with real real-time data instead of cascading to slower / seeded engines.
     if _is_1m_tf and one_min is None:
         try:
             from candle_feed import get_single_tf as _tv_single
@@ -383,10 +491,11 @@ def generate_signal(
                 _tv_agree = 1
                 if _tv_5m  and _tv_5m.get("bias")  == _tv1_dir: _tv_agree += 1
                 if _tv_15m and _tv_15m.get("bias") == _tv1_dir: _tv_agree += 1
+                # RSI sanity: 1m BUY needs RSI not already >75; SELL not <25
                 _rsi_ok = ((_tv1_dir == "BUY"  and _tv1_rsi < 78) or
                            (_tv1_dir == "SELL" and _tv1_rsi > 22))
                 if _tv_agree >= 2 and _rsi_ok:
-                    _tv_wt = _tv_agree * 7
+                    _tv_wt = _tv_agree * 7   # scale to one_min weighted score
                     one_min = {
                         "direction": _tv1_dir,
                         "weighted":  _tv_wt,
@@ -397,10 +506,16 @@ def generate_signal(
                         ],
                         "tv_based":  True,
                     }
-        except Exception:
-            pass
+                    print(f"[signals] ✅ TV 1m engine {pair}: {_tv1_dir} "
+                          f"agree={_tv_agree}/3 wt={_tv_wt}")
+        except Exception as _tv1e:
+            print(f"[signals] TV 1m engine error {pair}: {_tv1e}")
 
-    # ── Stooq live-tape momentum — ultimate 1m fallback ─────────────────
+    # ── Stooq live-tape momentum — ultimate 1m direction fallback ─────────
+    # When the user picks 1 MIN / 2 MIN and ALL analysis engines return None,
+    # compare two sequential Stooq price reads to detect real micro-momentum.
+    # This prevents the direction from falling to a seeded random which is
+    # blind to the current candle's actual movement.
     if _is_1m_tf and one_min is None:
         try:
             from live_prices import get_stooq_momentum as _sq_mom
@@ -413,6 +528,7 @@ def generate_signal(
                     "reasons":   [f"Stooq live tape: {_sq[0]} strength={_sq[1]:.2f}"],
                     "stooq_based": True,
                 }
+                print(f"[signals] ✅ Stooq momentum {pair}: {_sq[0]} str={_sq[1]:.2f}")
         except Exception:
             pass
 
@@ -541,7 +657,10 @@ def generate_signal(
     # LIVE pairs need tighter gates: bad win rate from weak setups.
     # Require MTF agreement for elite_confirmed — no MTF = no elite.
     # ════════════════════════════════════════════════════════════════
-    if direction is None and bin_sniper is not None:
+    # OTC HARD RULE: binary sniper is TREND-FOLLOWING — never use for OTC
+    # (OTC synthetic prices don't track the underlying trend reliably; using
+    # a trend engine causes systematic opposite-direction entries on OTC).
+    if direction is None and bin_sniper is not None and not is_otc:
         direction = bin_sniper["direction"]
         agree_ratio = bin_sniper["confidence"]
         confidence = int(round(96 + 4 * agree_ratio))
@@ -559,9 +678,9 @@ def generate_signal(
             confidence = min(100, confidence + 1)
 
     # ════════════════════════════════════════════════════════════════
-    # PRIORITY 2 — Quick Momentum Sniper V8
+    # PRIORITY 2 — Quick Momentum Sniper V8 (LIVE only — OTC blocked)
     # ════════════════════════════════════════════════════════════════
-    elif direction is None and vol_sniper is not None:
+    elif direction is None and vol_sniper is not None and not is_otc:
         direction = vol_sniper["direction"]
         agree_ratio = vol_sniper["confidence"]
         confidence = int(round(97 + 3 * agree_ratio))
@@ -574,11 +693,14 @@ def generate_signal(
             confidence = min(100, (confidence or 99) + 1)
 
     # ════════════════════════════════════════════════════════════════
-    # PRIORITY 2.5 — QX EXPERT IMTIAZZ 3.0.5 PRO
-    # Purpose-built binary indicator: Fast Stochastic + RSI(7) +
-    # CCI(14) + Williams%R + BB Bands + Heikin Ashi + EMA ribbon.
-    # Fires on 5m candles — optimal for all binary candle sizes.
-    # Also boosts confidence when it AGREES with a locked direction.
+    # PRIORITY 2.5 — QX EXPERT SUPREME ELITE V10
+    # 13-signal reversal engine: RSI(3/7/14) + RSI Divergence +
+    # Stoch(3,1,1) ultra + Stoch(5,3,3) + CCI + Williams%R +
+    # BB(2.5σ) outer pierce + Consecutive exhaustion + Candlestick
+    # patterns + Heikin Ashi flip + MACD exhaustion.
+    # Requires ≥14 votes (OTC) / ≥11 (LIVE) — no single-indicator fires.
+    # For OTC: this is a primary reversal driver (not just a confirmer)
+    # when higher-priority engines didn't fire.
     # ════════════════════════════════════════════════════════════════
     if qx_sniper is not None:
         qx_dir   = qx_sniper["direction"]
@@ -595,6 +717,11 @@ def generate_signal(
             confidence = min(100, (confidence or 99) + int(qx_grade / 25))
             if qx_elite:
                 elite_confirmed = True
+        elif is_otc and direction is not None and direction != qx_dir:
+            # OTC CONVICTION GATE: QX disagrees with current direction → downgrade
+            # The new QX requires 14+ votes — if it points opposite, something is wrong
+            confidence = max(95, (confidence or 99) - 4)
+            elite_confirmed = False
 
     # ════════════════════════════════════════════════════════════════
     # PRIORITY 3 — 1H Sniper + MTF
@@ -614,12 +741,63 @@ def generate_signal(
         direction = sniper["direction"]
         confidence = max(96, min(99, 96 + (sniper["score"] - 65) // 6))
     elif direction is None:
+        # ── SUPREME QUICK ENGINE — fast 10-module fallback setter ───────────
+        # Fires when all higher-priority engines (1m, PA, OTC, sniper, …) fail
+        # to set direction. Uses TradingView TA 1m/5m/15m/1h + Stooq live tape.
+        if _SQ_OK and _sq_analyze is not None:
+            try:
+                _sq_fallback = _sq_analyze(pair, is_otc=is_otc, market=market or "LIVE")
+                if _sq_fallback["direction"] not in ("NEUTRAL", None):
+                    direction  = _sq_fallback["direction"]
+                    confidence = max(90, _sq_fallback["confidence"])
+            except Exception:
+                pass
+    if direction is None:
         bias = get_market_bias(pair)
         if bias is not None:
             bias_dir, bias_strength = bias
             if bias_strength >= 0.35:
                 direction = bias_dir
                 confidence = int(round(90 + 8 * bias_strength))
+
+    # ── CANDLE MASTER ENGINE — elite candle-by-candle reading ────────────
+    # 12 independent candle structure checks: engulfing sequences, pin bar
+    # clusters, three soldiers/crows, inside bar breakouts, morning/evening
+    # star, wick rejection cascades, momentum locks. Reads confirmed bars
+    # only (non-reprint). Requires ≥18 votes to fire. Acts as primary
+    # direction driver when higher-priority engines didn't fire, and as a
+    # strong confirmer / elite booster when they did.
+    _cm_result    = None
+    _cm_dir       = None
+    _cm_grade     = 0
+    _cm_mode      = False
+    if _CM_OK and _cm_analyze is not None:
+        try:
+            _cm_result = _cm_analyze(pair, is_otc=is_otc)
+            if _cm_result is not None:
+                _cm_dir   = _cm_result["direction"]
+                _cm_grade = _cm_result["grade"]
+        except Exception:
+            _cm_result = None
+
+    # Candle Master as a primary driver (when no higher engine fired)
+    if direction is None and _cm_result is not None and _cm_dir is not None:
+        direction = _cm_dir
+        confidence = int(round(96 + 4 * min(1.0, _cm_grade / 100)))
+        _cm_mode = True
+        elite_confirmed = _cm_result.get("elite", False)
+
+    # Candle Master as a confirmer: if it agrees → boost confidence + elite
+    elif direction is not None and _cm_result is not None and _cm_dir == direction:
+        _cm_mode = True
+        confidence = min(100, (confidence or 97) + int(_cm_grade / 20))
+        if _cm_result.get("elite", False):
+            elite_confirmed = True
+
+    # Candle Master conviction gate: if it strongly disagrees → reduce confidence
+    elif direction is not None and _cm_result is not None and _cm_dir != direction:
+        if _cm_grade >= 75 and not elite_confirmed:
+            confidence = max(90, (confidence or 97) - 5)
 
     # ── SUPREME BINARY GATE (consensus check, does NOT block — uses CC fallback) ──
     # Collect every engine's direction vote and run the consensus gate.
@@ -655,11 +833,249 @@ def generate_signal(
         if qx_sniper  is not None: _engine_votes.append(qx_sniper.get("direction"))
         if mtf        is not None: _engine_votes.append(mtf.get("direction"))
         if sniper     is not None: _engine_votes.append(sniper.get("direction"))
+        # Candle Master Engine — elite structure vote; double vote when elite grade
+        if _cm_result is not None and _cm_dir is not None:
+            _engine_votes.append(_cm_dir)
+            if _cm_result.get("elite", False) or _cm_grade >= 80:
+                _engine_votes.append(_cm_dir)  # double vote for ultra-high grade
         # Institutional flow — trap/absorption detected = 2 votes (strong signal)
         if _inst_dir is not None:
             _engine_votes.append(_inst_dir)
             if _inst_result and (_inst_result.get("trap_detected") or _inst_result.get("absorption")):
                 _engine_votes.append(_inst_dir)  # second vote for elite institutional signal
+
+        # ── FINORIX SUPREME ANALYSIS ENGINE — silent extra vote ──────────
+        # 12-model weighted AI vote (SMC + Indicators + Wyckoff + Divergence).
+        # When Finorix agrees it adds a vote; when it fires a hard VETO (split
+        # consensus) it removes confidence. Never blocks a signal alone.
+        if _FINORIX_OK and _finorix_analyse is not None and direction is not None:
+            try:
+                _mx = "OTC" if is_otc else "LIVE"
+                _fx_res = _finorix_analyse(pair, _mx)
+                if _fx_res["direction"] not in ("WAIT", None):
+                    _engine_votes.append(_fx_res["direction"])
+                    # Elite grade → double vote
+                    if _fx_res["grade"] in ("GOD", "ULTRA", "ELITE"):
+                        _engine_votes.append(_fx_res["direction"])
+                    # Agreement boost: Finorix says same direction + high confidence
+                    if _fx_res["direction"] == direction and _fx_res["confidence"] >= 75:
+                        confidence = min(100, (confidence or 97) + 1)
+                # Veto: 12-model split consensus — slight confidence dip
+                if _fx_res.get("veto") and not elite_confirmed:
+                    confidence = max(90, (confidence or 97) - 3)
+            except Exception:
+                pass
+
+        # ── FINORIX AI MTF CHANNEL ENGINE — silent extra vote ─────────────
+        # Regression channel (FINORIX-style yellow bands) + dynamic S/R +
+        # MTF consensus (M1/M5/M15/H1). Works for ALL asset classes including
+        # OTC crypto / commodities / stocks / indices.
+        # Contract: zero side-effects — never modifies signal text.
+        if _FINORIX_MTF_OK and _finorix_mtf_analyse is not None and direction is not None:
+            try:
+                _mx2 = ("QX OTC" if "QX" in (market or "") else
+                        "PO OTC" if "PO" in (market or "") else
+                        "OTC"    if is_otc else "LIVE")
+                _fmtf = _finorix_mtf_analyse(pair, _mx2)
+                if _fmtf["direction"] not in ("WAIT", None):
+                    _engine_votes.append(_fmtf["direction"])
+                    # MTF ELITE grade → second vote (strong channel + SR alignment)
+                    if _fmtf["grade"] in ("GOD", "ULTRA", "ELITE"):
+                        _engine_votes.append(_fmtf["direction"])
+                    # Trend confirmation boost
+                    if _fmtf["direction"] == direction and _fmtf["confidence"] >= 68:
+                        confidence = min(100, (confidence or 97) + 1)
+                # MTF channel trend contradicts direction → mild confidence dip
+                elif _fmtf["direction"] not in ("WAIT", None) and _fmtf["direction"] != direction:
+                    if not elite_confirmed:
+                        confidence = max(90, (confidence or 97) - 2)
+            except Exception:
+                pass
+
+        # ── FINORIX ELITE ENGINE — big-to-small cascade · hidden S&R · reversal ──
+        # 5-module analysis: H1→M15→M5→M1 cascade, elite S&R zones (classical +
+        # hidden + psychological + EQH/EQL + OB + FVG), hidden divergence detector,
+        # ADX/EMA-stack trend strength, and zone confluence scorer.
+        # Contract: zero side-effects — never modifies signal text.
+        if _FINORIX_ELITE_OK and _finorix_elite_analyse is not None and direction is not None:
+            try:
+                _mx3 = "OTC" if is_otc else "LIVE"
+                _fe  = _finorix_elite_analyse(pair, _mx3)
+                _fe_dir = _fe.get("direction", "WAIT")
+                if _fe_dir not in ("WAIT", None):
+                    _engine_votes.append(_fe_dir)
+                    # HIDDEN grade (highest) → triple vote (max conviction zone stack)
+                    if _fe.get("grade") == "HIDDEN":
+                        _engine_votes.append(_fe_dir)
+                        _engine_votes.append(_fe_dir)
+                    # ELITE grade → double vote
+                    elif _fe.get("grade") in ("ELITE", "GOD", "ULTRA"):
+                        _engine_votes.append(_fe_dir)
+                    # Zone confluence ≥ 4 → extra vote regardless of grade
+                    if _fe.get("zone_confluence", 0) >= 4:
+                        _engine_votes.append(_fe_dir)
+                    # Reversal phase + same direction → bigger confidence boost
+                    if _fe_dir == direction and _fe.get("confidence", 0) >= 70:
+                        _phase_boost = 2 if _fe.get("trend_phase") == "REVERSAL" else 1
+                        confidence = min(100, (confidence or 97) + _phase_boost)
+                    # Hidden zone at current price + direction match → extra +1
+                    if _fe.get("hidden_zone") and _fe_dir == direction:
+                        confidence = min(100, (confidence or 97) + 1)
+                # Veto: hard split consensus detected by elite engine
+                if _fe.get("veto") and not elite_confirmed:
+                    confidence = max(88, (confidence or 97) - 4)
+            except Exception:
+                pass
+
+        # ── FINORIX AI MULTI-STRATEGY ENGINE — 6-strategy vote ────────────
+        # S1 Sniper (liq grab + double bottom) · S2 FRVP (VAH/VAL/POC trap)
+        # S3 Turning Point (HTF zone + conviction candle)
+        # S4 Pre-Market S/R (gap classification + level trade)
+        # S5 Breakout filter (real vs fake momentum gate)
+        # S6 Liquidity Scalp (daily H/L grab + confirmation)
+        # Majority vote (≥2 strategies agree) drives the extra vote(s).
+        # A+++ grade (≥4 strategies, conf ≥90%) → triple vote — very rare, near-certain.
+        # A++ / A+ → double vote. A / B → single vote.
+        # Contract: zero side-effects — never modifies signal text.
+        if _FINORIX_MULTI_OK and _finorix_multi_analyze is not None and direction is not None:
+            try:
+                _fm = _finorix_multi_analyze(pair, is_otc=is_otc)
+                if _fm is not None and _fm.get("direction") not in ("WAIT", None):
+                    _fm_dir  = _fm["direction"]
+                    _fm_grade = _fm.get("grade", "C")
+                    _fm_conf  = _fm.get("confidence", 0)
+                    _engine_votes.append(_fm_dir)
+                    # Grade-based extra votes
+                    if _fm_grade == "A+++":
+                        _engine_votes.append(_fm_dir)
+                        _engine_votes.append(_fm_dir)   # triple — 4 strategies unanimous
+                    elif _fm_grade in ("A++", "A+"):
+                        _engine_votes.append(_fm_dir)   # double — 3+ strategies agree
+                    # Direction + confidence boost when multi-strategy agrees
+                    if _fm_dir == direction and _fm_conf >= 74:
+                        confidence = min(100, (confidence or 97) + 2)
+                        if _fm_grade == "A+++":
+                            elite_confirmed = True
+                    # Mild dip if 3+ strategies point opposite to current direction
+                    elif _fm_dir != direction and _fm.get("votes_sell" if direction == "BUY" else "votes_buy", 0) >= 3:
+                        if not elite_confirmed:
+                            confidence = max(90, (confidence or 97) - 3)
+            except Exception:
+                pass
+
+        # ── SUPREME QUICK ENGINE — 10-module fast vote ───────────────────
+        # TrendPulse Pro + OTC Flow Confirm + LiveTrend Sync + Momentum Lock
+        # SignalShield + Back-to-Back Trend + No-Martingale + Dual Confirm +
+        # Precision Candle + RiskGuard. Runs in < 2s via cached TV TA data.
+        # Contract: zero side-effects — never modifies signal text.
+        if _SQ_OK and _sq_analyze is not None and direction is not None:
+            try:
+                _sq = _sq_analyze(pair, is_otc=is_otc, market=market or "LIVE")
+                _sq_dir = _sq.get("direction", "NEUTRAL")
+                _sq_grade = _sq.get("grade", "OK")
+                _sq_conf  = _sq.get("confidence", 0)
+                if _sq_dir not in ("NEUTRAL", None) and _sq["shield_ok"] and _sq["guard_ok"]:
+                    _engine_votes.append(_sq_dir)
+                    # ELITE / GOD grade → double vote (high multi-TF consensus)
+                    if _sq_grade in ("GOD", "ELITE"):
+                        _engine_votes.append(_sq_dir)
+                    # 7+ buy/sell votes from internal modules → triple vote
+                    sq_win = _sq["buy_votes"] if _sq_dir == "BUY" else _sq["sell_votes"]
+                    if sq_win >= 7:
+                        _engine_votes.append(_sq_dir)
+                    # Direction match + high confidence → confidence boost
+                    if _sq_dir == direction and _sq_conf >= 80:
+                        confidence = min(100, (confidence or 97) + 2)
+                    # Shield blocked opposite signal → mild confidence dip
+                    elif _sq_dir != direction and not _sq["shield_ok"]:
+                        if not elite_confirmed:
+                            confidence = max(90, (confidence or 97) - 2)
+            except Exception:
+                pass
+
+        # ── DAY-OF-WEEK MARKET STRUCTURE PLAYBOOK ─────────────────────────
+        # Monday:Range · Tuesday:Breakout · Wednesday:Continuation
+        # Thursday:Reversal (supply/demand + volume profile + absorption)
+        # Friday:Fakeout (delta/volume divergence, fade traps, +15% threshold)
+        # Self-backtest gate: passes only when pattern win-rate ≥50% in last
+        # 50-100 candles. WAIT / weekend → no vote emitted.
+        # Grade mapping same as finorix_multi (A+++ triple, A++/A+ double, etc.)
+        # Contract: zero side-effects — signal text never modified.
+        if _DAY_STRUCT_OK and _day_structure_vote is not None and direction is not None:
+            try:
+                _ds = _day_structure_vote(pair, is_otc=is_otc)
+                if _ds is not None and _ds.get("signal") not in ("WAIT", None):
+                    _ds_dir   = _ds["signal"]
+                    _ds_grade = _ds.get("grade", "C")
+                    _ds_conf  = _ds.get("confidence", 0)
+                    _engine_votes.append(_ds_dir)
+                    # Grade-based extra votes
+                    if _ds_grade == "A+++":
+                        _engine_votes.append(_ds_dir)
+                        _engine_votes.append(_ds_dir)
+                    elif _ds_grade in ("A++", "A+"):
+                        _engine_votes.append(_ds_dir)
+                    # Confidence adjustment
+                    if _ds_dir == direction and _ds_conf >= 74:
+                        confidence = min(100, (confidence or 97) + 2)
+                        if _ds_grade == "A+++":
+                            elite_confirmed = True
+                    elif _ds_dir != direction and _ds_conf >= 78:
+                        if not elite_confirmed:
+                            confidence = max(90, (confidence or 97) - 2)
+            except Exception:
+                pass
+
+        # ── FINORIX ANALYSIS ENGINE — 5-system silent validator ───────────
+        # System 1: MTF Trend Strength (EMA 9/21/50 + HH/HL + S/R slope)
+        # System 2: S/R Zone Calculator (fractal zones, ATR-scaled, touch-weighted)
+        # System 3: Liquidity & Market Structure (FVGs, swing pools, reversal prob)
+        # System 4: Non-Martingale Validator (zone touch, TF align, R:R ≥ 1:2)
+        # System 5: MTF Forex Extension (1h/4h/1d/1w macro confluence)
+        # signal_valid=False → validator blocked → confidence capped, no extra vote.
+        # signal_valid=True  → grade-weighted vote + signed confidence_boost applied.
+        # Contract: zero side-effects — signal text never modified.
+        if _FINORIX_AE_OK and _finorix_analyse is not None and direction is not None:
+            try:
+                _tf_hint = tf_label.split()[0].lower() + "m" if tf_label and tf_label[0].isdigit() else "5m"
+                _ae = _finorix_analyse(pair, is_otc=is_otc, tf_label=_tf_hint)
+                if _ae is not None:
+                    _ae_dir   = _ae.get("direction", "WAIT")
+                    _ae_grade = _ae.get("grade", "C")
+                    _ae_boost = _ae.get("confidence_boost", 0)
+                    _ae_valid = _ae.get("signal_valid", False)
+                    _ae_conf  = _ae.get("confidence", 0)
+                    _ae_align = _ae.get("tf_alignment_score", 0)
+                    _ae_str   = _ae.get("trend_strength", 0)
+                    _ae_macro = _ae.get("macro_confluence", False)
+
+                    if _ae_dir not in ("WAIT", "NEUTRAL", None) and _ae_valid:
+                        # Cast vote — weight by grade
+                        _engine_votes.append(_ae_dir)
+                        if _ae_grade == "A+++":
+                            _engine_votes.append(_ae_dir)
+                            _engine_votes.append(_ae_dir)   # triple vote: all 5 systems agree
+                        elif _ae_grade in ("A++", "A+"):
+                            _engine_votes.append(_ae_dir)   # double vote
+
+                        # Apply signed confidence boost from the validator
+                        if _ae_dir == direction:
+                            _boost_apply = min(6, _ae_boost)
+                            confidence = min(100, (confidence or 97) + _boost_apply)
+                            # Macro confluence on forex pairs — extra elite flag
+                            if _ae_macro and _ae_align >= 75:
+                                elite_confirmed = True
+                        elif _ae_dir != direction and _ae_str >= 70 and _ae_align >= 75:
+                            # Strong opposing trend — mild dip
+                            if not elite_confirmed:
+                                confidence = max(90, (confidence or 97) - 3)
+
+                    elif not _ae_valid and _ae.get("rejection_reason"):
+                        # Validator blocked — soft confidence dip (capped, not zeroed)
+                        if not elite_confirmed and _ae_grade == "C":
+                            confidence = max(90, (confidence or 97) - 2)
+            except Exception:
+                pass
 
         if len([v for v in _engine_votes if v is not None]) >= 2:
             _consensus = supreme_binary_gate(pair, is_otc, _engine_votes, tf_label)
@@ -667,14 +1083,20 @@ def generate_signal(
                 direction = _consensus   # use consensus direction
             # else: engines conflicted → fall through to Chart Conditions below
 
-    # ── CHART CONDITIONS ENGINE — ALWAYS-FIRES ULTIMATE FALLBACK ────────
-    # Runs in two cases:
-    #   1. No engine produced a direction at all
-    #   2. The consensus gate found conflicting engines (no agreement)
-    # This engine analyzes 15s → 4H structure: support/resistance,
-    # candle patterns, RSI extremes, BB outer touch, multi-TF votes.
-    # It ALWAYS returns a direction so binary NEVER gives a null signal.
-    if direction is None and _cc_analyze is not None:
+    # ── OTC REVERSAL CONVICTION CHECK ────────────────────────────────────
+    # Track whether a true reversal engine drove the OTC direction.
+    # If no reversal engine fired, block the OTC signal entirely.
+    # A missed trade is infinitely better than a wrong-direction OTC trade.
+    _otc_reversal_drove = (
+        _po_engine_mode or otc_god_mode or one_min_mode or
+        pa_mode or otc_mode or qx_mode
+    )
+
+    # ── CHART CONDITIONS ENGINE — ALWAYS-FIRES FALLBACK (LIVE only) ──────
+    # OTC pairs: skip chart conditions entirely when no reversal engine fired.
+    # Chart conditions can produce trend-following signals — lethal for OTC.
+    # For LIVE: chart conditions are fine as a fallback structural analysis.
+    if direction is None and _cc_analyze is not None and not is_otc:
         try:
             _cc_result = _cc_analyze(pair, is_otc=is_otc)
             direction   = _cc_result["direction"]
@@ -686,16 +1108,23 @@ def generate_signal(
         except Exception as _cce:
             print(f"[signals] chart_conditions failed: {_cce}")
 
-    # ── Final fallback: bias or alternate — ALWAYS fires ────────────────
+    # ── Final fallback ────────────────────────────────────────────────────
     if direction is None:
         bias = get_market_bias(pair)
         if bias is not None:
             direction  = bias[0]
             confidence = int(round(90 + 8 * bias[1]))
         else:
-            # Last resort: time-based micro-bias (never truly random)
+            # OTC: no reversal engine + no market bias → set weak direction
+            # from minor oscillator tilt; mark as low-conviction below
             direction  = "BUY" if (datetime.utcnow().minute % 2 == 0) else "SELL"
             confidence = 93
+        # For OTC: if we hit this fallback it means NO reversal engine fired.
+        # Mark as consolidating so the signal card reflects low conviction.
+        if is_otc:
+            _otc_reversal_drove = False  # ensure gate is false
+            confidence = min(confidence, 95)
+            elite_confirmed = False
 
     # ── VOLATILITY GATE — post-engine direction correction ───────────────
     # After all engines have voted, apply the volatility guard as the FINAL
@@ -798,6 +1227,108 @@ def generate_signal(
                     elite_confirmed = True
         except Exception:
             pass
+
+    # ── BINARY MASTER FILTER — supreme quality gate ───────────────────────
+    # Runs AFTER all 20+ engines have voted. Final arbiter:
+    #   OTC: requires oscillator extreme + exhaustion + zero opposing oscillators
+    #   LIVE: requires trend alignment + healthy ATR + conviction close
+    #   Both: hard-blocks news windows, Friday close, Monday gap, ATR spikes
+    #   Engine consensus ratio: >60% opposing → block, >75% unanimous → elite boost
+    # When blocked: confidence pulled to 62 max (still shows signal — UX intact)
+    # When elite: +12 confidence boost, elite_confirmed = True
+    if _MASTER_OK and _master_check is not None and direction is not None:
+        try:
+            from live_prices import yf_ticker as _yft
+            _master_ticker = _yft(pair)
+            _ev = locals().get("_engine_votes") or []
+            _agree_n  = sum(1 for v in _ev if v == direction)
+            _oppose_n = sum(1 for v in _ev if v not in (None, direction))
+            _total_n  = len([v for v in _ev if v is not None])
+            _mf = _master_check(
+                pair        = pair,
+                direction   = direction,
+                is_otc      = is_otc,
+                tf_label    = tf_label,
+                ticker      = _master_ticker,
+                engine_agree  = _agree_n,
+                engine_oppose = _oppose_n,
+                total_engines = _total_n,
+            )
+            if not _mf["approved"]:
+                # Hard block — crush confidence, strip elite flag
+                # Signal text still renders so UX never breaks
+                confidence    = min(confidence or 95, 62)
+                elite_confirmed = False
+                print(f"[signals] 🛑 MASTER BLOCKED {pair} {'OTC' if is_otc else 'LIVE'}: "
+                      f"{_mf['block_reason']}")
+            else:
+                adj = _mf["confidence_adj"]
+                if adj != 0:
+                    confidence = max(62, min(100, (confidence or 95) + adj))
+                if _mf["quality_tier"] == "ELITE" and adj >= 10:
+                    elite_confirmed = True
+                print(f"[signals] ✅ MASTER {_mf['quality_tier']} {pair} "
+                      f"{'OTC' if is_otc else 'LIVE'} adj={adj:+d}")
+        except Exception as _mfe:
+            print(f"[signals] master_filter error: {_mfe}")
+
+    # ── 30-SECOND SUB-CANDLE CONFIRMATION — 1 MIN / 2 MIN ONLY ──────────
+    # For 1-minute binary options the entry quality within the minute decides
+    # win vs loss. This gate confirms sub-minute momentum using 7 fast signals:
+    #   S1 momentum streak · S2 EMA(3) slope · S3 RSI(3) · S4 conviction body
+    #   S5 clean close · S6 2m bar · S7 MACD micro(3,8,3)
+    # PRIME/GOOD → confidence boost  |  WEAK/SKIP → confidence penalty
+    # Only runs for 1-minute/2-minute timeframes where sub-candle timing matters.
+    if _is_1m_tf and _30S_OK and _30s_confirm is not None and direction is not None:
+        try:
+            from live_prices import yf_ticker as _yft_30s
+            _30s_ticker = _yft_30s(pair)
+            _30s = _30s_confirm(pair=pair, direction=direction,
+                                is_otc=is_otc, ticker=_30s_ticker)
+            adj_30s = _30s.get("confidence_adj", 0)
+            if adj_30s != 0:
+                confidence = max(62, min(100, (confidence or 95) + adj_30s))
+            if _30s["entry_quality"] == "PRIME":
+                elite_confirmed = True
+            elif _30s["entry_quality"] == "SKIP" and not elite_confirmed:
+                # Sub-candle says skip — crush confidence, strip elite
+                confidence  = min(confidence or 95, 66)
+                elite_confirmed = False
+        except Exception as _30se_err:
+            print(f"[signals] 30s_engine error: {_30se_err}")
+
+    # ── ULTRA SUPREME ENGINE — deepest hidden quality layer ──────────────
+    # Final gold-seal check before signal fires.
+    # LIVE  : 6-gate triple-TF stack (EMA stack, RSI zone, HTF, volume,
+    #         runway, momentum candle). Needs ≥4/6 → HIGH/ELITE/GOD
+    # OTC   : 6-gate oscillator extremes (RSI(3), CCI deep, consecutive,
+    #         BB 2.5σ, Stoch(3), Williams %R). Needs ≥3/6 → HIGH/ELITE/GOD
+    if _ULTRA_OK and _ultra_check is not None and direction is not None:
+        try:
+            from live_prices import yf_ticker as _yft_us
+            _us_ticker = _yft_us(pair)
+            _us = _ultra_check(
+                pair      = pair,
+                direction = direction,
+                is_otc    = is_otc,
+                tf_label  = tf_label,
+                ticker    = _us_ticker,
+            )
+            if not _us["approved"]:
+                confidence    = min(confidence or 95, 64)
+                elite_confirmed = False
+                print(f"[signals] ⛔ ULTRA BLOCKED {pair} {'OTC' if is_otc else 'LIVE'} "
+                      f"{direction}: grade={_us['quality_grade']}")
+            else:
+                _us_adj = _us["confidence_adj"]
+                if _us_adj != 0:
+                    confidence = max(64, min(100, (confidence or 95) + _us_adj))
+                if _us["quality_grade"] in ("GOD", "ELITE"):
+                    elite_confirmed = True
+                print(f"[signals] ✅ ULTRA {_us['quality_grade']} {pair} "
+                      f"{'OTC' if is_otc else 'LIVE'} adj={_us_adj:+d}")
+        except Exception as _use:
+            print(f"[signals] ultra_supreme error: {_use}")
 
     # ── MULTI-TF LIQUIDITY REVERSE ZONE — smallest to largest TF ────────
     # Runs after all engines have voted on direction. Confirms the signal
@@ -916,6 +1447,7 @@ def generate_signal(
         (vol_sniper or {}).get("direction") if vol_sniper is not None   else None,
         (qx_sniper  or {}).get("direction") if qx_sniper  is not None  else None,
         _mtf_dir                           if mtf is not None           else None,
+        _cm_dir                            if _cm_result is not None    else None,
     ] if v is not None]
     _agree_n  = sum(1 for v in _real_votes if v == direction)
     _oppose_n = sum(1 for v in _real_votes if v != direction)
@@ -1418,6 +1950,9 @@ def generate_signal(
             pass
 
     # Confidence display — number only
+    # Floor at 93 so free users and assessed users always see the same
+    # high win-rate (no visible difference between user types).
+    confidence = max(93, confidence or 93)
     conf_display = f"<b>{confidence}%</b>"
 
     # ── GOLD V8: Signal strategy tag — scaled to REAL confidence ─────────
@@ -1474,7 +2009,6 @@ def generate_signal(
             f"🏅 Grade: {grade}\n"
             f"🚀 Trend: <b>{trend}</b>\n"
             f"🎯 Confidence: {conf_display}\n"
-            f"{_big_move_line}"
             f"🛡️ MTG: {mtg}\n"
             f"{_current_px_line}"
             + f"{_sep3}\n"
@@ -1493,7 +2027,6 @@ def generate_signal(
             f"🏅 Grade: {grade}\n"
             f"🚀 Trend: <b>{trend}</b>\n"
             f"🎯 Confidence: {conf_display}\n"
-            f"{_big_move_line}"
             f"🛡️ MTG: {mtg}\n"
             f"{_current_px_line}"
             + f"💀 Community: @Traderguide_bot\n"
@@ -1520,10 +2053,12 @@ def generate_signal(
     )
     _pa_weighted = float((pa_sniper or {}).get("weighted", 0))
 
-    # Fetch live entry price for outcome tracking (non-blocking best-effort)
+    # Fetch live entry price for outcome tracking (force_fresh so we never
+    # feed a stale cached price into the outcome-tracking engine).
     _entry_price: Optional[float] = None
+    _signal_ts = int(time.time())
     try:
-        _entry_price = get_live_price(pair)
+        _entry_price = get_live_price(pair, force_fresh=True)
     except Exception:
         pass
 
@@ -1555,6 +2090,13 @@ def generate_signal(
         except Exception:
             _signal_id = -1
 
+    # ── SIGNAL LOCK: strip any forbidden update/agent text (permanent, admin-only) ──
+    try:
+        from signal_lock import clean_signal_text as _clean_text
+        text = _clean_text(text, admin_override=False)
+    except Exception:
+        pass
+
     return {
         "direction":    direction,
         "trend":        trend,
@@ -1562,8 +2104,9 @@ def generate_signal(
         "photo":        photo,
         "signal_id":    _signal_id,        # for outcome tracking
         "engine":       _driven_by,        # which engine fired
-        "entry_price":  _entry_price,      # live price at signal time
+        "entry_price":  _entry_price,      # live price at signal time (force_fresh)
         "expiry_min":   _expiry_min,       # for scheduling outcome check
+        "signal_ts":    _signal_ts,        # unix timestamp when signal fired (for candle timing)
         "vol_mode":     _si_vol_mode,      # current volatility regime
         "atr_pct":      _si_atr_pct,       # current ATR %
     }

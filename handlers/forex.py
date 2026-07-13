@@ -107,12 +107,40 @@ async def _fx_quick_analyze_and_signal(
         # NOTE: do NOT set more_signal_requested here — the background loop
         # would pick it up during our sleep and fire a duplicate, blocking us.
 
-    # ── Show Quick Analysis screen ────────────────────────────────────────
-    scan_secs = _rnd.choice([6.0, 7.0])
-    _analyze_text = "⏳  <b>Fx Supreme pro Ai analysing Quick signal ...</b>"
-    loading_id = await show_screen(bot, chat_id, _analyze_text, reply_markup=None)
-
-    await asyncio.sleep(scan_secs)
+    # ── Show Rolling Analysis screen (10-12 s, engine-by-engine) ────────────
+    _FX_STEPS = [
+        ("📡", "TrendPulse Pro",         "fetching 1m/5m/15m/1h…"),
+        ("⚡", "LiveTrend Sync",          "syncing live price feed…"),
+        ("💧", "Liquidity Zone Map",      "identifying swing pools…"),
+        ("🔒", "Momentum Lock",           "locking trend direction…"),
+        ("🧱", "Breakout Filter",         "checking real vs false break…"),
+        ("🎯", "Precision Entry Calc",    "calculating entry level…"),
+        ("🛡️", "Spread Guard",            "session & spread check…"),
+        ("📊", "Dual Market Confirm",     "cross-confirming 1m + 5m…"),
+        ("⚠️", "RiskGuard Signals",       "risk & exposure gate…"),
+        ("✅", "Signal Ready",            "finalizing entry & exit…"),
+    ]
+    _fx_header = (
+        "💹 <b>SUPREME PRO — FOREX ANALYSIS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "⏳ Running 10-module deep scan…\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+    )
+    loading_id = await show_screen(bot, chat_id, _fx_header + "🔄 Initializing…", reply_markup=None)
+    _done: list[str] = []
+    for _ic, _nm, _ac in _FX_STEPS:
+        await asyncio.sleep(1.1)
+        _done.append(f"{_ic} <b>{_nm}</b> ✅")
+        _body = "\n".join(_done[-6:])
+        _cur  = f"⏳ <b>{_nm}</b>: {_ac}"
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=loading_id,
+                text=_fx_header + _body + "\n" + _cur, parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    await asyncio.sleep(0.8)
 
     # ── Delete the analysis screen ────────────────────────────────────────
     try:

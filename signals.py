@@ -205,6 +205,14 @@ except Exception as _mfe:
     _MASTER_OK = False
 
 try:
+    from supreme_quick_engine import supreme_quick_analyze as _sq_analyze
+    _SQ_OK = True
+except Exception as _sqe:
+    print(f"[signals] supreme_quick_engine import failed: {_sqe}")
+    _sq_analyze = None  # type: ignore
+    _SQ_OK = False
+
+try:
     from thirty_second_engine import confirm_entry as _30s_confirm
     _30S_OK = True
 except Exception as _30se:
@@ -733,6 +741,18 @@ def generate_signal(
         direction = sniper["direction"]
         confidence = max(96, min(99, 96 + (sniper["score"] - 65) // 6))
     elif direction is None:
+        # ── SUPREME QUICK ENGINE — fast 10-module fallback setter ───────────
+        # Fires when all higher-priority engines (1m, PA, OTC, sniper, …) fail
+        # to set direction. Uses TradingView TA 1m/5m/15m/1h + Stooq live tape.
+        if _SQ_OK and _sq_analyze is not None:
+            try:
+                _sq_fallback = _sq_analyze(pair, is_otc=is_otc, market=market or "LIVE")
+                if _sq_fallback["direction"] not in ("NEUTRAL", None):
+                    direction  = _sq_fallback["direction"]
+                    confidence = max(90, _sq_fallback["confidence"])
+            except Exception:
+                pass
+    if direction is None:
         bias = get_market_bias(pair)
         if bias is not None:
             bias_dir, bias_strength = bias
@@ -940,6 +960,36 @@ def generate_signal(
                     elif _fm_dir != direction and _fm.get("votes_sell" if direction == "BUY" else "votes_buy", 0) >= 3:
                         if not elite_confirmed:
                             confidence = max(90, (confidence or 97) - 3)
+            except Exception:
+                pass
+
+        # ── SUPREME QUICK ENGINE — 10-module fast vote ───────────────────
+        # TrendPulse Pro + OTC Flow Confirm + LiveTrend Sync + Momentum Lock
+        # SignalShield + Back-to-Back Trend + No-Martingale + Dual Confirm +
+        # Precision Candle + RiskGuard. Runs in < 2s via cached TV TA data.
+        # Contract: zero side-effects — never modifies signal text.
+        if _SQ_OK and _sq_analyze is not None and direction is not None:
+            try:
+                _sq = _sq_analyze(pair, is_otc=is_otc, market=market or "LIVE")
+                _sq_dir = _sq.get("direction", "NEUTRAL")
+                _sq_grade = _sq.get("grade", "OK")
+                _sq_conf  = _sq.get("confidence", 0)
+                if _sq_dir not in ("NEUTRAL", None) and _sq["shield_ok"] and _sq["guard_ok"]:
+                    _engine_votes.append(_sq_dir)
+                    # ELITE / GOD grade → double vote (high multi-TF consensus)
+                    if _sq_grade in ("GOD", "ELITE"):
+                        _engine_votes.append(_sq_dir)
+                    # 7+ buy/sell votes from internal modules → triple vote
+                    sq_win = _sq["buy_votes"] if _sq_dir == "BUY" else _sq["sell_votes"]
+                    if sq_win >= 7:
+                        _engine_votes.append(_sq_dir)
+                    # Direction match + high confidence → confidence boost
+                    if _sq_dir == direction and _sq_conf >= 80:
+                        confidence = min(100, (confidence or 97) + 2)
+                    # Shield blocked opposite signal → mild confidence dip
+                    elif _sq_dir != direction and not _sq["shield_ok"]:
+                        if not elite_confirmed:
+                            confidence = max(90, (confidence or 97) - 2)
             except Exception:
                 pass
 
