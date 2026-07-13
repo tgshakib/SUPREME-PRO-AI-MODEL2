@@ -1,0 +1,67 @@
+All
+
+Upgrade my existing Supreme Pro AI Telegram bot into an ultra-strict signal engine without changing any current bot text, menus, commands, output format, or existing working systems.
+
+Goal:
+Create a modular “Ultra God Level” analysis engine for Gold (XAUUSD), BTC, and Forex.
+
+Do not rename anything. Do not change existing signal text. Do not break current Quotex or other integrations. Only add a new engine layer behind the scenes.
+
+Build these modules:
+- regime_filter.py
+- htf_alignment.py
+- liquidity_zones.py
+- momentum_gate.py
+- volatility_adapter.py
+- entry_precision.py
+- confidence_engine.py
+- risk_guard.py
+- debug_report.py
+
+Strategy rules:
+1. Trend/range detection must be strict.
+2. Multi-timeframe alignment is required before any signal.
+3. Support/resistance, breakout, retest, and fakeout detection must be included.
+4. RSI and momentum confirmation must agree.
+5. ATR/volatility filter must block dead markets and news-spike style candles.
+6. Candle body strength must be strong enough.
+7. Entry must be near the best zone, not late.
+8. One signal per setup only.
+9. No martingale ever.
+10. Add cooldown after loss or failed setup.
+11. Prefer fewer signals with much better quality.
+
+Confidence scoring:
+- Higher timeframe alignment: 20
+- Liquidity zone quality: 20
+- Momentum confirmation: 15
+- Volatility fit: 15
+- Candle body strength: 10
+- Entry precision: 10
+- Market regime quality: 10
+
+Rules:
+- Send signal only if confidence >= 80.
+- If market is ranging badly, skip.
+- If spread is too wide, skip.
+- If candle is too large or too small, skip.
+- If price already moved too far from the zone, skip.
+- If setup repeated recently, skip.
+- If signal fails, enter cooldown before next signal.
+
+Debug:
+- Add verbose debug mode showing why each setup was accepted or rejected.
+- Add a backtest/demo mode using sample candles.
+- Add logs for every decision.
+
+Output:
+- Keep my current signal format exactly the same.
+- Only improve the intelligence behind the signal selection.
+- Add a final confidence value internally only.
+- Make code clean, production-ready, and Replit-friendly.
+
+Deliverables:
+- Updated code files only for the new engine and integration hooks.
+- README with setup steps.
+- .env example.
+- Minimal test file.

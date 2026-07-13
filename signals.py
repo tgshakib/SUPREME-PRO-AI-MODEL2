@@ -213,6 +213,14 @@ except Exception as _sqe:
     _SQ_OK = False
 
 try:
+    from ultra_god_engine import ultra_analyze as _ultra_analyze
+    _ULTRA_OK = True
+except Exception as _uge:
+    print(f"[signals] ultra_god_engine import failed: {_uge}")
+    _ultra_analyze = None  # type: ignore
+    _ULTRA_OK = False
+
+try:
     from thirty_second_engine import confirm_entry as _30s_confirm
     _30S_OK = True
 except Exception as _30se:
@@ -960,6 +968,34 @@ def generate_signal(
                     elif _fm_dir != direction and _fm.get("votes_sell" if direction == "BUY" else "votes_buy", 0) >= 3:
                         if not elite_confirmed:
                             confidence = max(90, (confidence or 97) - 3)
+            except Exception:
+                pass
+
+        # ── ULTRA GOD ENGINE — 9-module strict quality gate ──────────────
+        # regime_filter + htf_alignment + liquidity_zones + momentum_gate
+        # + volatility_adapter + entry_precision + confidence_engine
+        # + risk_guard + debug_report. Fires only when conf ≥ 80.
+        # Contract: zero side-effects — never modifies signal text.
+        if _ULTRA_OK and _ultra_analyze is not None and direction is not None:
+            try:
+                _ug = _ultra_analyze(pair, direction=direction,
+                                     is_otc=is_otc, market=market or "LIVE")
+                _ug_conf  = _ug.get("confidence", 0)
+                _ug_dir   = _ug.get("direction")
+                _ug_grade = _ug.get("grade", "SKIP")
+                if _ug.get("accept") and _ug_dir == direction:
+                    _engine_votes.append(_ug_dir)
+                    # GOD / ELITE ultra grade → double vote (very strict filter passed)
+                    if _ug_grade in ("GOD", "ELITE"):
+                        _engine_votes.append(_ug_dir)
+                    # Confidence boost for ultra-high quality signals
+                    if _ug_conf >= 90:
+                        confidence = min(100, (confidence or 97) + 2)
+                    elif _ug_conf >= 80:
+                        confidence = min(100, (confidence or 97) + 1)
+                elif not _ug.get("accept") and _ug_conf < 65 and not elite_confirmed:
+                    # Ultra engine confidently rejects → mild dip
+                    confidence = max(90, (confidence or 97) - 2)
             except Exception:
                 pass
 
