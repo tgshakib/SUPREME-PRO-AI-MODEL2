@@ -139,6 +139,12 @@ def pair_by_index(market: str, idx: int) -> str:
 # ── Binary timeframe ──────────────────────────────────────
 def binary_tf_kb(market: str, broker: str, pair_idx: int) -> InlineKeyboardMarkup:
     rows = []
+    # ⚡ 15-second timeframe — OTC only (Pocket Option / Quotex)
+    if market == "otc":
+        rows.append([InlineKeyboardButton(
+            text="⚡ 15 Seconds  🔒 VIP",
+            callback_data=f"tf:{market}:{broker}:{pair_idx}:15s",
+        )])
     for label, code in BINARY_TIMEFRAMES:
         rows.append([InlineKeyboardButton(
             text=f"⏱️ {label}",
@@ -408,13 +414,20 @@ def forex_pairs_input_kb() -> InlineKeyboardMarkup:
 
 def forex_tp_kb() -> InlineKeyboardMarkup:
     rows = []
-    for chunk in _chunk(TP_LEVELS, 2):
+    for chunk in _chunk(TP_LEVELS, 3):
         rows.append([
             InlineKeyboardButton(text=label, callback_data=f"fxtp:{val}")
             for label, val in chunk
         ])
     rows.append([InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def forex_pip_target_label(max_tp: int) -> str:
+    """Human-readable pip target label from stored max_tp value."""
+    from config import pip_target_from_max_tp
+    pips = pip_target_from_max_tp(max_tp)
+    return f"{pips}+ PIPS"
 
 
 def forex_active_kb(gold_king: bool = False) -> InlineKeyboardMarkup:
@@ -505,8 +518,12 @@ def fx_active_view_kb(signals: list | None = None) -> InlineKeyboardMarkup:
             text=f"🟢 I'M IN — Signal {label_num}",
             callback_data=f"fxin:{sid}",
         )])
-    rows.append([InlineKeyboardButton(text="🎯 NEW SIGNAL — 100% AI SNIPER", callback_data="fx:new")])
-    rows.append([InlineKeyboardButton(text="🛑 STOP", callback_data="fx:stop")])
+    rows.append([InlineKeyboardButton(
+        text="🎯 NEW SIGNAL — 100% AI SNIPER", callback_data="fx:new",
+    )])
+    rows.append([
+        InlineKeyboardButton(text="🛑 STOP", callback_data="fx:stop"),
+    ])
     rows.append([
         InlineKeyboardButton(text="⬅️ BACK", callback_data="m:home"),
         InlineKeyboardButton(text="❌ CLOSE", callback_data="fx:close_view"),
@@ -909,3 +926,5 @@ def at_drawdown_confirm_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🛑 STOP TRADING (Recommended)",      callback_data="at:dd:stop")],
         [InlineKeyboardButton(text="⬅️ BACK TO DASHBOARD",              callback_data="at:dashboard")],
     ])
+
+

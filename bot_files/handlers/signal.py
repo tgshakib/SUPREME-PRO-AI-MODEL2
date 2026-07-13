@@ -60,6 +60,8 @@ def _market_meta(market: str, broker: str):
 def _tf_label(code: str) -> str:
     if code == "auto":
         return random.choice(["1 MIN", "2 MIN", "3 MIN"])
+    if code == "15s":
+        return "15 SEC"
     for label, c in BINARY_TIMEFRAMES:
         if c == code:
             return label
@@ -176,6 +178,30 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         else:
             await show_screen(call.bot, call.message.chat.id, _wknd_text, binary_menu_kb())
         return
+
+    # ── 15-second timeframe: access-only gate ─────────────────────────────
+    if tf == "15s":
+        if not db.has_active_access(user_id) and not _is_admin(user_id):
+            await call.answer()
+            _access_text = (
+                "⚡ <b>15 Seconds Timeframe — VIP Only</b>\n"
+                "━━━━━━━━━━━━━━━━━━━\n\n"
+                "🔒 The <b>15-second signal</b> is available for <b>paid access</b> users only.\n\n"
+                "You don't have active access.\n\n"
+                "👉 Tap <b>BUY ACCESS</b> below to unlock:\n"
+                "• ⚡ 15-second OTC signals\n"
+                "• 🔓 Unlimited daily signals\n"
+                "• 📊 All timeframes\n"
+                "• 🎯 Premium signal quality"
+            )
+            from keyboards import binary_menu_kb
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            _buy_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 BUY ACCESS", callback_data="m:buy")],
+                [InlineKeyboardButton(text="⬅️ BACK", callback_data=f"back_pairs:{market}:{broker}")],
+            ])
+            await show_screen(call.bot, call.message.chat.id, _access_text, _buy_kb)
+            return
 
     # 30-second cooldown after a fresh signal
     cd = _cooldown_remaining(user_id)

@@ -221,6 +221,14 @@ except Exception as _uge:
     _ULTRA_OK = False
 
 try:
+    from reversal_engine import detect_reversal as _detect_reversal
+    _REVERSAL_OK = True
+except Exception as _rve:
+    print(f"[signals] reversal_engine import failed: {_rve}")
+    _detect_reversal = None  # type: ignore
+    _REVERSAL_OK = False
+
+try:
     from thirty_second_engine import confirm_entry as _30s_confirm
     _30S_OK = True
 except Exception as _30se:
@@ -467,8 +475,12 @@ def generate_signal(
         except Exception:
             sniper = None
 
+    # ── IS THIS A 15-SECOND CANDLE SESSION? ───────────────────────────
+    _is_15s_tf = tf_label.strip().upper().startswith("15 SEC")
+
     # ── IS THIS A 1-MINUTE / 2-MINUTE CANDLE SESSION? ─────────────────
-    _is_1m_tf = tf_label.strip().upper().startswith(("1 MIN", "2 MIN", "1MIN", "2MIN"))
+    _is_1m_tf = (tf_label.strip().upper().startswith(("1 MIN", "2 MIN", "1MIN", "2MIN"))
+                 or _is_15s_tf)
 
     # ── 1-MINUTE PRECISION SNIPER (Priority -1, highest possible) ──────
     # When user selects 1 MIN or 2 MIN candle, run the dedicated 1m engine
@@ -749,6 +761,18 @@ def generate_signal(
         direction = sniper["direction"]
         confidence = max(96, min(99, 96 + (sniper["score"] - 65) // 6))
     elif direction is None:
+        # ── REVERSAL ENGINE — zone-based flip detection ──────────────────────
+        # When all engines fail to fire, check if price is at a reversal zone.
+        # RSI extreme + EMA bounce + vote flip → strong reversal direction.
+        if _REVERSAL_OK and _detect_reversal is not None:
+            try:
+                _rv_early = _detect_reversal(pair, is_otc=is_otc)
+                if _rv_early["reversal_dir"] and _rv_early["zone_quality"] >= 45:
+                    direction  = _rv_early["reversal_dir"]
+                    confidence = max(92, min(99, 90 + _rv_early["zone_quality"] // 10))
+            except Exception:
+                pass
+
         # ── SUPREME QUICK ENGINE — fast 10-module fallback setter ───────────
         # Fires when all higher-priority engines (1m, PA, OTC, sniper, …) fail
         # to set direction. Uses TradingView TA 1m/5m/15m/1h + Stooq live tape.
@@ -968,6 +992,37 @@ def generate_signal(
                     elif _fm_dir != direction and _fm.get("votes_sell" if direction == "BUY" else "votes_buy", 0) >= 3:
                         if not elite_confirmed:
                             confidence = max(90, (confidence or 97) - 3)
+            except Exception:
+                pass
+
+        # ── REVERSAL ZONE ENGINE — candle flip detection ─────────────────
+        # Detects 7 types of reversal signals: RSI extreme, RSI divergence,
+        # EMA bounce, TV vote flip, multi-TF divergence, exhaustion, HA proxy.
+        # Elite reversal (3+ signals stacking) → triple vote to override trend.
+        # Contract: zero side-effects — never modifies signal text.
+        if _REVERSAL_OK and _detect_reversal is not None and direction is not None:
+            try:
+                _rv = _detect_reversal(pair, is_otc=is_otc)
+                _rv_dir     = _rv.get("reversal_dir")
+                _rv_quality = _rv.get("zone_quality", 0)
+                _rv_elite   = _rv.get("elite", False)
+                if _rv_dir == direction and _rv_quality >= 40:
+                    _engine_votes.append(_rv_dir)
+                    # Elite reversal (3+ signals): double vote
+                    if _rv_elite:
+                        _engine_votes.append(_rv_dir)
+                        _engine_votes.append(_rv_dir)   # triple for elite zone
+                    # Zone quality boost
+                    if _rv_quality >= 70:
+                        confidence = min(100, (confidence or 97) + 2)
+                elif _rv_dir and _rv_dir != direction and _rv_elite and _rv_quality >= 80:
+                    # ELITE reversal zone opposing direction → override (flip)
+                    # Only when zone_quality >= 80 AND elite (3+ signals stacking)
+                    _engine_votes.append(_rv_dir)
+                    _engine_votes.append(_rv_dir)
+                    _engine_votes.append(_rv_dir)   # 3 votes — strong reversal override
+                    print(f"[signals] ⚡ REVERSAL OVERRIDE {pair}: "
+                          f"{direction}→{_rv_dir} quality={_rv_quality}")
             except Exception:
                 pass
 
@@ -2099,9 +2154,13 @@ def generate_signal(
         pass
 
     # Parse expiry minutes from tf_label ("1 MIN" → 1, "5 MIN" → 5, etc.)
+    # "15 SEC" is special — treated as 1 minute for scheduling/tracking.
     _expiry_min = 5
     try:
-        _expiry_min = int(tf_label.split()[0])
+        if "SEC" in tf_label.upper():
+            _expiry_min = 1
+        else:
+            _expiry_min = int(tf_label.split()[0])
     except Exception:
         pass
 
