@@ -123,6 +123,7 @@ async def cb_pair(call: CallbackQuery):
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"<b>SELECT ▸ TRADING TIME</b>"
     )
+    user_id = call.from_user.id
     _has_access = db.has_active_access(user_id) or _is_admin(user_id)
     if os.path.exists(_TIME_PHOTO):
         await show_photo_screen(
