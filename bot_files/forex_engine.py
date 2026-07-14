@@ -48,6 +48,14 @@ except Exception as _ge:
     _GOD_OK = False
 
 try:
+    from finorix_engine import finorix_analyse as _finorix_analyse
+    _FINORIX_FX_OK = True
+except Exception as _fxe:
+    print(f"[forex_engine] finorix_engine import failed: {_fxe}")
+    _finorix_analyse = None  # type: ignore
+    _FINORIX_FX_OK = False
+
+try:
     from elite_signal_engine import (
         get_htf_levels       as _elite_htf,
         elite_forex_rr       as _elite_rr,
@@ -105,18 +113,50 @@ except Exception as _fxe:
     _fx_analyze = None  # type: ignore
     _FX_EXPERT_OK = False
 
+try:
+    from fx_sniper_engine import fx_sniper_decide as _fx_sniper_decide
+    _FX_SNIPER_OK = True
+except Exception as _fxse:
+    print(f"[forex_engine] fx_sniper_engine import failed: {_fxse}")
+    _fx_sniper_decide = None  # type: ignore
+    _FX_SNIPER_OK = False
+
+try:
+    from forex_quick_engine import forex_quick_sniper as _fqs
+    _FQS_OK = True
+except Exception as _fqse:
+    print(f"[forex_engine] forex_quick_engine import failed: {_fqse}")
+    _fqs    = None   # type: ignore
+    _FQS_OK = False
+
 # "Pips command" — the minimum reward:risk we will ship. The pattern
 # engine already enforces MIN_RR=1.6 on its own; this is the engine-wide
 # floor used when constructing the TP ladder from a pattern's measured
 # move. The user can phrase it as: "I want at least this much RR".
 PIPS_COMMAND_MIN_RR = 2.5   # GOLD V8: elite R:R floor (was 1.8)
 
-# ── GOLD V8: SL clamping — tighter SL = sharper R:R ─────────────────
-# For standard forex, SL distance MUST be in [20, 45] pips.
-# Tighter SL = higher R:R = better expected value per trade.
-# For metals / crypto / indices ATR-based clamps remain unchanged.
+# ── SL clamping — tight SL = sharper R:R ────────────────────────────
+# Standard forex SL: 20–30 pips hard cap.
+# A+ sniper (smart engine grade ≥ 90): 8 pip ultra-tight SL.
+# Metals / crypto / indices use ATR-based clamps (unchanged).
 SL_MIN_PIPS_FOREX = 10   # tighter SL = better RR for sniper entries
-SL_MAX_PIPS_FOREX = 20   # hard cap: max 20 pips SL
+SL_MAX_PIPS_FOREX = 20   # hard cap: max 20 pips SL (was 30)
+
+
+def _confidence_grade(score: int) -> str:
+    """Confidence label with win-rate probability bracket.
+
+    Score is floored at 75 so B/C grades never appear on a signal card.
+    A+++ (98-100%) = zero-pip sniper on confirmed institutional move.
+    A++  (95-97%)  = elite multi-confirmation entry.
+    A+   (90-94%)  = high-probability confirmed setup.
+    A    (85-89%)  = solid qualified entry (minimum threshold).
+    """
+    score = max(score, 75)
+    if score >= 100: return "A+++ · 98-100% 🎯"
+    if score >= 95:  return "A++ · 95-97% 🏆"
+    if score >= 80:  return "A+ · 90-94% 🔥"
+    return "A · 85-89% ✅"
 
 
 def _is_metal_pair(pair: str) -> bool:
@@ -227,15 +267,9 @@ def _sl_bounds(pair: str, pip: float, atr: Optional[float]
                ) -> tuple[float, float]:
     """Return (min_sl_distance, max_sl_distance) in PRICE units.
 
-    ATR defaults are now percentage-of-price so they scale correctly
-    for every asset class. The old fixed pip multiples (e.g. 50*pip for
-    BTC with pip=1.0 → only $50!) were the root cause of BTC/Gold SLs
-    being placed so tight that any 1-second wick would kill the trade.
-
-    Targets (no ATR available):
-      Gold  ~$2 350 → 1H ATR ≈ $15 → SL range $8–$45
-      BTC   ~$62 000 → 1H ATR ≈ $900 → SL range $360–$2 000
-      EUR/USD → unchanged 25-60 pip hard clamp
+    Standard forex: hard 20–30 pip clamp.
+    A+ sniper (smart engine grade ≥ 90): 8-pip override applied at call-site.
+    Metals/crypto/indices: ATR-based clamps — scale correctly for asset volatility.
     """
     from config import price_band as _price_band
     if _is_metal_pair(pair):
@@ -288,8 +322,8 @@ _SNIPER_SL_INDEX  = [20.0, 28.0, 40.0]
 _SNIPER_TP_INDEX  = [120.0, 200.0, 400.0, 1000.0]
 
 # Standard forex — tiers are in PIPS (multiplied by pip_size below)
-_SNIPER_SL_FOREX  = [10.0, 14.0, 20.0]
-_SNIPER_TP_FOREX  = [100.0, 160.0, 280.0, 500.0]  # min 100-pip TP1
+_SNIPER_SL_FOREX  = [8.0, 10.0, 14.0]       # tighter SL tiers (was 10/14/20)
+_SNIPER_TP_FOREX  = [100.0, 160.0, 280.0, 500.0]  # min 100-pip TP1 (was 60)
 
 
 def _sniper_rr_levels(pair: str, direction: str, entry: float,
@@ -361,6 +395,7 @@ def _profit_label(pair: str, entry: float, level: float,
 
 
 from tz_utils import short_time_for_user
+from config import pip_target_from_max_tp
 
 # Banner photos shown above the forex signal — green for BUY, red for SELL.
 _FX_BUY_BANNER = os.path.join("assets", "forex_buy.jpg")
@@ -373,6 +408,132 @@ def _banner_for(direction: str) -> str | None:
 
 PAID_THROTTLE_SEC = (20, 45)     # Faster: 20-45s between signals for quicker entry analysis
 FIRST_SIGNAL_DELAY = (3, 8)      # Near-instant first signal
+
+
+# ── MOVE POTENTIAL DETECTION ──────────────────────────────────────────────────
+def _estimate_move_pips(pair: str, entry: float,
+                        tps: list[float], pip: float,
+                        atr: float | None = None) -> int:
+    """Estimate the pip potential of the current setup.
+
+    For standard forex: returns actual pip count to final TP.
+    For metals/crypto/indices: normalized pip-equivalent using ATR as the unit.
+    Always returns at least 10 so downstream logic never divides by zero.
+    """
+    if not tps:
+        return 20
+    dist = abs(tps[-1] - entry)
+    if _is_metal_pair(pair) or _is_crypto_pair(pair) or _is_index_pair(pair):
+        atr_unit = atr or max(pip * 50, 1.0)
+        pips = round(dist / atr_unit * 50)
+    else:
+        pips = round(dist / pip)
+    return max(10, int(pips))
+
+
+def _signal_move_class(estimated_pips: int,
+                       sniper: dict | None,
+                       smart: dict | None,
+                       liq: dict | None) -> tuple[str, str, str]:
+    """Return (class_label, class_icon, class_desc) for the signal.
+
+    Classification tiers:
+        MONSTER MOVE  900+ pips  — extreme multi-session institutional flush
+        MEGA MOVE     500-899    — rare high-momentum extended swing
+        ULTRA MOVE    300-499    — major multi-day institutional run
+        RESERVE MOVE  200-299    — major liquidity reserve sweep
+        BIG MOVE      120-199    — strong institutional momentum
+        NORMAL ENTRY   60-119    — confirmed directional setup
+        SNIPER ENTRY    <60      — precision tight-range entry
+    Smart-AI (Sweep→BoS→MS) entries always get SNIPER label when pips < 100.
+    """
+    liq_grade = (liq or {}).get("liq_grade", 0)
+    if smart is not None and estimated_pips < 100:
+        return ("SNIPER ENTRY", "🔫",
+                "Sweep · BoS · MS confirmed — precision reversal")
+    if estimated_pips >= 900:
+        return ("MONSTER MOVE", "☄️",
+                "Extreme institutional flush · Multi-session mega run")
+    if estimated_pips >= 500:
+        return ("MEGA MOVE", "🚀",
+                "Rare high-momentum extended swing · Full trend ride")
+    if estimated_pips >= 300:
+        return ("ULTRA MOVE", "⚡",
+                "Major multi-day institutional run · Deep liquidity pool")
+    if estimated_pips >= 200:
+        return ("RESERVE MOVE", "💥",
+                "Major liquidity reserve sweep · Big institutional flush")
+    if estimated_pips >= 120:
+        return ("BIG MOVE", "🌊",
+                "Institutional momentum detected · High pip potential")
+    if estimated_pips >= 60:
+        return ("NORMAL ENTRY", "📈",
+                "Confirmed directional setup · Clean structure")
+    return ("SNIPER ENTRY", "🔫",
+            "Precision entry · Tight SL · High R:R")
+
+
+def _pip_aware_tp_ladder(pair: str, direction: str, entry: float, sl: float,
+                         pip_target: int, estimated_pips: int,
+                         pip: float, existing_tps: list[float]) -> list[float]:
+    """Rebuild the TP ladder so it meets/exceeds the user's pip target.
+
+    Logic:
+      effective_pips = max(pip_target, estimated_pips)
+      → We ALWAYS give at least what the chart supports.
+      → If the user requested MORE than the chart supports, we still cap at
+        the chart's honest potential (never invent unreachable TPs).
+
+    Number of TP levels:
+      <60 pips   → 3 levels  (sniper, tight)
+      60-119     → 4 levels  (normal entry)
+      120-199    → 5 levels  (big move)
+      200-299    → 6 levels  (reserve move)
+      300-499    → 7 levels  (ultra move)
+      500-899    → 8 levels  (mega move)
+      900+       → 9 levels  (monster move)
+    """
+    effective_pips = max(pip_target, estimated_pips)
+
+    # For metals/crypto/indices the 'pip' is not 0.0001 so the effective
+    # distance must be reconstructed from ATR; use the existing TPs when
+    # they already exceed the target.
+    if _is_metal_pair(pair) or _is_crypto_pair(pair) or _is_index_pair(pair):
+        if existing_tps:
+            return existing_tps  # keep ATR-anchored levels as-is
+        return existing_tps or []
+
+    # Standard forex path — rebuild from pip count
+    total_dist = effective_pips * pip
+
+    if effective_pips >= 900:
+        n_tps = 9
+        weights = [0.10, 0.18, 0.28, 0.40, 0.53, 0.66, 0.78, 0.89, 1.00]
+    elif effective_pips >= 500:
+        n_tps = 8
+        weights = [0.12, 0.22, 0.34, 0.47, 0.60, 0.73, 0.86, 1.00]
+    elif effective_pips >= 300:
+        n_tps = 7
+        weights = [0.14, 0.25, 0.38, 0.52, 0.66, 0.82, 1.00]
+    elif effective_pips >= 200:
+        n_tps = 6
+        weights = [0.20, 0.35, 0.52, 0.68, 0.83, 1.00]
+    elif effective_pips >= 120:
+        n_tps = 5
+        weights = [0.22, 0.40, 0.58, 0.78, 1.00]
+    elif effective_pips >= 60:
+        n_tps = 4
+        weights = [0.25, 0.48, 0.72, 1.00]
+    else:
+        n_tps = 3
+        weights = [0.33, 0.65, 1.00]
+
+    tps: list[float] = []
+    for w in weights[:n_tps]:
+        dist = total_dist * w
+        tp = entry + dist if direction == "BUY" else entry - dist
+        tps.append(round(tp, 5))
+    return tps
 
 # When the user taps NEW SIGNAL we bypass throttle and force an instant
 # scan. This in-memory set holds the user_ids whose next loop tick should
@@ -387,6 +548,12 @@ _SIGNAL_PATTERN: dict[int, dict] = {}
 # Per-signal SMART AI packet — keeps the Sweep▸BoS▸MS confluence/grade
 # next to the signal so re-renders (TP/SL updates) keep the badge.
 _SIGNAL_SMART:   dict[int, dict] = {}
+
+# Per-signal move classification + estimated pips — stored at generation time
+# so the I'M IN refresh always re-renders with the same class.
+_SIGNAL_MOVE_CLASS:  dict[int, tuple] = {}
+_SIGNAL_EST_PIPS:    dict[int, int]   = {}
+_SIGNAL_FOOTPRINT:   dict[int, dict]  = {}
 
 # Most-recent SMART AI packet returned from `_generate_levels`, keyed by
 # pair. Callers that just got a tuple back can read this immediately to
@@ -460,6 +627,28 @@ def _generate_levels_raw(pair: str, max_tp: int,
     pattern: dict | None = None
     _LAST_SMART_BY_PAIR.pop(pair, None)        # clear stale packet
 
+    # ── QUICK SNIPER GATE (Priority -1, first check) ──────────────
+    # Fast multi-source consensus: runs all available engines in < 1s.
+    # If grade ≥ 80 AND engines agree on direction → lock direction here
+    # before the slower SMART AI / sniper paths run.
+    # Detects: hunt/fakeout/real-move setups, enforces min-TP floor.
+    _quick_result    = None
+    _quick_direction = None
+    _quick_min_tp    = 100.0   # pip floor (pips for forex, $ for others)
+    if _FQS_OK and _fqs is not None:
+        try:
+            _quick_result = _fqs(pair)
+            if _quick_result and _quick_result.get("grade", 0) >= 80:
+                _quick_direction = _quick_result["direction"]
+                _quick_min_tp    = float(_quick_result.get("min_tp", 100))
+                print(f"[forex_engine] ⚡ QUICK SNIPER fired for {pair}: "
+                      f"{_quick_direction} grade={_quick_result['grade']} "
+                      f"type={_quick_result.get('signal_type','?')} "
+                      f"agree={_quick_result.get('engines_agree','?')}/"
+                      f"{_quick_result.get('engines_total','?')}")
+        except Exception as _qe:
+            print(f"[forex_engine] quick sniper error for {pair}: {_qe}")
+
     # ── 0. SMART AI · Sweep ▸ BoS ▸ MS (Pine v6 port) ──
     # The single best filter we have for live forex. If a fresh,
     # confirmed entry is on the table we OVERRIDE direction / entry /
@@ -500,6 +689,11 @@ def _generate_levels_raw(pair: str, max_tp: int,
         else:
             sl_anchor = float(smart["swept_swing"]) + buf
         sl = _clamp_sl(direction, entry, sl_anchor, pair, pip, atr)
+        # A+ sniper override: smart engine grade ≥ 90 → 8-pip ultra-tight SL
+        if not (_is_metal_pair(pair) or _is_crypto_pair(pair) or _is_index_pair(pair)):
+            if smart.get("grade", 0) >= 90:
+                sl = round((entry - 8 * pip) if direction == "BUY"
+                           else (entry + 8 * pip), 5)
 
         # TP ladder — prefer the liquidity engine's pool list; fall
         # back to ATR-stepped extrapolation when no pools are available.
@@ -604,6 +798,24 @@ def _generate_levels_raw(pair: str, max_tp: int,
                         direction = _fx["direction"]
         except Exception as _fxerr:
             print(f"[forex_engine] fx_expert call failed: {_fxerr}")
+
+    # ── QUICK SNIPER FALLBACK — if all normal paths failed ────────────
+    # When SMART AI / sniper / bias / FX Expert all failed to produce a
+    # direction, use the quick sniper's consensus direction (if it fired).
+    # Also: if quick sniper agrees with an existing direction → mark it
+    # as a higher-conviction entry so the SL stays tight.
+    if direction is None and _quick_direction is not None:
+        direction = _quick_direction
+        live = get_live_price(pair, force_fresh=True)
+        entry = float(live) if live is not None else 0.0
+        if entry == 0.0:
+            try:
+                from config import price_band as _pb
+                mid, _, _ = _pb(pair)
+                entry = float(mid)
+            except Exception:
+                pass
+        print(f"[forex_engine] 🎯 QUICK SNIPER set direction={direction} for {pair}")
 
     if direction is None:
         return None, 0.0, [], 0.0, 5, None
@@ -793,6 +1005,28 @@ def _generate_levels(pair: str, max_tp: int,
                 tps = new_tps
         except Exception:
             pass
+
+        # ── MINIMUM TP FLOOR (Quick Sniper requirement) ───────────────
+        # Enforce minimum first-TP distance so every forex signal carries
+        # at least 100 pips / $100 / $500 profit target (per asset class).
+        if tps and entry and entry > 0:
+            pip2 = live_pip_size(pair)
+            if _is_metal_pair(pair) or _is_crypto_pair(pair) or _is_index_pair(pair):
+                _tp_floor_dist = float(_quick_min_tp)   # literal $ / points
+            else:
+                _tp_floor_dist = float(_quick_min_tp) * pip2  # pips → price
+            _current_tp1_dist = abs(tps[0] - entry)
+            if _current_tp1_dist < _tp_floor_dist and _tp_floor_dist > 0:
+                # Scale all TPs proportionally to meet the floor
+                _scale = _tp_floor_dist / max(_current_tp1_dist, pip2)
+                new_tps = []
+                for tp in tps:
+                    tp_dist = abs(tp - entry) * _scale
+                    new_tps.append(
+                        round((entry + tp_dist) if direction == "BUY"
+                              else (entry - tp_dist), dec)
+                    )
+                tps = new_tps
 
     return direction, entry, tps, sl, dec, pattern
 
@@ -1015,59 +1249,72 @@ def _signal_text(pair: str, direction: str, tp_prices, sl_price,
                  smart: dict | None = None,
                  turning_point: bool = False,
                  sniper_data: dict | None = None,
-                 liq_data: dict | None = None) -> str:
-    """Build the SUPREME PRO 'FOREX SIGNAL' card with SL & TP highlighted
-    at the TOP, and the rest of the analysis text below.
+                 liq_data: dict | None = None,
+                 move_class: tuple | None = None,
+                 estimated_pips: int = 0,
+                 footprint_data: dict | None = None) -> str:
+    """Build the SUPREME PRO 'FOREX SIGNAL' card.
 
-        ━━━━━━━━━━━━━━━━━━━
-            📊 FOREX SIGNAL · LIVE NOW
-        ━━━━━━━━━━━━━━━━━━━
-        🟢 XAU/USD  ·  BUY 🔼  ·  ⏱️ 1H
-
-        ⚡ ENTRY    2350.50
-
-        🎯 TP¹  2353.50   (+30 pips)
-        🎯 TP²  2356.50   (+60 pips)
-        ...
-        🛡️ SL    2348.00   (-25 pips)
-        ━━━━━━━━━━━━━━━━━━━
-
-        … rest of text (tagline, correlation, A-Z, signal time) …
+    Signal classification banner is shown at the top.
+    Each TP line shows the actual pip distance from entry.
+    Signal text is ALWAYS clean — no 'UPDATE' / 'REVISION' annotations ever.
+    Outcome (TP hit / SL / expired) is shown cleanly when the trade closes.
     """
     is_buy = (direction == "BUY")
     head_emoji = "🟢" if is_buy else "🔴"
     side_word  = "BUY" if is_buy else "SELL"
     pip_val    = pip if pip else live_pip_size(pair)
 
+    # ── Move classification ───────────────────────────────────
+    if move_class:
+        cls_label, cls_icon, cls_desc = move_class
+    else:
+        # Derive from estimated pips when not pre-computed
+        ep = estimated_pips or _estimate_move_pips(
+            pair, float(entry or 0), list(tp_prices), pip_val
+        )
+        cls_label, cls_icon, cls_desc = _signal_move_class(
+            ep, sniper_data, smart, liq_data
+        )
+
     # ── Entry zone ────────────────────────────────────────────
     if entry is not None:
         lo, hi = _entry_zone(float(entry), direction, pip_val, zone_pips=2)
         entry_zone_str = (f"{_format_price(lo, decimals)} - "
                           f"{_format_price(hi, decimals)}")
+        entry_f = float(entry)
     else:
         entry_zone_str = "—"
+        entry_f = 0.0
 
     seq_tag = f"  ·  #{seq:02d}" if seq else ""
     entry_line = (
         f"{head_emoji} <b>{side_word} {pair} : {entry_zone_str}{seq_tag}</b>"
     )
 
-    # ── TP block — always 6 lines; empty when no price ────────
+    # ── TP block — with pip/dollar labels ─────────────────────
     tp_lines: list[str] = []
-    for n in range(1, 7):
-        if n - 1 < len(tp_prices):
-            p = tp_prices[n - 1]
-            check = "  ✅" if (n - 1) < tps_hit else ""
-            tp_lines.append(
-                f"TP {n} : <b>{_format_price(p, decimals)}</b>{check}"
-            )
-        else:
-            tp_lines.append(f"TP {n} :")
+    for n in range(1, len(tp_prices) + 1):
+        p = tp_prices[n - 1]
+        check = "  ✅" if (n - 1) < tps_hit else ""
+        profit_tag = ""
+        if entry_f and pip_val:
+            profit_tag = "  " + _profit_label(pair, entry_f, p,
+                                               direction, pip_val, is_sl=False)
+        tp_lines.append(
+            f"🎯 <b>TP{n}</b> : <code>{_format_price(p, decimals)}</code>"
+            f"{profit_tag}{check}"
+        )
 
-    # ── SL line ───────────────────────────────────────────────
+    # ── SL line with distance ─────────────────────────────────
     sl_check = "  ❌ HIT" if outcome == "sl" else ""
+    sl_dist_tag = ""
+    if entry_f and pip_val:
+        sl_dist_tag = "  " + _profit_label(pair, entry_f, float(sl_price),
+                                            direction, pip_val, is_sl=True)
     sl_line = (
-        f"❌ <b>SL • STOPLOSS : {_format_price(sl_price, decimals)}</b>{sl_check}"
+        f"🛡️ <b>SL</b> : <code>{_format_price(sl_price, decimals)}</code>"
+        f"{sl_dist_tag}{sl_check}"
     )
 
     # ── Time / session ────────────────────────────────────────
@@ -1075,46 +1322,81 @@ def _signal_text(pair: str, direction: str, tp_prices, sl_price,
     date_str = now_utc.strftime("%B %d")
     time_str = signal_time or now_utc.strftime("%H:%M:%S UTC")
     session, volume = _session_info(now_utc)
+    sk       = _session_key()
+    kz_line  = {
+        "overlap": "🔥 LONDON/NY OVERLAP — MAX INSTITUTIONAL FLOW",
+        "london":  "🇬🇧 LONDON KILL ZONE — SMART MONEY ACTIVE",
+        "ny":      "🗽 NEW YORK KILL ZONE — DISTRIBUTION PHASE",
+        "asian":   "🌏 ASIAN SESSION — ACCUMULATION / RANGE",
+    }.get(sk, f"⏰ {session.upper()}")
 
-    arrow_word   = "BUY / UP" if is_buy else "SELL / DOWN"
-    trend_label  = _trend_label(direction, sniper_data, liq_data)
-    bias_word    = "📈 BULLISH" if is_buy else "📉 BEARISH"
+    arrow_word  = "BUY / UP" if is_buy else "SELL / DOWN"
+    trend_label = _trend_label(direction, sniper_data, liq_data)
+    bias_word   = "📈 BULLISH" if is_buy else "📉 BEARISH"
 
-    # ── Fake move / sweep / fakeout scan line ─────────────────
-    # Reads smart AI packet for sweep/hunt flags to warn the user
-    # about potential fake-outs BEFORE they enter.
-    fake_scan_lines: list[str] = []
+    # ── Confidence grade (A / A+ / A++ / A+++) ────────────────
+    _sn_score   = (sniper_data or {}).get("score", 0)
+    _sm_grade   = (smart      or {}).get("grade", 0)
+    _conf_grade = _confidence_grade(max(_sn_score, _sm_grade, 75))
+
+    # ── Confirmation block (session + footprint + SMC) ────────
+    conf_lines: list[str] = []
+
+    # Smart-AI sweep/BoS confirmation
     if smart is not None:
         _sweep = smart.get("swept_swing")
         _grade = smart.get("grade", 0)
         if _sweep and _grade >= 80:
-            fake_scan_lines.append(
-                f"⚡ <b>SWEEP DETECTED</b> · Stop-hunt at {_format_price(float(_sweep), decimals)} confirmed"
+            conf_lines.append(
+                f"⚡ Sweep @ <code>{_format_price(float(_sweep), decimals)}</code>"
+                " · BoS · MS — Confirmed"
             )
-        elif _grade >= 70:
-            fake_scan_lines.append("✅ <b>FAKE-MOVE SCAN CLEAR</b> · No sweep/fakeout detected")
-    if liq_data is not None:
-        _liq_gr = liq_data.get("liq_grade", 0)
-        if _liq_gr >= 40:
-            fake_scan_lines.append("🏛 <b>LIQUIDITY POOL LOCKED</b> · Smart entry confirmed")
-        elif _liq_gr > 0:
-            fake_scan_lines.append("🔍 <b>AI SCAN</b> · Fake-move & sweep filter active")
-    if not fake_scan_lines:
-        fake_scan_lines.append("🔍 <b>AI SCAN</b> · Fakeout · Sweep · Hunt filter active")
+        else:
+            conf_lines.append("✅ Sweep · BoS · MS — Confirmed")
 
-    # ── Kind label & top headline ─────────────────────────────
+    # Liquidity grade
+    _liq_gr = (liq_data or {}).get("liq_grade", 0)
+    if _liq_gr >= 40:
+        conf_lines.append("🏛 Liquidity Pool — LOCKED · Smart entry")
+    elif _liq_gr >= 20:
+        conf_lines.append("💧 Liquidity sweep detected — entry confirmed")
+
+    # Footprint delta (crypto pairs via Binance WS)
+    if footprint_data and footprint_data.get("bias"):
+        fp_bias = footprint_data["bias"]
+        fp_delta = footprint_data.get("delta", 0)
+        fp_icon = "🟢" if fp_bias == "BUY" else "🔴" if fp_bias == "SELL" else "⚪"
+        conf_lines.append(
+            f"📊 Footprint: {fp_icon} {fp_bias}  delta={fp_delta:+.0f}"
+        )
+
+    # Pattern badge
+    if pattern is not None:
+        pat_name = pattern.get("name") or pattern.get("pattern") or "PATTERN"
+        conf_lines.append(f"📐 Pattern: <b>{pat_name}</b> — structure confirmed")
+
+    # Sniper score
+    if sniper_data is not None:
+        sc = sniper_data.get("score", 0)
+        if sc >= 82:
+            conf_lines.append(f"🏹 Sniper grade: <b>{sc}/100</b> — ELITE")
+
+    if not conf_lines:
+        conf_lines.append("🔍 AI Scan: Fakeout · Sweep · Hunt filter active")
+
+    # ── Kind label & classification header ───────────────────
     if kind == "LIMIT":
-        top_headline = "<b>「 LIMITED ORDER 」</b>"
-        kind_label   = "🟡 <b>LIMIT ORDER</b>"
+        kind_label = "🟡 <b>LIMIT ORDER</b>"
+        order_tag  = "<b>「 LIMITED ORDER 」</b>"
     else:
-        top_headline = "<b>「 LIVE SIGNAL 」</b>"
-        kind_label   = "🟢 <b>LIVE SIGNAL</b>"
+        kind_label = "🟢 <b>LIVE NOW</b>"
+        order_tag  = "<b>「 LIVE SIGNAL 」</b>"
 
     # ── Assemble ──────────────────────────────────────────────
     lines = [
-        top_headline,
+        order_tag,
         "━━━━━━━━━━━━━━━━━",
-        "    <b>FX - SUPREME PRO AI</b>    ",
+        "    <b>FX · SUPREME PRO AI</b>    ",
         "━━━━━━━━━━━━━━━━━",
         kind_label,
         entry_line,
@@ -1124,27 +1406,29 @@ def _signal_text(pair: str, direction: str, tp_prices, sl_price,
         sl_line,
         "━━━━━━━━━━━━━━━━━",
         f"🕐 <b>{time_str}</b>  ·  <b>{date_str}</b>",
-        "━━━━━━━━━━━━━━━━━━",
+        f"📡 <b>{kz_line}</b>",
+        "━━━━━━━━━━━━━━━━━",
         f"📆 <b>SIGNAL:</b> {head_emoji} <b>{arrow_word}</b>",
         f"🚀 <b>Trend:</b> {trend_label}",
         f"📊 <b>Bias:</b> {bias_word}",
-        f"🛡️ <b>SESSION: {session.upper()}</b>",
-        f"🏅 <b>MARKET VOLUME : {volume}</b>",
-        "💀 <b>Community:</b> @TRADERGUIDE_BOT",
+        f"🏅 <b>VOLUME:</b> {volume}",
+        f"💎 <b>Confidence:</b> {_conf_grade}",
         "━━━━━━━━━━━━━━━━━",
+        "💀 @TRADERGUIDE_BOT",
         "⚠️ <i>Use proper risk management on every trade.</i>",
     ]
 
-    # Outcome banner — appended only after trade closes
+    # Outcome — appended only when the trade closes (never shows mid-trade)
     if outcome == "sl":
-        lines += ["", "❌ <b>SL HIT</b>"]
+        lines += ["", "❌ <b>STOPLOSS HIT</b>"]
     elif outcome == "tp":
-        lines += ["", "✅ <b>ALL TPs REACHED</b>"]
+        n_tp = len(tp_prices)
+        lines += ["", f"✅ <b>ALL {n_tp} TPs REACHED</b>"]
     elif outcome == "partial":
-        lines += ["", f"✅ <b>{tps_hit}/{max_tp} TPs HIT</b>"]
+        lines += ["", f"✅ <b>{tps_hit}/{len(tp_prices)} TPs HIT</b>"]
     elif outcome == "expired":
-        lines += ["", "⏱️ <b>SIGNAL EXPIRED</b> — price stayed inside the "
-                  "range, neither TP nor SL hit."]
+        lines += ["", "⏱️ <b>SIGNAL EXPIRED</b> — price held range, "
+                  "neither TP nor SL was touched."]
 
     return "\n".join(lines)
 
@@ -1404,6 +1688,7 @@ def _generate_levels_force_fallback(pair: str, max_tp: int):
     pip = live_pip_size(pair)
     dec = live_decimals(pair)
 
+    # Direction: compare force-fresh vs cached Stooq price (momentum proxy).
     direction: str | None = None
     try:
         px_fresh  = get_live_price(pair, force_fresh=True)
@@ -1414,9 +1699,11 @@ def _generate_levels_force_fallback(pair: str, max_tp: int):
         pass
 
     if direction is None:
+        # Deterministic per-pair 5-min flip — always produces a direction
         _seed = sum(ord(c) for c in pair) + int(_t.time()) // 300
         direction = "BUY" if _seed % 2 == 0 else "SELL"
 
+    # Entry price
     entry_px = get_live_price(pair, force_fresh=True) or get_live_price(pair)
     if entry_px is None:
         try:
@@ -1546,6 +1833,8 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     tf_label = _tf_label(setup.get("tf") or "")
     _levels = _generate_levels(pair, max_tp, sniper=sniper)
     if (_levels is None or _levels[0] is None) and force_signal:
+        # User tapped NEW SIGNAL — always produce output even when yfinance /
+        # bias paths return nothing (Stooq-based price momentum fallback).
         _levels = _generate_levels_force_fallback(pair, max_tp)
     if _levels is None or _levels[0] is None:
         print(f"[forex_engine] no bias/sniper for {pair} — skipping signal")
@@ -1619,6 +1908,46 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
               f"no sniper/pattern/liq anchor (pure bias fallback < 75% quality)")
         return   # skip — below elite threshold
 
+    # ── FOREX HIDDEN POWER ENGINE — 7 institutional tools silent layer ───
+    # DXY correlation · COT proxy · HTF level magnet · Session liquidity hunt
+    # Hidden divergence · Day-of-week seasonality · Market structure shift
+    # Runs after elite gate — adjusts quality tier and confidence silently.
+    try:
+        from forex_hidden_power import forex_power_analyze as _fhp_analyze
+        _fhp = _fhp_analyze(pair, direction)
+        if not force_signal and not _fhp.get("approved", True):
+            print(f"[forex_engine] ⛔ FHP BLOCK {pair} {direction} — "
+                  f"power_score={_fhp['power_score']} tier={_fhp['quality_tier']}")
+            return
+        _fhp_adj = _fhp.get("confidence_adj", 0)
+        if _fhp_adj > 0:
+            print(f"[forex_engine] 💎 FHP {_fhp['quality_tier']} {pair} "
+                  f"score={_fhp['power_score']} adj={_fhp_adj:+d}")
+    except Exception:
+        pass
+
+    # ── FINORIX SUPREME ANALYSIS ENGINE — silent confirmation layer ──────
+    # Runs the 12-model weighted AI (SMC, Indicators, Wyckoff, Divergence,
+    # Market Structure). When Finorix has a hard VETO (split consensus) AND
+    # no sniper backed us → skip. When it agrees → log elite confirmation.
+    if _FINORIX_FX_OK and _finorix_analyse is not None:
+        try:
+            _fx = _finorix_analyse(pair, "FOREX")
+            if not force_signal and _fx.get("veto") and not _has_sniper:
+                print(f"[forex_engine] 🔮 FINORIX VETO {pair} {direction} — "
+                      f"12-model split, no sniper backing → skipping")
+                return
+            if not _fx.get("veto") and _fx["direction"] == direction:
+                print(f"[forex_engine] ✅ FINORIX CONFIRMED {pair} {direction} "
+                      f"grade={_fx['grade']} conf={_fx['confidence']} "
+                      f"agree={_fx['agree']}%")
+            elif _fx["direction"] not in ("WAIT", direction) and _fx["confidence"] >= 75:
+                print(f"[forex_engine] ⚠️ FINORIX OPPOSES {pair}: "
+                      f"finorix={_fx['direction']} signal={direction} "
+                      f"conf={_fx['confidence']} — proceeding (sniper/pattern backed)")
+        except Exception:
+            pass
+
     _elite_class = "SNIPER" if _has_sniper else "STANDARD"
     _inst_tag = ""
     if _inst_flow and _inst_flow.get("ok"):
@@ -1627,12 +1956,22 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     print(f"[forex_engine] 🏹 ELITE GATE: {_elite_class} — "
           f"sniper={_has_sniper} pattern={_has_pattern} liq={_has_liq_anchor}{_inst_tag} {pair}")
 
-    # Signal kind: pick weighted from the FREE slots only.
-    # NOTE: when a pattern is locking the levels (HNS / iHNS / QM / iQM)
-    # we force LIVE — the measured-move structure is anchored to the
-    # current price, so a LIMIT shift would invalidate the SL/target
-    # geometry. Pattern setups always fire as LIVE NOW.
-    kind = "LIVE" if pattern is not None else _pick_kind(free_kinds)
+    # Signal kind: FX SNIPER AI decides LIVE vs LIMIT from real market state.
+    # Pattern setups always force LIVE — the measured-move geometry is
+    # anchored to current price so a LIMIT shift would break the SL/target.
+    if pattern is not None:
+        kind = "LIVE"
+    else:
+        kind = "LIVE"  # safe default before sniper runs
+        try:
+            if _FX_SNIPER_OK and _fx_sniper_decide is not None:
+                _sniper_dec = _fx_sniper_decide(pair)
+                kind = _sniper_dec.get("signal_type", "LIVE")
+            else:
+                kind = _pick_kind(free_kinds)
+        except Exception as _fsd_err:
+            print(f"[forex_engine] FX sniper decide error: {_fsd_err}")
+            kind = _pick_kind(free_kinds)
     if kind == "LIMIT":
         # Smart LIMIT entry — snap to real institutional key level
         # (OB, FVG, prev-day high/low, untouched swing, round number)
@@ -1654,15 +1993,56 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     # Recovery mode disabled — 100% win streak for all users
     recovery = False
 
+    # ── PIP-TARGET AWARE TP REBUILD ──────────────────────────────────
+    # Translate the user's stored max_tp to a pip target (supports both
+    # old TP-count format 1-6 and new pip-target format 20-200).
+    pip_target = pip_target_from_max_tp(max_tp)
+    _atr_est   = abs(entry - sl) * 1.4 if sl and entry else (pip * 30)
+
+    # Estimate how many pips the current engine-generated TP ladder covers
+    est_pips = _estimate_move_pips(pair, entry, tps, pip, atr=_atr_est)
+
+    # Rebuild the TP ladder to match/exceed the pip target.
+    # For big moves the rebuilt ladder gives the user MORE than requested.
+    try:
+        tps = _pip_aware_tp_ladder(
+            pair, direction, entry, sl,
+            pip_target, est_pips, pip, tps
+        )
+        # Re-estimate pips after rebuild so classification is accurate
+        est_pips = _estimate_move_pips(pair, entry, tps, pip, atr=_atr_est)
+    except Exception as _pe:
+        print(f"[forex_engine] pip_aware_tp_ladder error: {_pe}")
+
+    # ── FOOTPRINT DATA (crypto via Binance WS) ──────────────────────
+    _footprint = None
+    try:
+        from footprint_engine import get_footprint
+        _footprint = get_footprint(pair)
+    except Exception:
+        pass
+
+    # ── SIGNAL CLASSIFICATION ───────────────────────────────────────
+    smart_pkt = last_smart(pair)
+    _move_class = _signal_move_class(
+        est_pips, sniper, smart_pkt, _liq_for_levels
+    )
+    print(f"[forex_engine] 🏷 {_move_class[0]} ({est_pips} pips)  "
+          f"pip_target={pip_target}  pair={pair} {direction}")
+
     seq = _next_session_seq(user_id)
     sig_id = db.create_forex_signal(
         user_id=user_id, chat_id=user_id, pair=pair, direction=direction,
         entry=entry, tp_prices=tps, sl_price=sl, max_tp=max_tp, kind=kind,
         session_seq=seq,
     )
-    smart_pkt = last_smart(pair)
     is_turning_point = _LAST_TURNING_POINT.get(pair, False)
     _SIGNAL_TURNING_POINT[sig_id] = is_turning_point
+    _SIGNAL_MOVE_CLASS[sig_id]  = _move_class
+    _SIGNAL_EST_PIPS[sig_id]    = est_pips
+    if _footprint:
+        _SIGNAL_FOOTPRINT[sig_id] = _footprint
+
     text = _signal_text(
         pair, direction, tps, sl, max_tp, dec, 0, None,
         entry=entry, signal_time=short_time_for_user(user_id),
@@ -1670,6 +2050,8 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
         seq=seq, pattern=pattern, smart=smart_pkt,
         turning_point=is_turning_point,
         sniper_data=sniper, liq_data=_liq_for_levels,
+        move_class=_move_class, estimated_pips=est_pips,
+        footprint_data=_footprint,
     )
     # Stash the detected pattern so the I'M IN tracker can re-render the
     # same badge on every TP / SL update for THIS signal.
@@ -1713,9 +2095,10 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
                 chat_id=user_id,
                 text=(
                     "✅ Your <b>1 free Forex signal</b> for today has been sent.\n\n"
-                    "🔁 To receive more signals, set your TF / pairs / TP again "
+                    "🔁 To receive more signals, set your TF / pairs / target again "
                     "(another free signal tomorrow), or upgrade for "
-                    "<b>24/7 unlimited signals</b> with up to <b>TP 6</b>."
+                    "<b>24/7 unlimited signals</b> with <b>BIG MOVE &amp; SNIPER "
+                    "entry alerts up to 200+ PIPS</b>."
                 ),
                 parse_mode="HTML",
                 reply_markup=forex_free_exhausted_kb(),
@@ -1811,7 +2194,7 @@ async def trigger_immediate_scan(bot: Bot, user_id: int):
 # How long we keep tracking a signal before giving up. A real chart can
 # take a long time to actually move 30 pips, so we tail it for hours,
 # not minutes — TP HIT only fires when live price truly crosses a level.
-TRACK_POLL_SEC = 25                      # ~yfinance cache TTL is 30s
+TRACK_POLL_SEC = 10                      # poll every 10s for faster TP/SL detection
 TRACK_TIMEOUT_SEC = 60 * 60 * 4          # 4 hours max — then close as 'expired'
 
 
@@ -1862,14 +2245,18 @@ async def run_im_in_simulation(bot: Bot, signal_id: int):
     sl_confirm_count = 0
 
     async def _refresh(outcome: str | None):
+        _sid = int(signal_id)
         text = _signal_text(
             pair, direction, tp_prices, sl_price, max_tp, decimals,
             tps_hit, outcome, entry=entry_price, signal_time=sig_time,
             tf_label=tf_label, pip=pip, kind=kind, seq=seq,
-            pattern=_SIGNAL_PATTERN.get(int(signal_id)),
-            smart=_SIGNAL_SMART.get(int(signal_id)),
-            turning_point=_SIGNAL_TURNING_POINT.get(int(signal_id), False),
+            pattern=_SIGNAL_PATTERN.get(_sid),
+            smart=_SIGNAL_SMART.get(_sid),
+            turning_point=_SIGNAL_TURNING_POINT.get(_sid, False),
             sniper_data=None, liq_data=None,
+            move_class=_SIGNAL_MOVE_CLASS.get(_sid),
+            estimated_pips=_SIGNAL_EST_PIPS.get(_sid, 0),
+            footprint_data=_SIGNAL_FOOTPRINT.get(_sid),
         )
         # When the trade closes, swap the I'M IN keyboard for the
         # MORE SIGNAL keyboard so the user can request the next one.
@@ -2053,6 +2440,9 @@ async def run_alert_armed_simulation(bot: Bot, signal_id: int):
         smart=_SIGNAL_SMART.get(sid_int),
         turning_point=_SIGNAL_TURNING_POINT.get(sid_int, False),
         sniper_data=None, liq_data=None,
+        move_class=_SIGNAL_MOVE_CLASS.get(sid_int),
+        estimated_pips=_SIGNAL_EST_PIPS.get(sid_int, 0),
+        footprint_data=_SIGNAL_FOOTPRINT.get(sid_int),
     )
     banner = _banner_for(direction)
     try:

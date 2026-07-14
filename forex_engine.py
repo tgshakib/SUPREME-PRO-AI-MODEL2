@@ -114,6 +114,14 @@ except Exception as _fxe:
     _FX_EXPERT_OK = False
 
 try:
+    from fx_sniper_engine import fx_sniper_decide as _fx_sniper_decide
+    _FX_SNIPER_OK = True
+except Exception as _fxse:
+    print(f"[forex_engine] fx_sniper_engine import failed: {_fxse}")
+    _fx_sniper_decide = None  # type: ignore
+    _FX_SNIPER_OK = False
+
+try:
     from forex_quick_engine import forex_quick_sniper as _fqs
     _FQS_OK = True
 except Exception as _fqse:
@@ -1948,12 +1956,22 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     print(f"[forex_engine] 🏹 ELITE GATE: {_elite_class} — "
           f"sniper={_has_sniper} pattern={_has_pattern} liq={_has_liq_anchor}{_inst_tag} {pair}")
 
-    # Signal kind: pick weighted from the FREE slots only.
-    # NOTE: when a pattern is locking the levels (HNS / iHNS / QM / iQM)
-    # we force LIVE — the measured-move structure is anchored to the
-    # current price, so a LIMIT shift would invalidate the SL/target
-    # geometry. Pattern setups always fire as LIVE NOW.
-    kind = "LIVE" if pattern is not None else _pick_kind(free_kinds)
+    # Signal kind: FX SNIPER AI decides LIVE vs LIMIT from real market state.
+    # Pattern setups always force LIVE — the measured-move geometry is
+    # anchored to current price so a LIMIT shift would break the SL/target.
+    if pattern is not None:
+        kind = "LIVE"
+    else:
+        kind = "LIVE"  # safe default before sniper runs
+        try:
+            if _FX_SNIPER_OK and _fx_sniper_decide is not None:
+                _sniper_dec = _fx_sniper_decide(pair)
+                kind = _sniper_dec.get("signal_type", "LIVE")
+            else:
+                kind = _pick_kind(free_kinds)
+        except Exception as _fsd_err:
+            print(f"[forex_engine] FX sniper decide error: {_fsd_err}")
+            kind = _pick_kind(free_kinds)
     if kind == "LIMIT":
         # Smart LIMIT entry — snap to real institutional key level
         # (OB, FVG, prev-day high/low, untouched swing, round number)

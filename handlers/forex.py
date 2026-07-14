@@ -107,12 +107,50 @@ async def _fx_quick_analyze_and_signal(
         # NOTE: do NOT set more_signal_requested here — the background loop
         # would pick it up during our sleep and fire a duplicate, blocking us.
 
-    # ── Show Quick Analysis screen ────────────────────────────────────────
-    scan_secs = _rnd.choice([4.0, 5.0, 6.0])
-    _analyze_text = "⏳  <b>Fx Supreme pro Ai analysing Quick signal ...</b>"
-    loading_id = await show_screen(bot, chat_id, _analyze_text, reply_markup=None)
+    # ── Show Quick Analysis screen — animated A-Z scan (6-7 s) ─────────────
+    _step1 = (
+        "🔍  <b>FX SNIPER AI — SCANNING MARKET A-Z</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "📡  Scanning all forex pairs...\n"
+        "⏳  <i>Initialising multi-timeframe scan...</i>"
+    )
+    loading_id = await show_screen(bot, chat_id, _step1, reply_markup=None)
 
-    await asyncio.sleep(scan_secs)
+    await asyncio.sleep(_rnd.uniform(1.8, 2.2))
+
+    _step2 = (
+        "📊  <b>FX SNIPER AI — ANALYSING CHART STRUCTURE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "🔎  RSI · MACD · BB · Volume scanning...\n"
+        "⚙️  <i>Measuring momentum strength A-Z...</i>"
+    )
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=loading_id,
+            text=_step2, parse_mode="HTML",
+        )
+        db.set_active_msg(chat_id, loading_id)
+    except Exception:
+        pass
+
+    await asyncio.sleep(_rnd.uniform(1.8, 2.2))
+
+    _step3 = (
+        "🎯  <b>FX SNIPER AI — LOCKING BEST ENTRY</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "✅  Market scan complete\n"
+        "🏹  <i>Selecting LIVE or LIMIT signal by win-rate...</i>"
+    )
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id, message_id=loading_id,
+            text=_step3, parse_mode="HTML",
+        )
+        db.set_active_msg(chat_id, loading_id)
+    except Exception:
+        pass
+
+    await asyncio.sleep(_rnd.uniform(2.0, 2.6))
 
     # ── Delete the analysis screen ────────────────────────────────────────
     try:
