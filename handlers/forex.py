@@ -375,6 +375,16 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
     await show_screen(call.bot, call.message.chat.id, text,
                       forex_active_kb(gold_king=gold_on))
 
+    # ── Immediate first signal — fire within 7-10 s ───────────────────────
+    # After the user completes TF → Pairs → Pips setup, launch the animated
+    # analysis scan immediately. Signal (text + photo) fires at the end.
+    asyncio.create_task(
+        _fx_quick_analyze_and_signal(
+            call.bot, call.message.chat.id, call.from_user.id,
+            wipe_first=False,
+        )
+    )
+
 
 # ── STOP ──────────────────────────────────────────────────
 @router.callback_query(F.data == "fx:stop")

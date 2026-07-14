@@ -573,9 +573,30 @@ async def run_funded_pass_loop(bot: Bot):
                     if (now - created).total_seconds() < random.randint(*FP_FIRST_DELAY_SEC):
                         continue
 
-                # Cap: max 2 OPEN signals on the funded-pass pair at once
-                if db.count_open_forex_signals_for_pair(user_id, fp["pair"]) >= 2:
-                    continue
+                # FUNDED PASS SIGNAL RULE:
+                # Only 1 open signal at a time (max win-rate discipline).
+                # Exception: if a higher-quality setup is detected (AI sniper
+                # confidence ≥ 95 = A++ / A+++ tier), allow a 2nd signal.
+                open_count = db.count_open_forex_signals_for_pair(
+                    user_id, fp["pair"]
+                )
+                if open_count >= 1:
+                    _allow_second = False
+                    if open_count == 1:
+                        try:
+                            from fx_sniper_engine import fx_sniper_decide
+                            _dec = fx_sniper_decide(fp["pair"])
+                            if _dec.get("confidence", 0) >= 95:
+                                _allow_second = True
+                                print(
+                                    f"[funded_pass] 🎯 HIGHER QUALITY setup "
+                                    f"{fp['pair']} conf={_dec['confidence']} "
+                                    f"→ firing 2nd signal"
+                                )
+                        except Exception as _fse:
+                            print(f"[funded_pass] sniper check error: {_fse}")
+                    if not _allow_second:
+                        continue
 
                 await _send_fp_signal(bot, fp)
         except Exception as e:
