@@ -108,7 +108,7 @@ async def _fx_quick_analyze_and_signal(
         # would pick it up during our sleep and fire a duplicate, blocking us.
 
     # ── Show Quick Analysis screen ────────────────────────────────────────
-    scan_secs = _rnd.choice([6.0, 7.0])
+    scan_secs = _rnd.choice([4.0, 5.0, 6.0])
     _analyze_text = "⏳  <b>Fx Supreme pro Ai analysing Quick signal ...</b>"
     loading_id = await show_screen(bot, chat_id, _analyze_text, reply_markup=None)
 

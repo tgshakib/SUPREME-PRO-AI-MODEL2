@@ -237,6 +237,14 @@ except Exception as _30se:
     _30S_OK = False
 
 try:
+    from finorix_sharp import finorix_sharp as _finorix_sharp
+    _FINORIX_SHARP_OK = True
+except Exception as _fse:
+    print(f"[signals] finorix_sharp import failed: {_fse}")
+    _finorix_sharp = None  # type: ignore
+    _FINORIX_SHARP_OK = False
+
+try:
     from stockley_ai import stockley_analyze as _stockley
     _STOCKLEY_OK = True
 except Exception as _ste:
@@ -1047,6 +1055,27 @@ def generate_signal(
                     _engine_votes.append(_rv_dir)   # 3 votes — strong reversal override
                     print(f"[signals] ⚡ REVERSAL OVERRIDE {pair}: "
                           f"{direction}→{_rv_dir} quality={_rv_quality}")
+            except Exception:
+                pass
+
+        # ── FINORIX SHARP — RSI(14)+MACD+BB+Pattern+BidAsk+OrderFlow ────
+        # Updated Finorix — removes all lagging SMA/EMA crossover models.
+        # Non-martingale validator: requires score gap ≥ 15 + strength ≥ 0.30.
+        # Veto (conflicting scores) → mild confidence dip. Elite → double vote.
+        # Works for OTC and LIVE. Contract: zero side-effects.
+        if _FINORIX_SHARP_OK and _finorix_sharp is not None and direction is not None:
+            try:
+                _fs = _finorix_sharp(pair, is_otc=is_otc,
+                                     market_type="OTC" if is_otc else "LIVE")
+                _fs_dir = _fs.get("direction", "WAIT")
+                if _fs.get("ok") and _fs_dir == direction:
+                    _engine_votes.append(direction)
+                    if _fs.get("elite"):
+                        _engine_votes.append(direction)   # double for elite
+                    if _fs.get("confidence", 0) >= 88:
+                        confidence = min(100, (confidence or 97) + 1)
+                elif _fs.get("veto") and not elite_confirmed:
+                    confidence = max(90, (confidence or 97) - 2)
             except Exception:
                 pass
 

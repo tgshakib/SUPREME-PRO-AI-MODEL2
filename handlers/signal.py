@@ -260,9 +260,9 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         call.bot, chat_id, loading, reply_markup=None,
     )
 
-    # Hard-locked scan window: 5 / 6 / 7 seconds total — ALL users/modes.
+    # Hard-locked scan window: 3–6 seconds — all users/modes (max total ≤ 10s).
     import random as _rnd
-    _scan_secs = _rnd.choice([5.0, 6.0, 7.0])
+    _scan_secs = _rnd.choice([3.0, 4.0, 5.0, 6.0])
     await asyncio.sleep(_scan_secs)
 
     sig = generate_signal(pair, market_name, tf_label, user_id=user_id, broker=broker)
