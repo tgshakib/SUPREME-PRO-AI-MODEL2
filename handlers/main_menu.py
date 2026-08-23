@@ -510,7 +510,7 @@ async def on_location(msg: Message):
     await msg.answer(
         f"✅ Timezone detected: <b>{tz_name}</b>\n"
         f"🕐 Your local time now: <b>{local_now}</b>\n\n"
-        "All future signals will show times in your local timezone.",
+        "All signals will show times in your local timezone.",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove(),
     )

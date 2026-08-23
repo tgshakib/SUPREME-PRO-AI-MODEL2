@@ -5,4 +5,3 @@
 - [QX pyquotex Cloudflare bypass](qx-pyquotex-cf-bypass.md) — Cloudflare blocks ALL HTTP login from Replit datacenter IPs; bypass = pre-seed session.json with real token; pyquotex skips HTTP auth when session_data["token"] is set
 - [Finorix Elite Engine](finorix-elite-engine.md) — finorix_elite_engine.py; 5-module: H1→M15→M5→M1 cascade + elite S&R zones + hidden reversal detector + ADX/EMA trend strength + zone confluence; HIDDEN grade = triple vote; signal text NEVER touched
 - [Binary & Forex Strength Upgrade](binary-forex-upgrade.md) — binary: OTC 0 gates=BLOCKED/1=WEAK/2+=standard+; LIVE <2 gates=BLOCKED; doji 0.22→0.28; oppose 0.60→0.45; _otc_min 4→6; forex: min TP1=100 pips; SL max 30→20 pips; forex_quick_engine.py consensus gate
-- [Future Signal source constraint](future-signal-source.md) — imported Pocket Option/OTC adapters generate simulated candles, so label fallback data honestly
