@@ -8,9 +8,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # System libs: needed by pandas / yfinance HTTPS, plus tzdata for timezones
  RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata git && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir -r requirements.txt
+COPY.. 
 
-COPY . .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # SQLite DB lives next to the source — mount a volume here for persistence
 
