@@ -52,6 +52,8 @@ _REFRESH_RATIO     = 0.85              # refresh at 85% of lifetime
 _EARLY_REFRESH_BUFFER = 240            # also refresh if < 4 min remain
 
 _SSID_STAMP: dict = {}   # {"ssid": str, "fetched_at": float, "ttl": int}
+_LAST_LOGIN_ATTEMPT = 0.0
+_LOGIN_ATTEMPT_COOLDOWN = 60.0
 
 # Public flag — set True by the stream when WS sends "authorization/reject"
 QX_SSID_REJECTED: bool = False
@@ -142,18 +144,24 @@ def _do_pyquotex_login() -> Optional[str]:
     Returns the raw session token string on success, None on failure.
     """
     import threading
+    global _LAST_LOGIN_ATTEMPT
 
     if not QX_EMAIL or not QX_PASSWORD:
         logger.error("[qx_auth] QUOTEX_EMAIL and QUOTEX_PASSWORD are not configured")
         return None
+    now = time.monotonic()
+    if now - _LAST_LOGIN_ATTEMPT < _LOGIN_ATTEMPT_COOLDOWN:
+        logger.debug("[qx_auth] Auto-login is already in progress or recently attempted")
+        return None
+    _LAST_LOGIN_ATTEMPT = now
 
     try:
-        from pyquotex.stable_api import Quotex as _Quotex
+        from pyquotex.stable_api import ProxyConfig, Quotex as _Quotex
     except ImportError:
         logger.debug("[qx_auth] pyquotex not installed — skipping WS login")
         return None
 
-    logger.info(f"[qx_auth] 🔐 Attempting pyquotex WS login for {QX_EMAIL} …")
+    logger.info("[qx_auth] 🔐 Attempting pyquotex auto-login …")
 
     _token_out: list = [None]
 
@@ -162,18 +170,39 @@ def _do_pyquotex_login() -> Optional[str]:
         import pickle as _pk
         from pathlib import Path as _Pt
 
-        client = _Quotex(email=QX_EMAIL, password=QX_PASSWORD, lang="en")
+        try:
+            proxy_config = ProxyConfig(use_browser_tls=True)
+        except Exception:
+            proxy_config = None
+        client = _Quotex(
+            email=QX_EMAIL,
+            password=QX_PASSWORD,
+            lang="en",
+            proxy_config=proxy_config,
+        )
         try:
             check, reason = await asyncio.wait_for(client.connect(), timeout=35)
         except asyncio.TimeoutError:
-            logger.debug("[qx_auth] pyquotex connect timed out (35 s)")
+            logger.warning("[qx_auth] pyquotex connection timed out after 35 seconds")
             try:
                 await asyncio.wait_for(client.close(), timeout=4)
             except Exception:
                 pass
             return
         except Exception as exc:
-            logger.debug(f"[qx_auth] pyquotex connect error: {exc}")
+            detail = " ".join(str(exc).split())
+            detail = detail.replace(QX_EMAIL, "[redacted email]")
+            detail = detail.replace(QX_PASSWORD, "[redacted password]")
+            detail = re.sub(
+                r"(?i)\b(token|session|cookie)\s*[=:]\s*\S+",
+                r"\1=[redacted]",
+                detail,
+            )[:160]
+            logger.warning(
+                "[qx_auth] pyquotex connection failed (%s): %s",
+                type(exc).__name__,
+                detail or "no broker detail",
+            )
             try:
                 await asyncio.wait_for(client.close(), timeout=4)
             except Exception:
@@ -181,7 +210,8 @@ def _do_pyquotex_login() -> Optional[str]:
             return
 
         if not check:
-            logger.warning(f"[qx_auth] pyquotex auth rejected: {reason}")
+            safe_reason = str(reason).replace(QX_EMAIL, "[redacted email]")[:160]
+            logger.warning("[qx_auth] pyquotex authentication was rejected: %s", safe_reason)
             try:
                 await asyncio.wait_for(client.close(), timeout=4)
             except Exception:
@@ -212,9 +242,29 @@ def _do_pyquotex_login() -> Optional[str]:
                 logger.debug(f"[qx_auth] sessions.pkl read: {exc}")
             return None
 
-        token = await asyncio.get_event_loop().run_in_executor(None, _read_pkl)
+        # ── 1. session.json (current pyquotex persistence format) ─────────
+        def _read_session_json() -> Optional[str]:
+            try:
+                path = _Pt("session.json")
+                if not path.exists():
+                    return None
+                data = json.loads(path.read_text(encoding="utf-8"))
+                record = data.get(QX_EMAIL, {}) if isinstance(data, dict) else {}
+                if not isinstance(record, dict):
+                    return None
+                candidate = record.get("token") or record.get("ssid")
+                return candidate if isinstance(candidate, str) else None
+            except Exception as exc:
+                logger.debug(f"[qx_auth] session.json read: {exc}")
+                return None
 
-        # ── 2. Client / api attribute walk ────────────────────────────────
+        token = await asyncio.get_event_loop().run_in_executor(None, _read_session_json)
+
+        # ── 2. Legacy sessions.pkl used by older Quotex clients ───────────
+        if not token:
+            token = await asyncio.get_event_loop().run_in_executor(None, _read_pkl)
+
+        # ── 3. Client / api attribute walk ────────────────────────────────
         if not token:
             for obj in (client, getattr(client, "api", None)):
                 if obj is None:
@@ -230,9 +280,11 @@ def _do_pyquotex_login() -> Optional[str]:
                 if token:
                     break
 
-        # ── 3. Second pkl attempt after extra delay ────────────────────────
+        # ── 4. Second persistence attempt after extra delay ───────────────
         if not token:
             await asyncio.sleep(2)
+            token = await asyncio.get_event_loop().run_in_executor(None, _read_session_json)
+        if not token:
             token = await asyncio.get_event_loop().run_in_executor(None, _read_pkl)
 
         try:
@@ -250,7 +302,10 @@ def _do_pyquotex_login() -> Optional[str]:
         try:
             asyncio.run(_work())
         except Exception as exc:
-            logger.debug(f"[qx_auth] pyquotex thread error: {exc}")
+            logger.warning(
+                "[qx_auth] pyquotex login worker stopped (%s)",
+                type(exc).__name__,
+            )
 
     t = threading.Thread(target=_thread_main, daemon=True, name="qx_pyquotex_login")
     t.start()

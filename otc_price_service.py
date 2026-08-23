@@ -576,17 +576,17 @@ async def _qx_stream_once():
         except Exception:
             pass
 
-    if token and len(token) > 10:
-        _seed_pyquotex_session(token)
-        logger.info("[otc_svc:qx] SSID seeded → skipping Cloudflare HTTP auth")
-        _proxy_cfg = None   # WS doesn't need curl_cffi
-    else:
-        # No token — try HTTP login with curl_cffi TLS fingerprint
-        logger.info("[otc_svc:qx] No SSID — attempting HTTP login (curl_cffi) …")
-        try:
-            _proxy_cfg = ProxyConfig(use_browser_tls=True)
-        except Exception:
-            _proxy_cfg = None
+    if not token or len(token) <= 10:
+        # qx_auth.py owns email/password login and SSID renewal.  Starting a
+        # second direct login here causes concurrent Cloudflare challenges and
+        # makes successful token persistence unreliable.
+        logger.info("[otc_svc:qx] Waiting for managed Quotex SSID …")
+        await asyncio.sleep(60)
+        return
+
+    _seed_pyquotex_session(token)
+    logger.info("[otc_svc:qx] SSID seeded → skipping Cloudflare HTTP auth")
+    _proxy_cfg = None   # WS does not need a browser-TLS HTTP client
 
     client = Quotex(
         email=QX_EMAIL,

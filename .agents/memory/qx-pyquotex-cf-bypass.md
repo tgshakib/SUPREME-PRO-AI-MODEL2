@@ -4,7 +4,7 @@ description: How to connect pyquotex to Quotex from Replit when Cloudflare block
 ---
 
 ## The rule
-Cloudflare blocks ALL HTTP login requests to qxbroker.com from Replit (and any other datacenter) IPs — even with curl_cffi Chrome TLS fingerprint impersonation (`impersonate="chrome120"`). The HTTP 403 is a network-level datacenter block, not a TLS fingerprint check.
+Cloudflare blocks ALL HTTP login requests to qxbroker.com from Replit (and other datacenter) IPs — including `pyquotex` with curl_cffi Chrome TLS fingerprint impersonation (`impersonate="chrome120"`). The confirmed HTTP 403 is a network-level datacenter block, not a TLS fingerprint check.
 
 **Why:** Cloudflare's bot manager flags Replit/cloud ASNs at the IP reputation layer before TLS is even inspected.
 
@@ -33,9 +33,9 @@ Steps for user:
 3. Copy the short alphanumeric value
 4. Set as `QUOTEX_SSID` in Replit Secrets
 
-Token TTL: ~30 days. `qx_auth.py` auto-refreshes via digest endpoint before expiry.
+Token TTL: ~30 days. `qx_auth.py` keeps a stored SSID available to the stream and attempts its renewal before expiry; a manual replacement is required if the broker rejects refreshes from this host.
 
 ## Libraries
-- `pyquotex` (iahmedani fork): `pip install git+https://github.com/iahmedani/pyquotex.git --ignore-requires-python` (works on Python 3.11 despite `>=3.12` metadata)
-- `curl_cffi`: installed as optional TLS backend; activate with `ProxyConfig(use_browser_tls=True)` — useful for non-datacenter IPs
+- `pyquotex` (iahmedani fork): supported release requires Python 3.12+. Do not bypass its Python-version requirement.
+- `curl_cffi`: browser-TLS mode is enabled via `ProxyConfig(use_browser_tls=True)` but does not bypass datacenter-IP reputation blocks.
 - `quotexpy` (older): needs SSID not email/password; avoid — causes `authorization/reject` loop

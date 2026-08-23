@@ -15,6 +15,4 @@ pyfiglet>=1.0.2
 flask>=3.0
 anthropic>=0.25.0
 pyzipper>=0.4.0
-websockets>=12.0
-pandas
-yfinance
+pyquotex @ git+https://github.com/iahmedani/pyquotex.git
