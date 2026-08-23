@@ -98,7 +98,7 @@ async def _check_required_bot_alive(bot, user_id: int) -> bool:
     return True
 
 
-async def render_home(bot, chat_id: int, user=None):
+async def render_home(bot, chat_id: int, user=None, *, fast: bool = False):
     # Verification gate
     if not db.is_verified(chat_id):
         await show_screen(bot, chat_id, JOIN_REQUIRED_TEXT, join_required_kb())
@@ -124,7 +124,7 @@ async def render_home(bot, chat_id: int, user=None):
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "assets", "welcome.jpg",
     )
-    if os.path.exists(welcome_photo):
+    if os.path.exists(welcome_photo) and not fast:
         await show_photo_screen(
             bot, chat_id,
             photo_path=welcome_photo,
@@ -189,11 +189,11 @@ async def cmd_start(message: Message):
                 except Exception:
                     pass
 
+    await render_home(message.bot, message.chat.id, user, fast=True)
     try:
         await message.delete()
     except Exception:
         pass
-    await render_home(message.bot, message.chat.id, user)
 
 
 @router.message(Command("admin"))
@@ -233,14 +233,14 @@ async def cmd_home(message: Message):
         await message.delete()
     except Exception:
         pass
-    await render_home(message.bot, message.chat.id, message.from_user)
+    await render_home(message.bot, message.chat.id, message.from_user, fast=True)
 
 
 @router.callback_query(F.data == "verify_join")
 async def cb_verify_join(call: CallbackQuery):
     db.set_verified(call.from_user.id, 1)
     await call.answer("✅ Verified — welcome aboard!")
-    await render_home(call.bot, call.message.chat.id, call.from_user)
+    await render_home(call.bot, call.message.chat.id, call.from_user, fast=True)
 
 
 @router.callback_query(F.data == "noop")
@@ -259,7 +259,7 @@ async def cb_home(call: CallbackQuery):
         await wipe_user_signals(call.bot, call.from_user.id)
     except Exception:
         pass
-    await render_home(call.bot, call.message.chat.id, call.from_user)
+    await render_home(call.bot, call.message.chat.id, call.from_user, fast=True)
 
 
 # ── Timezone picker (inline keyboard from home) ─────────────────────────

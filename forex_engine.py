@@ -1752,6 +1752,10 @@ def _generate_levels_force_fallback(
 
 async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     user_id = setup["user_id"]
+    # Manual NEW SIGNAL requests normally use the bounded fast path. A recent
+    # SL is different: it must never bypass the stricter next-entry gate.
+    _post_sl_focus = db.last_closed_forex_outcome(user_id) == "sl"
+    _fast_manual = force_signal and not _post_sl_focus
     pairs_idx = [int(i) for i in setup["pairs"].split(",") if i != ""]
     pairs_idx = _filter_open_pairs(pairs_idx)
     if not pairs_idx:
@@ -1820,7 +1824,7 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     sniper: dict | None = None
     pair: str
     free_kinds: list[str]
-    if force_signal:
+    if _fast_manual:
         pair_idx_pick, free_kinds = eligible[0]
         pair = FOREX_PAIRS[pair_idx_pick]
         sniper = None
@@ -1854,10 +1858,10 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     tf_label = _tf_label(setup.get("tf") or "")
     _levels = (
         _generate_levels_force_fallback(pair, max_tp, fast=True)
-        if force_signal
+        if _fast_manual
         else _generate_levels(pair, max_tp, sniper=sniper)
     )
-    if (_levels is None or _levels[0] is None) and force_signal:
+    if (_levels is None or _levels[0] is None) and _fast_manual:
         # User tapped NEW SIGNAL — always produce output even when yfinance /
         # bias paths return nothing (Stooq-based price momentum fallback).
         _levels = _generate_levels_force_fallback(pair, max_tp)
@@ -1876,7 +1880,7 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
             print(f"[forex_engine] Floating Limit unavailable for {pair}")
             return
         _float_dec = _fx_sniper_decide(pair)
-        if int(_float_dec.get("confidence", 0)) < 88:
+        if int(_float_dec.get("confidence", 0)) < 92:
             print(f"[forex_engine] Floating Limit waiting {pair}: "
                   f"confidence={_float_dec.get('confidence', 0)}")
             return
@@ -1917,7 +1921,7 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     _has_pattern = (pattern is not None)
     _has_liq_anchor = False
     _liq_for_levels = None
-    if not force_signal:
+    if not _fast_manual:
         try:
             if liquidity_analyze is not None:
                 _liq_for_levels = liquidity_analyze(pair)
@@ -1932,7 +1936,7 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     # If it AGREES (or no data) → signal passes. Trap detection = instant pass.
     _inst_flow = None
     _inst_agrees = True   # default = allow when no data
-    if not force_signal and _INST_FLOW_OK and _inst_flow_analyze is not None:
+    if not _fast_manual and _INST_FLOW_OK and _inst_flow_analyze is not None:
         try:
             _inst_flow = _inst_flow_analyze(pair, is_otc=False)
             if _inst_flow.get("ok") and _inst_flow.get("confidence", 0) >= 0.50:
@@ -1956,10 +1960,19 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
         except Exception:
             pass
 
-    if not force_signal and not _inst_agrees and not _has_sniper:
+    if not _fast_manual and not _inst_agrees and not _has_sniper:
         return   # institutional flow opposes AND we have no sniper — skip
 
-    if not force_signal and not _has_sniper and not _has_pattern and not _has_liq_anchor:
+    # After a confirmed SL, do not immediately “chase” the market with a new
+    # setup.  Wait for the next candidate to have a sniper trigger plus a
+    # liquidity anchor; available institutional flow must not oppose it.
+    if _post_sl_focus and (not _has_sniper or not _has_liq_anchor or not _inst_agrees):
+        print(f"[forex_engine] ⏳ post-SL focus waiting {pair}: "
+              f"sniper={_has_sniper} liq={_has_liq_anchor} "
+              f"inst_agrees={_inst_agrees}")
+        return
+
+    if not _fast_manual and not _has_sniper and not _has_pattern and not _has_liq_anchor:
         print(f"[forex_engine] 🚫 ELITE BLOCKED {pair} {direction} — "
               f"no sniper/pattern/liq anchor (pure bias fallback < 75% quality)")
         return   # skip — below elite threshold

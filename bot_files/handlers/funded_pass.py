@@ -28,7 +28,7 @@ from chat_clean import show_screen, safe_delete
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from keyboards import (
     fp_account_kb, fp_profit_kb, fp_floating_limit_kb, fp_daily_kb, fp_dd_kb, fp_tf_kb,
-    fp_pairs_input_kb, fp_active_kb, fp_finished_kb,
+    fp_pairs_input_kb, fp_active_kb, fp_floating_active_kb, fp_finished_kb,
     forex_pairs_text,
 )
 from config import (
@@ -409,7 +409,71 @@ async def msg_fp_pair(message: Message, state: FSMContext, bot: Bot):
         f"challenge ends.\n\n"
         f"🛑 Tap <b>STOP CHALLENGE</b> any time."
     )
-    await show_screen(bot, message.chat.id, text, fp_active_kb())
+    await show_screen(
+        bot, message.chat.id, text,
+        fp_active_kb(floating_limit=bool(int(fp.get("floating_limit") or 0))),
+    )
+
+
+@router.callback_query(F.data == "fp:fl:active")
+async def cb_fp_floating_active(call: CallbackQuery):
+    fp = db.get_funded_pass(call.from_user.id)
+    if not fp or fp.get("status") != "active":
+        await call.answer("Start a Funded Pass challenge first.", show_alert=True)
+        return
+    enabled = bool(int(fp.get("floating_limit") or 0))
+    await call.answer()
+    await show_screen(
+        call.bot, call.message.chat.id,
+        "🟡 <b>FLOATING LIMIT — FUNDED PASS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"Current status: <b>{'ON ✅' if enabled else 'OFF'}</b>\n\n"
+        "• <b>OFF:</b> standard challenge signal flow.\n"
+        "• <b>ON:</b> waits for A+ sniper zones, uses LIMIT entries, and "
+        "tracks a planned 0.025%–0.05% account-risk cap.\n\n"
+        "<i>Risk control cannot guarantee that a live trade never reaches SL.</i>",
+        fp_floating_active_kb(enabled),
+    )
+
+
+@router.callback_query(F.data.startswith("fp:fl:set:"))
+async def cb_fp_floating_active_set(call: CallbackQuery):
+    fp = db.get_funded_pass(call.from_user.id)
+    if not fp or fp.get("status") != "active":
+        await call.answer("Start a Funded Pass challenge first.", show_alert=True)
+        return
+    enabled = call.data.endswith(":on")
+    db.set_funded_pass_floating_limit(call.from_user.id, enabled)
+    await call.answer("Floating Limit ON ✅" if enabled else "Floating Limit OFF")
+    await show_screen(
+        call.bot, call.message.chat.id,
+        "🟡 <b>FLOATING LIMIT — FUNDED PASS</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"Current status: <b>{'ON ✅' if enabled else 'OFF'}</b>\n\n"
+        + (
+            "The bot will wait for stricter sniper/HTF-zone confirmation."
+            if enabled else
+            "The bot will return to the normal funded signal flow."
+        ),
+        fp_floating_active_kb(enabled),
+    )
+
+
+@router.callback_query(F.data == "fp:fl:active:back")
+async def cb_fp_floating_active_back(call: CallbackQuery):
+    fp = db.get_funded_pass(call.from_user.id)
+    if not fp:
+        await call.answer("Start a Funded Pass challenge first.", show_alert=True)
+        return
+    await call.answer()
+    await show_screen(
+        call.bot, call.message.chat.id,
+        "🏛 <b>FUNDED PASS — CHALLENGE ACTIVE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"{_summary_line(fp)}\n"
+        "Use the controls below to manage this challenge.",
+        fp_active_kb(floating_limit=bool(int(fp.get("floating_limit") or 0))),
+    )
 
 
 # ── STOP ──────────────────────────────────────────────────
@@ -443,6 +507,16 @@ def _floating_risk_pct(account_size: int) -> float:
     return 0.05
 
 
+def _floating_risk_amount(account_size: int) -> float:
+    """Planned account-currency loss cap displayed for Floating Limit.
+
+    Position sizing remains the trader/broker's responsibility; this amount
+    makes the risk budget explicit instead of implying that the SL distance
+    alone controls account risk.
+    """
+    return account_size * (_floating_risk_pct(account_size) / 100.0)
+
+
 def _signals_to_pass(profit_pct: float) -> int:
     """How many winning signals it takes (on average) to PASS the challenge.
     Each TP win returns roughly profit_pct / N. We target ~5 wins for a
@@ -460,19 +534,24 @@ async def _send_fp_signal(bot: Bot, fp: dict):
     tf_label = _tf_label(fp["tf"] or "")
     floating_limit = bool(int(fp.get("floating_limit") or 0))
 
-    # Floating Limit is intentionally allowed to wait.  It only uses a
-    # sniper-quality decision plus the higher-timeframe structure guard.
+    # Floating Limit is intentionally allowed to wait.  A user whose most
+    # recent Forex/Funded signal closed at SL gets the same stronger next-entry
+    # discipline even when Floating Limit is OFF.
+    post_sl_focus = db.last_closed_forex_outcome(user_id) == "sl"
+    require_sharper_entry = floating_limit or post_sl_focus
     sniper_decision = {}
-    if floating_limit:
+    if require_sharper_entry:
         sniper_decision = fx_sniper_decide(pair)
-        if int(sniper_decision.get("confidence", 0)) < 88:
-            print(f"[funded_pass] Floating Limit waiting: {pair} "
+        if int(sniper_decision.get("confidence", 0)) < 92:
+            print(f"[funded_pass] {'Floating Limit' if floating_limit else 'post-SL'} "
+                  f"waiting: {pair} "
                   f"confidence={sniper_decision.get('confidence', 0)}")
             return
         structure = analyze_market_structure(pair, sniper_decision.get("direction"),
                                              market="forex")
         if not structure.get("approved"):
-            print(f"[funded_pass] Floating Limit waiting: {pair} "
+            print(f"[funded_pass] {'Floating Limit' if floating_limit else 'post-SL'} "
+                  f"waiting: {pair} "
                   f"{structure.get('reason')}")
             return
         if any(token in pair.upper() for token in ("XAU", "GOLD")):
@@ -490,7 +569,7 @@ async def _send_fp_signal(bot: Bot, fp: dict):
     # chart provider.
     _lvls = (
         _generate_levels(pair, max_tp=1)
-        if floating_limit
+        if require_sharper_entry
         else _generate_levels_force_fallback(pair, 1, fast=True)
     )
     if _lvls is None or _lvls[0] is None:
@@ -536,8 +615,12 @@ async def _send_fp_signal(bot: Bot, fp: dict):
         "🏛 <b>FUNDED PASS SIGNAL</b>  ·  "
         + (
             f"🟡 FLOATING LIMIT · PLANNED RISK "
-            f"{_floating_risk_pct(int(fp['account_size'])):.3f}%\n"
-            if floating_limit else "STANDARD RISK MODE\n"
+            f"{_floating_risk_pct(int(fp['account_size'])):.3f}% "
+            f"(up to ${_floating_risk_amount(int(fp['account_size'])):.2f})\n"
+            if floating_limit else (
+                "🛡️ POST-SL A+ CONFIRMATION MODE\n"
+                if post_sl_focus else "STANDARD RISK MODE\n"
+            )
         )
         + text
     )

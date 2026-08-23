@@ -144,12 +144,12 @@ def binary_tf_kb(market: str, broker: str, pair_idx: int,
     # These use the live 1m tape/microstructure as the safest public-data
     # proxy because free feeds do not provide reliable 5-second OHLC candles.
     if market in {"otc", "live"}:
-        _5s_text = "⚡ 5 Seconds" if has_access else "⚡ 5 Seconds  🔒 VIP"
+        _5s_text = "⚡ FAST ANALYSIS · 5S" if has_access else "⚡ FAST ANALYSIS · 5S  🔒 VIP"
         rows.append([InlineKeyboardButton(
             text=_5s_text,
             callback_data=f"tf:{market}:{broker}:{pair_idx}:5s",
         )])
-        _15s_text = "⚡ 15 Seconds" if has_access else "⚡ 15 Seconds  🔒 VIP"
+        _15s_text = "⚡ PRECISION ANALYSIS · 15S" if has_access else "⚡ PRECISION ANALYSIS · 15S  🔒 VIP"
         rows.append([InlineKeyboardButton(
             text=_15s_text,
             callback_data=f"tf:{market}:{broker}:{pair_idx}:15s",
@@ -456,11 +456,29 @@ def forex_active_kb(gold_king: bool = False,
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text=floating_label,
-            callback_data="fx:floating:on" if floating_limit else "fx:floating:off",
+            callback_data="fx:floating:open",
         )],
         [InlineKeyboardButton(text=gold_label, callback_data="fx:gold")],
         [InlineKeyboardButton(text="🛑 STOP",  callback_data="fx:stop")],
         [InlineKeyboardButton(text="📋 MENU", callback_data="m:home")],
+    ])
+
+
+def forex_floating_kb(floating_limit: bool = False) -> InlineKeyboardMarkup:
+    """Dedicated Floating Limit control panel with explicit ON/OFF actions."""
+    state = "ON ✅" if floating_limit else "OFF"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"🟢 TURN ON{' · ACTIVE' if floating_limit else ''}",
+            callback_data="fx:floating:on",
+        )],
+        [InlineKeyboardButton(
+            text=f"⚪ TURN OFF{' · ACTIVE' if not floating_limit else ''}",
+            callback_data="fx:floating:off",
+        )],
+        [InlineKeyboardButton(text=f"Status: {state}", callback_data="noop")],
+        [InlineKeyboardButton(text="⬅️ ACTIVE PANEL", callback_data="fx:floating:back"),
+         InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")],
     ])
 
 
@@ -753,12 +771,32 @@ def fp_pairs_input_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def fp_active_kb() -> InlineKeyboardMarkup:
+def fp_active_kb(floating_limit: bool = False) -> InlineKeyboardMarkup:
+    floating_label = (
+        "🟡 FLOATING LIMIT : ON ✅" if floating_limit
+        else "🟡 FLOATING LIMIT : OFF"
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=floating_label, callback_data="fp:fl:active")],
         [InlineKeyboardButton(text="🛑 STOP CHALLENGE", callback_data="fp:stop")],
         [InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")],
     ])
 
+
+def fp_floating_active_kb(floating_limit: bool = False) -> InlineKeyboardMarkup:
+    """Floating Limit controls shown while a Funded Pass is already active."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"🟢 TURN ON{' · ACTIVE' if floating_limit else ''}",
+            callback_data="fp:fl:set:on",
+        )],
+        [InlineKeyboardButton(
+            text=f"⚪ TURN OFF{' · ACTIVE' if not floating_limit else ''}",
+            callback_data="fp:fl:set:off",
+        )],
+        [InlineKeyboardButton(text="⬅️ ACTIVE PANEL", callback_data="fp:fl:active:back"),
+         InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")],
+    ])
 
 def fp_finished_kb(passed: bool) -> InlineKeyboardMarkup:
     rows = []

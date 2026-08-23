@@ -843,6 +843,15 @@ def set_forex_floating_limit(user_id: int, value: bool):
         )
 
 
+def set_funded_pass_floating_limit(user_id: int, value: bool):
+    """Persist an explicit Floating Limit choice for an active challenge."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE funded_pass SET floating_limit=? WHERE user_id=?",
+            (1 if value else 0, user_id),
+        )
+
+
 def get_forex_setup(user_id: int) -> Optional[Dict]:
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM forex_setup WHERE user_id=?",

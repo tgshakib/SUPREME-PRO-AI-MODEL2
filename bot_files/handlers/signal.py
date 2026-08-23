@@ -266,34 +266,30 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
     # Fast sessions use a deterministic 5-second analysis window.  The
     # signal engine then reads the live 1m tape/microstructure proxy.
     import random as _rnd
-    _scan_secs = 5.0 if tf in {"5s", "15s"} else _rnd.choice(
-        [3.0, 4.0, 5.0, 6.0]
-    )
+    _scan_secs = 5.0 if tf in {"5s", "15s"} else _rnd.choice([3.0, 4.0, 5.0])
     await asyncio.sleep(_scan_secs)
 
     if tf in {"5s", "15s"}:
-        # Keep the user-visible fast contract bounded even when the full
-        # multi-engine stack is waiting on slow public APIs.
+        # Fast sessions use only local buffered evidence. When the feed is
+        # not fresh enough, the builder returns a visible NO TRADE card.
         sig = generate_fast_binary_signal(
             pair, market_name, tf_label, user_id=user_id, broker=broker
         )
     else:
+        # Preserve the full validated engine and all normal risk gates for
+        # standard binary timeframes.
         sig = await asyncio.to_thread(
-            generate_signal,
-            pair,
-            market_name,
-            tf_label,
-            user_id,
-            broker,
+            generate_signal, pair, market_name, tf_label, user_id, broker,
         )
 
-    db.log_signal(user_id, pair, tf_label)
-    _recent_signal[user_id] = datetime.utcnow()
+    if sig.get("is_trade", True):
+        db.log_signal(user_id, pair, tf_label)
+        _recent_signal[user_id] = datetime.utcnow()
 
     # ── Self-improve: schedule auto outcome check after expiry ────────
     # user_id / bot / chat_id are forwarded so the daily alert system
     # can fire streak-based loss/win notifications when outcome is known.
-    if _SI_OK and _si_schedule is not None:
+    if sig.get("is_trade", True) and _SI_OK and _si_schedule is not None:
         try:
             _si_schedule(
                 signal_id        = sig.get("signal_id", -1),

@@ -8,3 +8,4 @@ node_modules/
 mybot_backup.zip
 download_server.py
 trading_bot.db
+.po_ssid_cache

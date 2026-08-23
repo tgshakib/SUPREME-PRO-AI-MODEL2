@@ -8,14 +8,13 @@ filename) so the handler can attach the matching BUY/SELL image.
 import os
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from tz_utils import short_time_for_user, next_candle_time_for_user
 
 import database as db
 from live_prices import get_market_bias, get_live_price
-from config import price_band
 try:
     from strategy import analyze_pair as sniper_analyze
     from strategy import multi_tf_bias
@@ -366,32 +365,122 @@ def generate_fast_binary_signal(
     user_id: Optional[int] = None,
     broker: str = "",
 ) -> Dict:
-    """Build a bounded-latency binary result for 5s/15s sessions.
+    """Build a bounded-latency result from already-buffered 1m evidence.
 
-    The full signal stack intentionally performs many remote chart requests
-    and can take tens of seconds when a public feed is slow.  Fast binary
-    sessions must still return a usable card in their promised window, so
-    this path reads an already-buffered OTC tick when available and otherwise
-    uses the configured instrument band without waiting on a network request.
-    It never claims that a free feed is a true 5-second OHLC source.
+    This function deliberately performs no remote fetches.  It returns a
+    trade only when the broker candle buffer (OTC) or fresh cached 1m market
+    snapshot (LIVE) supports a direction.  Without that evidence it returns
+    a visible NO TRADE result instead of inventing price, confidence, or side.
     """
     is_otc = (
         "otc" in (market or "").lower()
         or "(OTC)" in (pair or "").upper()
         or "〔OTC〕" in (pair or "")
     )
+    direction = None
+    confidence = 0
     entry = None
+    source_text = ""
+
     if is_otc:
         try:
-            from otc_price_service import get_live_otc_price
-            entry = get_live_otc_price(pair)
+            from otc_feed_combined import otc_feed, label_to_otc_key
+            asset = label_to_otc_key(pair) or pair
+            candles = otc_feed.get_candles(asset, "1m", count=6) or []
+            closes = [float(c.get("close", 0)) for c in candles]
+            volumes = [float(c.get("volume", 0)) for c in candles]
+            feed_status = otc_feed.status()
+            broker_connected = bool(
+                feed_status.get("quotex_connected")
+                or feed_status.get("pocketoption_connected")
+            )
+            latest_time = candles[-1].get("time") if candles else None
+            if isinstance(latest_time, (int, float)):
+                latest_ts = float(latest_time)
+            elif isinstance(latest_time, str):
+                latest_ts = datetime.strptime(
+                    latest_time, "%Y-%m-%d %H:%M:%S"
+                ).replace(tzinfo=timezone.utc).timestamp()
+            else:
+                latest_ts = 0.0
+            # A completed 1m candle can be almost one minute old. Allow a
+            # small transport grace period, but never reuse a stale buffer
+            # after the broker socket disconnects.
+            candles_fresh = 0 <= time.time() - latest_ts <= 95
+            if (
+                broker_connected
+                and candles_fresh
+                and len(closes) >= 5
+                and all(close > 0 for close in closes[-5:])
+            ):
+                # Fast momentum must be consistent across three completed
+                # buffered candles; one noisy tick is not enough to fire.
+                rising = closes[-1] > closes[-2] > closes[-3]
+                falling = closes[-1] < closes[-2] < closes[-3]
+                avg_volume = sum(volumes[-5:-1]) / max(1, len(volumes[-5:-1]))
+                volume_ok = not avg_volume or volumes[-1] >= avg_volume * 0.80
+                if volume_ok and (rising or falling):
+                    direction = "BUY" if rising else "SELL"
+                    entry = closes[-1]
+                    move = abs(closes[-1] - closes[-4]) / max(abs(closes[-4]), 1e-9)
+                    confidence = min(82, max(62, int(62 + move * 100000)))
+                    source_text = "fresh broker 1m candle buffer"
         except Exception:
-            entry = None
+            pass
+    else:
+        try:
+            from candle_feed import _CACHE as _CANDLE_CACHE
+            cached = _CANDLE_CACHE.get((pair, "1m"))
+            if cached:
+                timestamp, snapshot = cached
+                bias = snapshot.get("bias")
+                close = float(snapshot.get("close") or 0)
+                strength = float(snapshot.get("strength") or 0)
+                if (
+                    time.time() - float(timestamp) <= 35
+                    and snapshot.get("ok")
+                    and bias in {"BUY", "SELL"}
+                    and close > 0
+                    and strength >= 0.55
+                ):
+                    direction = bias
+                    entry = close
+                    confidence = min(82, max(62, int(60 + strength * 30)))
+                    source_text = f"cached 1m {snapshot.get('source', 'market')} snapshot"
+        except Exception:
+            pass
 
-    mid, pip, decimals = price_band(pair)
-    entry = float(entry) if entry and float(entry) > 0 else float(mid)
-    bucket = int(time.time()) // 5
-    direction = "BUY" if (sum(ord(c) for c in pair) + bucket) % 2 == 0 else "SELL"
+    if direction is None or entry is None:
+        return {
+            "direction": "WAIT",
+            "trend": "NO TRADE",
+            "confidence": 0,
+            "grade": "WAIT",
+            "text": (
+                "⚡ <b>FAST BINARY ANALYSIS</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💱 <b>{pair}</b>\n"
+                f"📊 Market: 🌐 <b>{'OTC' if is_otc else 'LIVE'}</b>\n"
+                f"⚡ Analysis profile: <b>{tf_label}</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "⏸️ <b>NO TRADE — FRESH 1M DATA NOT CONFIRMED</b>\n"
+                "The bot did not receive enough buffered candle data to "
+                "validate direction safely. Try again when the market feed "
+                "is active.\n"
+                "<i>No price, confidence, or direction was invented.</i>"
+            ),
+            "photo": None,
+            "signal_id": -1,
+            "entry_price": None,
+            "expiry_min": 0,
+            "engine": "fast_no_trade",
+            "signal_ts": int(time.time()),
+            "broker": broker,
+            "is_trade": False,
+        }
+
+    decimals = 5 if abs(entry) < 10 else 2
+    pip = 0.0001 if decimals == 5 else 0.01
     arrow = "🟢 CALL / BUY" if direction == "BUY" else "🔴 PUT / SELL"
     market_label = "OTC" if is_otc else "LIVE"
     next_move = entry + (pip * 3 if direction == "BUY" else -pip * 3)
@@ -402,13 +491,14 @@ def generate_fast_binary_signal(
         "⚡ <b>FAST BINARY MICROSTRUCTURE</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💱 <b>{pair}</b>\n"
-        f"📊 Market: 🌐 <b>{market_label}</b>  •  <b>{tf_label}</b>\n"
+        f"📊 Market: 🌐 <b>{market_label}</b>\n"
+        f"⚡ Analysis profile: <b>{tf_label}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"📆 SIGNAL: <b>{arrow}</b>\n"
         "🏅 Grade: <b>FAST CONFIRMATION</b>\n"
-        f"🎯 Confidence: <b>78%</b>\n"
+        f"🎯 Confidence: <b>{confidence}%</b>\n"
         f"💵 Entry: <code>{entry_text}</code>  →  Target: <code>{target_text}</code>\n"
-        "🧭 Source: buffered tape / 1m microstructure proxy\n"
+        f"🧭 Source: {source_text}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 <b>{now_str}</b> ✦ <b>EXECUTE NOW</b>\n"
         "<i>Use the new candle and proper risk management.</i>"
@@ -416,7 +506,7 @@ def generate_fast_binary_signal(
     return {
         "direction": direction,
         "trend": "UP" if direction == "BUY" else "DOWN",
-        "confidence": 78,
+        "confidence": confidence,
         "grade": "FAST",
         "text": text,
         "photo": SIGNAL_PHOTO_BUY if direction == "BUY" else SIGNAL_PHOTO_SELL,
@@ -426,6 +516,7 @@ def generate_fast_binary_signal(
         "engine": "fast_microstructure",
         "signal_ts": int(time.time()),
         "broker": broker,
+        "is_trade": True,
     }
 
 

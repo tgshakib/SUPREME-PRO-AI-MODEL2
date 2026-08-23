@@ -30,7 +30,8 @@ _TIME_PHOTO = os.path.join(
 )
 from keyboards import (
     forex_tf_kb, forex_pairs_input_kb, forex_pairs_text,
-    forex_tp_kb, forex_active_kb, fx_active_view_kb, forex_tp_locked_kb,
+    forex_tp_kb, forex_active_kb, forex_floating_kb, fx_active_view_kb,
+    forex_tp_locked_kb,
 )
 from live_prices import decimals as live_decimals, pip_size as live_pip_size
 from config import (
@@ -447,7 +448,7 @@ async def cb_fx_gold(call: CallbackQuery):
     want a pure Gold feed."""
     user_id = call.from_user.id
     setup = db.get_forex_setup(user_id)
-    if not setup:
+    if not setup or setup.get("status") != "active":
         await call.answer("Activate the 24/7 engine first.", show_alert=True)
         return
     new_val = not bool(int(setup.get("gold_king_mode") or 0))
@@ -459,41 +460,85 @@ async def cb_fx_gold(call: CallbackQuery):
     # Update the keyboard in place so the button label flips immediately.
     try:
         await call.message.edit_reply_markup(
-            reply_markup=forex_active_kb(gold_king=new_val)
+            reply_markup=forex_active_kb(
+                gold_king=new_val,
+                floating_limit=bool(int(setup.get("floating_limit") or 0)),
+            )
         )
     except Exception:
         pass
 
 
-@router.callback_query(F.data.startswith("fx:floating"))
+@router.callback_query(F.data == "fx:floating:open")
+async def cb_fx_floating_open(call: CallbackQuery):
+    """Open the Floating Limit panel instead of toggling the mode blindly."""
+    setup = db.get_forex_setup(call.from_user.id)
+    if not setup or setup.get("status") != "active":
+        await call.answer("Activate the 24/7 engine first.", show_alert=True)
+        return
+    enabled = bool(int(setup.get("floating_limit") or 0))
+    await call.answer()
+    await show_screen(
+        call.bot, call.message.chat.id,
+        "🟡 <b>FLOATING LIMIT — OPTIONAL RISK MODE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"Current status: <b>{'ON ✅' if enabled else 'OFF'}</b>\n\n"
+        "• <b>OFF:</b> normal Forex signal flow.\n"
+        "• <b>ON:</b> LIMIT-only entries after a stronger sniper, HTF-zone, "
+        "and available volume/footprint confirmation.\n\n"
+        "<i>This mode can wait for a clean setup. It reduces avoidable risk, "
+        "but cannot guarantee a win or prevent every SL.</i>",
+        forex_floating_kb(enabled),
+    )
+
+
+@router.callback_query(F.data.in_({"fx:floating:on", "fx:floating:off"}))
 async def cb_fx_floating(call: CallbackQuery):
     """Toggle conservative pending-entry mode for normal Forex setups."""
     user_id = call.from_user.id
     setup = db.get_forex_setup(user_id)
-    if not setup:
+    if not setup or setup.get("status") != "active":
         await call.answer("Activate the 24/7 engine first.", show_alert=True)
         return
-    action = call.data.split(":")[-1]
-    new_val = (
-        action == "on"
-        if action in {"on", "off"}
-        else not bool(int(setup.get("floating_limit") or 0))
-    )
+    new_val = call.data.endswith(":on")
     db.set_forex_floating_limit(user_id, new_val)
     await call.answer(
         "Floating Limit ON — waiting for sniper zones"
         if new_val else "Floating Limit OFF",
         show_alert=False,
     )
-    try:
-        await call.message.edit_reply_markup(
-            reply_markup=forex_active_kb(
-                gold_king=bool(int(setup.get("gold_king_mode") or 0)),
-                floating_limit=new_val,
-            )
-        )
-    except Exception:
-        pass
+    await show_screen(
+        call.bot, call.message.chat.id,
+        "🟡 <b>FLOATING LIMIT — OPTIONAL RISK MODE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"Current status: <b>{'ON ✅' if new_val else 'OFF'}</b>\n\n"
+        + (
+            "The bot will wait for stricter A+ zone confirmation and issue "
+            "LIMIT-only signals."
+            if new_val else
+            "The bot will use the normal Forex signal flow."
+        ),
+        forex_floating_kb(new_val),
+    )
+
+
+@router.callback_query(F.data == "fx:floating:back")
+async def cb_fx_floating_back(call: CallbackQuery):
+    setup = db.get_forex_setup(call.from_user.id)
+    if not setup or setup.get("status") != "active":
+        await call.answer("Activate the 24/7 engine first.", show_alert=True)
+        return
+    await call.answer()
+    await show_screen(
+        call.bot, call.message.chat.id,
+        "🟢 <b>FOREX ENGINE ACTIVE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "Use the controls below to manage your signal feed.",
+        forex_active_kb(
+            gold_king=bool(int(setup.get("gold_king_mode") or 0)),
+            floating_limit=bool(int(setup.get("floating_limit") or 0)),
+        ),
+    )
 
 
 # ── NEW SIGNAL — re-arm the engine for the next entry ────

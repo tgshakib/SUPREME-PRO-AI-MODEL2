@@ -497,4 +497,4 @@ async def cb_paid_start(call: CallbackQuery, bot: Bot):
     db.clear_active_msg(chat_id)
     # Render home as a fresh message
     from handlers.main_menu import render_home
-    await render_home(bot, chat_id, call.from_user)
+    await render_home(bot, chat_id, call.from_user, fast=True)
