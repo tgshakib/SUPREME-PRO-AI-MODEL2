@@ -19,7 +19,6 @@ Core problems solved
 Public API
 ----------
   get_volatility_state(pair)          → dict  (mode, atr_ratio, flags, advice)
-  binary_volatility_gate(pair, dir, tf_label) → "ALLOW" | "BLOCK" | "MOMENTUM_ONLY"
   forex_sl_multiplier(pair)           → float  (1.0 normal … 1.8 extreme)
   get_momentum_direction(pair)        → "BUY" | "SELL" | None
   is_high_impact_window()             → bool
@@ -342,59 +341,6 @@ def get_momentum_direction(pair: str) -> Optional[str]:
 
     _MOM_CACHE[ticker] = (now_ts, direction)
     return direction
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  BINARY VOLATILITY GATE
-# ═══════════════════════════════════════════════════════════════════════════
-
-def binary_volatility_gate(
-    pair: str,
-    direction: str,
-    tf_label: str = "1 MIN",
-) -> str:
-    """Quality gate for binary signals during volatile conditions.
-
-    Returns
-    -------
-    "ALLOW"         — normal conditions, proceed with signal
-    "MOMENTUM_ONLY" — high vol: only allow if direction matches impulse
-    "BLOCK"         — extreme/news/Friday: do not send signal
-    """
-    vs = get_volatility_state(pair)
-    mode    = vs["mode"]
-    advice  = vs["advice"]
-
-    # Hard block zones: Friday close and Monday gap
-    if vs["is_friday_close"] or vs["is_monday_gap"]:
-        return "BLOCK"
-
-    tf_up = (tf_label or "").strip().upper()
-    is_fast = tf_up.startswith(("1 MIN", "2 MIN", "1MIN", "2MIN", "3 MIN", "3MIN"))
-
-    # Extreme volatility: only momentum plays, only on fast TFs
-    if mode == "extreme":
-        if not is_fast:
-            return "BLOCK"   # slow TF entries during extreme vol = stop hunt fodder
-        mom = get_momentum_direction(pair)
-        if mom is None:
-            return "BLOCK"
-        return "ALLOW" if mom == direction else "BLOCK"
-
-    # High volatility + news: check momentum alignment
-    if advice == "MOMENTUM_ONLY":
-        mom = get_momentum_direction(pair)
-        if mom is None:
-            return "BLOCK"
-        if mom != direction:
-            return "BLOCK"
-        return "ALLOW"
-
-    # High volatility without hard block: allow but flag for wider SL
-    if mode == "high":
-        return "MOMENTUM_ONLY"
-
-    return "ALLOW"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

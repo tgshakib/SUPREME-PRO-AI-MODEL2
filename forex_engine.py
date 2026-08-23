@@ -40,14 +40,6 @@ from strategy import (
     MIN_SCORE as SNIPER_MIN_SCORE,
 )
 try:
-    from god_engine import supreme_forex_gate as _forex_gate
-    _GOD_OK = True
-except Exception as _ge:
-    print(f"[forex_engine] god_engine import failed: {_ge}")
-    _forex_gate = None  # type: ignore
-    _GOD_OK = False
-
-try:
     from finorix_engine import finorix_analyse as _finorix_analyse
     _FINORIX_FX_OK = True
 except Exception as _fxe:
@@ -1875,15 +1867,6 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
                 print(f"[forex_engine] Floating Limit waiting for XAG "
                       f"confirmation {pair}: {_silver}")
                 return
-
-    # ── GOD LEVEL: SUPREME FOREX GATE ────────────────────────────
-    # Final session + anti-whipsaw + ADX gate before the signal goes out.
-    # Any failure = skip this iteration and wait for a cleaner setup.
-    if not force_signal and _forex_gate is not None:
-        _gate = _forex_gate(pair, direction)
-        if not _gate["approved"]:
-            print(f"[forex_engine] gate rejected {pair} {direction}: {_gate['reason']}")
-            return   # skip signal — bad session / chop / flat ADX
 
     # ── ELITE QUALITY GATE — only 1%-level setups pass ─────────
     # Rule: skip if signal is pure bias-fallback with NO technical

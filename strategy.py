@@ -80,7 +80,6 @@ TIMEFRAME   = "1h"
 LOOKBACK    = 200
 MIN_SCORE   = 95
 MIN_BODY_RATIO = 0.60   # trigger candle body conviction
-MIN_ATR_PCT    = 0.0015 # ATR/price floor — skip dead chop
 
 _CACHE: dict[str, tuple[float, Optional[dict]]] = {}
 _TTL = 30.0   # Elite: refresh every 30s (was 120s)
@@ -209,19 +208,6 @@ def analyze_pair(pair: str) -> Optional[dict]:
         if direction == "BUY" and c_close < c_open:
             _CACHE[ticker] = (now, None); return None
         if direction == "SELL" and c_close > c_open:
-            _CACHE[ticker] = (now, None); return None
-    except Exception:
-        pass
-
-    # ── ATR volatility floor — skip dead-chop markets ──────────
-    try:
-        h = df["high"].astype(float)
-        l = df["low"].astype(float)
-        c = df["close"].astype(float)
-        tr = (h - l).combine((h - c.shift(1)).abs(), max).combine(
-            (l - c.shift(1)).abs(), max)
-        atr = float(tr.rolling(14).mean().iloc[-1])
-        if entry > 0 and (atr / entry) < MIN_ATR_PCT:
             _CACHE[ticker] = (now, None); return None
     except Exception:
         pass

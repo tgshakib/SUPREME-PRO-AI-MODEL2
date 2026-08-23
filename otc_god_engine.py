@@ -810,46 +810,6 @@ def otc_god_analyze(pair: str) -> Optional[dict]:
         pass
 
     # ══════════════════════════════════════════════════════════════════════════
-    #  G27 — SUPERTREND FLIP (weight 5) — most reliable OTC trend change signal
-    # ══════════════════════════════════════════════════════════════════════════
-    try:
-        atr_p = 7
-        mult  = 3.0
-        hi5_s = hi5.copy(); lo5_s = lo5.copy(); cl5_s = cl5.copy()
-        tr_s  = (hi5_s - lo5_s).combine((hi5_s - cl5_s.shift()).abs(), max).combine(
-            (lo5_s - cl5_s.shift()).abs(), max)
-        atr_st = tr_s.ewm(span=atr_p, adjust=False).mean()
-        hl2    = (hi5_s + lo5_s) / 2
-        upper  = hl2 + mult * atr_st
-        lower  = hl2 - mult * atr_st
-
-        supertrend = [True] * len(cl5_s)   # True = uptrend (bullish)
-        for i in range(1, len(cl5_s)):
-            prev_upper = float(upper.iloc[i - 1])
-            prev_lower = float(lower.iloc[i - 1])
-            cur_upper  = float(upper.iloc[i])
-            cur_lower  = float(lower.iloc[i])
-            upper.iloc[i] = min(cur_upper, prev_upper) if float(cl5_s.iloc[i - 1]) <= prev_upper else cur_upper
-            lower.iloc[i] = max(cur_lower, prev_lower) if float(cl5_s.iloc[i - 1]) >= prev_lower else cur_lower
-            if supertrend[i - 1] and float(cl5_s.iloc[i]) < float(lower.iloc[i]):
-                supertrend[i] = False
-            elif not supertrend[i - 1] and float(cl5_s.iloc[i]) > float(upper.iloc[i]):
-                supertrend[i] = True
-            else:
-                supertrend[i] = supertrend[i - 1]
-
-        st_now  = supertrend[-2]   # confirmed bar
-        st_prev = supertrend[-3]
-        if st_prev and not st_now:
-            sell_score += 5; sell_sigs += 1
-            reasons.append("🔄 SUPERTREND FLIP: UP→DOWN → PUT reversal confirmed")
-        elif not st_prev and st_now:
-            buy_score += 5; buy_sigs += 1
-            reasons.append("🔄 SUPERTREND FLIP: DOWN→UP → CALL reversal confirmed")
-    except Exception:
-        pass
-
-    # ══════════════════════════════════════════════════════════════════════════
     #  G28 — TRIPLE RSI ALIGNMENT (weight 5) — RSI 3+7+14 all extreme same dir
     # ══════════════════════════════════════════════════════════════════════════
     try:

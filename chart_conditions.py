@@ -111,35 +111,6 @@ def _adx(df, p=14):
         return None, None, None
 
 
-def _supertrend(df, p=10, mult=3.0):
-    """Returns supertrend series: True=uptrend (bullish), False=downtrend."""
-    try:
-        h  = df["high"].astype(float)
-        lo = df["low"].astype(float)
-        cl = df["close"].astype(float)
-        tr = (h - lo).combine((h - cl.shift()).abs(), max).combine(
-            (lo - cl.shift()).abs(), max)
-        atr = tr.ewm(span=p, adjust=False).mean()
-        hl2 = (h + lo) / 2
-        upper = (hl2 + mult * atr).copy()
-        lower = (hl2 - mult * atr).copy()
-        trend = [True] * len(cl)
-        for i in range(1, len(cl)):
-            pu = float(upper.iloc[i - 1]); cu = float(upper.iloc[i])
-            pl = float(lower.iloc[i - 1]); cl_ = float(lower.iloc[i])
-            upper.iloc[i] = min(cu, pu) if float(cl.iloc[i - 1]) <= pu else cu
-            lower.iloc[i] = max(cl_, pl) if float(cl.iloc[i - 1]) >= pl else cl_
-            if trend[i - 1] and float(cl.iloc[i]) < float(lower.iloc[i]):
-                trend[i] = False
-            elif not trend[i - 1] and float(cl.iloc[i]) > float(upper.iloc[i]):
-                trend[i] = True
-            else:
-                trend[i] = trend[i - 1]
-        return trend
-    except Exception:
-        return None
-
-
 # ── Data fetch with simple cache ───────────────────────────────────────────
 
 _CACHE: dict[str, tuple[float, object]] = {}
@@ -440,24 +411,6 @@ def _analyze_tf(ticker: str, interval: str, period: str,
                             votes -= 0.8   # strong trend is bullish
                         else:
                             votes += 0.8   # strong trend is bearish
-        except Exception:
-            pass
-
-        # ── Supertrend direction ──────────────────────────────────
-        try:
-            if len(df) >= 20:
-                st_trend = _supertrend(df)
-                if st_trend is not None and len(st_trend) >= 3:
-                    st_now  = st_trend[-2]
-                    st_prev = st_trend[-3]
-                    if st_now and not st_prev:
-                        votes -= 1.5   # just flipped bullish = strong BUY
-                    elif not st_now and st_prev:
-                        votes += 1.5   # just flipped bearish = strong SELL
-                    elif st_now:
-                        votes -= 0.4   # in uptrend
-                    else:
-                        votes += 0.4   # in downtrend
         except Exception:
             pass
 

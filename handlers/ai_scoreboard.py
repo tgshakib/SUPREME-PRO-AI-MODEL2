@@ -93,7 +93,7 @@ async def _run_binary_scan(pair_display: str, is_otc: bool) -> str:
         binary_sniper_analyze, quick_momentum_sniper,
         otc_reversal_sniper, price_action_sniper, one_minute_sniper,
     )
-    from god_engine import supreme_binary_gate, session_gate, adx_strength
+    from god_engine import session_gate, adx_strength
     from elite_signal_engine import (
         binary_last_bar_ok, compute_signal_score, classify_signal
     )
@@ -123,9 +123,6 @@ async def _run_binary_scan(pair_display: str, is_otc: bool) -> str:
             elif d in ("SELL", "PUT"): dirs.append("SELL")
     direction = "BUY" if dirs.count("BUY") >= dirs.count("SELL") else "SELL"
 
-    # Supreme gate for chosen direction
-    r_god = await _t(supreme_binary_gate, pair, direction)
-
     # Candle-flip check
     r_flip = await _t(binary_last_bar_ok, pair, direction)
 
@@ -152,7 +149,6 @@ async def _run_binary_scan(pair_display: str, is_otc: bool) -> str:
     s_otcrev = _pct(r_otc_rev,"score", "confluence", "grade")
     s_pa     = _pct(r_pa,     "score", "confluence", "grade")
     s_bin    = _pct(r_bin,    "score", "confluence", "grade")
-    s_god    = _agree(r_god)
     s_adx    = min(100, int(float(r_adx or 0) * 4)) if r_adx else 0
 
     # candle-flip: 100 = ok (momentum aligned), 0 = flipped
@@ -179,8 +175,6 @@ async def _run_binary_scan(pair_display: str, is_otc: bool) -> str:
 
     cls_emoji = {"SNIPER": "🎯 SNIPER ELITE", "STANDARD": "✅ STANDARD", "BLOCKED": "🚫 BLOCKED"}.get(cls, cls)
     dir_arrow = "▲ CALL" if direction == "BUY" else "▼ PUT"
-    agree_pct = int(len([v for v in engine_votes if v == direction]) / max(len(engine_votes),1) * 100)
-
     now = datetime.now(timezone.utc).strftime("%H:%M UTC")
     mode_label = "OTC" if is_otc else "LIVE"
     flip_label = "✅ Aligned" if flip_ok else "⚠️ Reversed"
@@ -207,9 +201,6 @@ async def _run_binary_scan(pair_display: str, is_otc: bool) -> str:
         f"⚡ <b>BINARY SNIPER CORE</b>",
         f"  {_bar(s_bin)} {s_bin}% {_score_emoji(s_bin)}",
         f"",
-        f"⚡ <b>GOD ENGINE GATE</b>",
-        f"  {_bar(s_god)} {s_god}% {_score_emoji(s_god)}",
-        f"",
         f"⚡ <b>ADX TREND STRENGTH</b>",
         f"  {_bar(s_adx)} {s_adx}% {_score_emoji(s_adx)}",
         f"",
@@ -220,7 +211,6 @@ async def _run_binary_scan(pair_display: str, is_otc: bool) -> str:
         f"🏆 <b>ELITE SIGNAL SCORE:  {elite_sc}/100</b>",
         f"🎯 <b>CLASSIFICATION:  {cls_emoji}</b>",
         f"💡 <b>AI DIRECTION:  {dir_arrow}</b>",
-        f"⚡ <b>ENGINE CONSENSUS:  {agree_pct}%</b>  ({len([v for v in engine_votes if v==direction])}/{len(engine_votes)} engines)",
         f"📡 <b>SESSION:  {session.upper().replace('_',' ')}</b>",
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
     ]
@@ -230,9 +220,7 @@ async def _run_binary_scan(pair_display: str, is_otc: bool) -> str:
 # ── FOREX scan ───────────────────────────────────────────────────────────────
 async def _run_forex_scan(pair_display: str) -> str:
     from strategy import analyze_pair, multi_tf_bias
-    from god_engine import (
-        supreme_forex_gate, session_gate, adx_strength, anti_whipsaw, htf_trend
-    )
+    from god_engine import session_gate, adx_strength, htf_trend
     from liquidity import analyze as liq_analyze
     from trade_entry import analyze as te_analyze, is_valid as te_valid
     from elite_signal_engine import (
@@ -243,14 +231,13 @@ async def _run_forex_scan(pair_display: str) -> str:
 
     # Run all engines concurrently
     (
-        r_strat, r_mtf, r_sess, r_adx, r_whip,
+        r_strat, r_mtf, r_sess, r_adx,
         r_liq_b, r_liq_s, r_te, r_htf
     ) = await asyncio.gather(
         _t(analyze_pair,   pair),
         _t(multi_tf_bias,  pair),
         _t(session_gate,   pair),
         _t(adx_strength,   pair, "1h"),
-        _t(anti_whipsaw,   pair, "5m"),
         _t(liq_analyze,    pair, "BUY"),
         _t(liq_analyze,    pair, "SELL"),
         _t(te_analyze,     pair),
@@ -264,9 +251,6 @@ async def _run_forex_scan(pair_display: str) -> str:
     elif r_mtf and isinstance(r_mtf, dict):
         b = r_mtf.get("bias")
         if b in ("BUY", "SELL"): direction = b
-
-    # Supreme gate
-    r_god = await _t(supreme_forex_gate, pair, direction)
 
     # HTF trend
     r_htf_trend = await _t(htf_trend, pair, direction)
@@ -300,10 +284,6 @@ async def _run_forex_scan(pair_display: str) -> str:
     # ADX
     s_adx = min(100, int(float(r_adx or 0) * 4)) if r_adx else 0
 
-    # Anti-whipsaw: if returns the direction → no chop
-    whipsaw_ok = (r_whip == direction) if r_whip else True
-    s_whip = 100 if whipsaw_ok else 20
-
     # Liquidity SMC
     r_liq = r_liq_b if direction == "BUY" else r_liq_s
     s_liq = _pct(r_liq, "liq_grade", "score", "grade")
@@ -321,17 +301,6 @@ async def _run_forex_scan(pair_display: str) -> str:
     htf_trend_ok = bool(r_htf_trend)
     s_htftrend = 100 if htf_trend_ok else 20
 
-    # God engine
-    s_god = 0
-    if r_god and isinstance(r_god, dict):
-        if r_god.get("approved", False): s_god = 80
-        else:
-            for k in ("score","confluence","grade"):
-                v = r_god.get(k)
-                if isinstance(v,(int,float)) and v > 0:
-                    s_god = min(100, int(float(v) if float(v) <= 100 else float(v)/10))
-                    break
-
     # Elite score
     engine_votes = []
     for r in [r_strat, r_te]:
@@ -339,8 +308,6 @@ async def _run_forex_scan(pair_display: str) -> str:
             d = r.get("direction") or r.get("bias")
             if d in ("BUY","SELL"): engine_votes.append(d)
     if r_mtf and s_mtf >= 60: engine_votes.append(direction)
-    if whipsaw_ok: engine_votes.append(direction)
-
     liq_for_score = r_liq if r_liq else None
     elite_sc, elite_grade = compute_signal_score(
         pair, direction, engine_votes,
@@ -360,8 +327,6 @@ async def _run_forex_scan(pair_display: str) -> str:
     htf_label  = "✅ Loaded" if htf_has else "⚠️ No data"
     htft_label = "✅ Aligned" if htf_trend_ok else "❌ Opposing"
     te_label   = "✅ Valid" if te_ok else "⚠️ Weak"
-    whip_label = "✅ Clean" if whipsaw_ok else "⚠️ Choppy"
-
     lines = [
         f"🤖 <b>SUPREME PRO AI — FOREX SCAN</b>",
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -381,9 +346,6 @@ async def _run_forex_scan(pair_display: str) -> str:
         f"📉 <b>ADX TREND STRENGTH  (1H)</b>",
         f"  {_bar(s_adx)} {s_adx}% {_score_emoji(s_adx)}",
         f"",
-        f"🌊 <b>ANTI-WHIPSAW FILTER</b>",
-        f"  {_bar(s_whip)} {s_whip}%  {whip_label}",
-        f"",
         f"💧 <b>LIQUIDITY / SMC GRADE</b>",
         f"  {_bar(s_liq)} {s_liq}% {_score_emoji(s_liq)}",
         f"",
@@ -395,9 +357,6 @@ async def _run_forex_scan(pair_display: str) -> str:
         f"",
         f"🗓 <b>HTF TREND ALIGNMENT</b>",
         f"  {_bar(s_htftrend)} {s_htftrend}%  {htft_label}",
-        f"",
-        f"🛡️ <b>GOD ENGINE GATE</b>",
-        f"  {_bar(s_god)} {s_god}% {_score_emoji(s_god)}",
         f"",
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"🏆 <b>ELITE SIGNAL SCORE:  {elite_sc}/100</b>",
