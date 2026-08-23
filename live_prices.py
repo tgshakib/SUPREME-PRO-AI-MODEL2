@@ -788,6 +788,31 @@ def get_qualified_market_quote(pair: str) -> Optional[dict]:
     return None
 
 
+def get_chart_view_quote(pair: str) -> Optional[dict]:
+    """Return a named chart reference for manual analysis screens.
+
+    Prefer a direct executable quote. When that is unavailable (for example,
+    during a weekend session or a temporarily unavailable provider), retain a
+    real chart reference as a display-only fallback. Callers must label this
+    path clearly and require the user to confirm the terminal price before
+    placing an order.
+    """
+    qualified = get_qualified_market_quote(pair)
+    if qualified is not None:
+        return {**qualified, "reference_only": False}
+
+    reference_price = get_live_price(pair)
+    if reference_price is None or reference_price <= 0:
+        return None
+    return {
+        "price": float(reference_price),
+        "source": "Chart-view reference — verify terminal price",
+        "source_ts": time.time(),
+        "freshness_sec": 60.0,
+        "reference_only": True,
+    }
+
+
 def get_qualified_otc_quote(pair: str, broker: str) -> Optional[dict]:
     """Return only a current tick from the user-selected OTC broker."""
     if broker not in {"po", "qx"}:

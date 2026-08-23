@@ -33,7 +33,7 @@ from keyboards import (
 )
 from live_prices import (
     get_live_price, pip_size as live_pip_size, decimals as live_decimals,
-    get_market_bias, get_qualified_market_quote,
+    get_chart_view_quote, get_market_bias, get_qualified_market_quote,
 )
 from strategy import (
     analyze_pair as sniper_analyze, pick_best_pair as sniper_pick,
@@ -1695,8 +1695,11 @@ def _generate_levels_force_fallback(
     dec = live_decimals(pair)
 
     quote = get_qualified_market_quote(pair)
+    if quote is None and fast:
+        quote = get_chart_view_quote(pair)
     bias = get_market_bias(pair)
-    if quote is None or bias is None or float(bias[1]) < 0.60:
+    min_chart_strength = 0.20 if fast else 0.60
+    if quote is None or bias is None or float(bias[1]) < min_chart_strength:
         return None, 0.0, [], 0.0, dec, None
     direction = bias[0]
     entry = float(quote["price"])
@@ -2076,6 +2079,8 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
           f"pip_target={pip_target}  pair={pair} {direction}")
 
     quote = get_qualified_market_quote(pair)
+    if quote is None and force_signal:
+        quote = get_chart_view_quote(pair)
     if quote is None:
         print(f"[forex_engine] no fresh qualified quote for {pair} — skipping")
         return

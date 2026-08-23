@@ -14,7 +14,7 @@ from typing import Dict, Optional
 from tz_utils import short_time_for_user, next_candle_time_for_user
 
 import database as db
-from live_prices import get_market_bias, get_live_price
+from live_prices import get_chart_view_quote, get_market_bias, get_live_price
 try:
     from strategy import analyze_pair as sniper_analyze
     from strategy import multi_tf_bias
@@ -358,6 +358,53 @@ def _mtg_label(user_id: Optional[int]) -> str:
     return "<b>1 Step Required</b>"
 
 
+def _chart_view_direction(pair: str) -> tuple[Optional[str], Optional[float], str, float, int]:
+    """Use the legacy chart-view read as a clearly-labelled manual fallback.
+
+    This path intentionally never invents a direction. It can return a
+    directional chart read with no numeric entry, in which case the user must
+    use the current selected-broker chart price at the next candle.
+    """
+    chart_pair = (pair.replace("〔OTC〕", "").replace("(OTC)", "").strip())
+    direction: Optional[str] = None
+    confidence = 62
+    try:
+        bias = get_market_bias(chart_pair)
+        if bias and bias[0] in {"BUY", "SELL"}:
+            direction = bias[0]
+            confidence = min(75, max(60, int(55 + float(bias[1]) * 30)))
+    except Exception:
+        pass
+
+    if direction is None and _cc_analyze is not None:
+        try:
+            chart = _cc_analyze(chart_pair, is_otc=False)
+            if chart and chart.get("direction") in {"BUY", "SELL"}:
+                direction = chart["direction"]
+                confidence = min(72, max(60, int(55 + float(chart.get("confidence", 0)) * 25)))
+        except Exception:
+            pass
+
+    if direction is None:
+        return None, None, "", 0.0, 0
+
+    try:
+        quote = get_chart_view_quote(chart_pair)
+    except Exception:
+        quote = None
+    if quote is None:
+        return direction, None, "Chart-view directional read", time.time(), confidence
+
+    source = str(quote.get("source") or "Chart-view reference")
+    return (
+        direction,
+        float(quote["price"]),
+        source,
+        float(quote.get("source_ts") or time.time()),
+        confidence,
+    )
+
+
 def generate_fast_binary_signal(
     pair: str,
     market: str,
@@ -488,7 +535,26 @@ def generate_fast_binary_signal(
         except Exception:
             unavailable_reason = "Real-market data could not be verified."
 
-    if direction is None or entry is None:
+    # Restore the original chart-view behavior as a manual reference route.
+    # It only uses a real chart direction, never a time-based/random fallback.
+    # OTC keeps the selected broker as the preferred source above; this is
+    # used only when that source has not started delivering data.
+    if direction is None:
+        (
+            chart_direction,
+            chart_entry,
+            chart_source,
+            chart_ts,
+            chart_confidence,
+        ) = _chart_view_direction(pair)
+        if chart_direction is not None:
+            direction = chart_direction
+            entry = chart_entry
+            source_text = chart_source
+            source_ts = chart_ts
+            confidence = chart_confidence
+
+    if direction is None:
         market_label = "OTC" if is_otc else "LIVE"
         return {
             "is_trade": False,
@@ -506,7 +572,8 @@ def generate_fast_binary_signal(
             ),
         }
 
-    decimals = 5 if abs(entry) < 10 else 2
+    has_numeric_entry = entry is not None
+    decimals = 5 if not has_numeric_entry or abs(entry) < 10 else 2
     pip = 0.0001 if decimals == 5 else 0.01
     try:
         expiry_min = max(1, int(tf_label.strip().split()[0]))
@@ -514,21 +581,24 @@ def generate_fast_binary_signal(
         expiry_min = 1
     arrow = "🟢 CALL / BUY" if direction == "BUY" else "🔴 PUT / SELL"
     market_label = "OTC" if is_otc else "LIVE"
-    next_move = entry + (pip * 3 if direction == "BUY" else -pip * 3)
-    entry_text = f"{entry:.{decimals}f}"
-    target_text = f"{next_move:.{decimals}f}"
+    price_line = (
+        f"💵 Entry: <code>{entry:.{decimals}f}</code>  →  "
+        f"Target: <code>{entry + (pip * 3 if direction == 'BUY' else -pip * 3):.{decimals}f}</code>\n"
+        if has_numeric_entry else
+        "💵 Entry: <b>Use the current selected-broker chart price at the next candle</b>\n"
+    )
     now_str = short_time_for_user(user_id)
     text = (
-        "📊 <b>BINARY DATA-QUALIFIED SIGNAL</b>\n"
+        "📊 <b>BINARY CHART-VIEW SIGNAL</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💱 <b>{pair}</b>\n"
         f"📊 Market: 🌐 <b>{market_label}</b>\n"
         f"⏱️ Trading time: <b>{tf_label}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"📆 SIGNAL: <b>{arrow}</b>\n"
-        f"🏅 Grade: <b>DATA-QUALIFIED CONFIRMATION</b>\n"
+        f"🏅 Grade: <b>CHART DIRECTION CONFIRMATION</b>\n"
         f"🎯 Confidence: <b>{confidence}%</b>\n"
-        f"💵 Entry: <code>{entry_text}</code>  →  Target: <code>{target_text}</code>\n"
+        f"{price_line}"
         f"🧭 Source: {source_text}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 <b>{now_str}</b> ✦ <b>CHECK BROKER PRICE BEFORE ENTRY</b>\n"
@@ -544,7 +614,7 @@ def generate_fast_binary_signal(
         "signal_id": -1,
         "entry_price": entry,
         "expiry_min": expiry_min,
-        "engine": "fast_microstructure",
+        "engine": "fast_microstructure" if has_numeric_entry else "chart_view_direction",
         "signal_ts": int(time.time()),
         "broker": broker,
         "is_trade": True,

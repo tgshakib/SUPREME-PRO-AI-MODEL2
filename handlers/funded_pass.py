@@ -571,7 +571,7 @@ async def _send_fp_signal(bot: Bot, fp: dict):
             asyncio.to_thread(
                 _generate_levels if require_sharper_entry
                 else _generate_levels_force_fallback,
-                pair, 1,
+                pair, 1, **({} if require_sharper_entry else {"fast": True}),
             ),
             timeout=8.0,
         )
@@ -584,6 +584,9 @@ async def _send_fp_signal(bot: Bot, fp: dict):
     direction, entry, tps, sl, dec, _pat = _lvls
     pip = live_pip_size(pair)
     quote = await asyncio.to_thread(get_qualified_market_quote, pair)
+    if quote is None and not require_sharper_entry:
+        from live_prices import get_chart_view_quote
+        quote = await asyncio.to_thread(get_chart_view_quote, pair)
     if quote is None:
         print(f"[funded_pass] no fresh qualified quote for {pair}; no trade")
         return

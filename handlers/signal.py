@@ -255,7 +255,7 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
                 generate_fast_binary_signal,
                 pair, market_name, tf_label, user_id, broker,
             ),
-            timeout=4.5,
+            timeout=6.0,
         )
     except asyncio.TimeoutError:
         sig = {
@@ -322,7 +322,7 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
     db.log_signal(user_id, pair, tf_label)
     _recent_signal[user_id] = datetime.utcnow()
     # ── Self-improve: schedule outcome only for a delivered trade. ──────
-    if _SI_OK and _si_schedule is not None:
+    if sig.get("entry_price") is not None and _SI_OK and _si_schedule is not None:
         try:
             _si_schedule(
                 signal_id=sig.get("signal_id", -1), pair=pair,
