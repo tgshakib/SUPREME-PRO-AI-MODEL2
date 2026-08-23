@@ -7,6 +7,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+import math
 
 import database as db
 import os
@@ -255,6 +256,72 @@ async def cmd_admin_panel(message: Message, state: FSMContext):
         message.chat.id,
         _panel_text(),
         admin_panel_kb(),
+    )
+
+
+@router.message(Command("checkprice"))
+async def cmd_checkprice(message: Message):
+    """Owner-only Quotex terminal-versus-authenticated-feed spot check."""
+    if not _is_admin(message.from_user.id):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer(
+            "Usage: <code>/checkprice &lt;price&gt;</code>\n"
+            "Open the same recently analysed Quotex OTC pair in your terminal, "
+            "then send its current price."
+        )
+        return
+    try:
+        terminal_price = float(parts[1].strip().replace(",", ""))
+        if not math.isfinite(terminal_price) or terminal_price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Please send a positive numeric price.")
+        return
+
+    try:
+        from otc_price_service import get_authenticated_qx_quote
+        from session_drift_monitor import check_manual_price, status as qx_status
+
+        quote = get_authenticated_qx_quote()
+        if not quote:
+            state = qx_status()
+            reason = state.get("blocked_reason") or "no recent authenticated QX tick"
+            await message.answer(
+                "QX feed check is unavailable: <b>%s</b>.\n"
+                "No signal will use QX data until a fresh authenticated session is ready."
+                % reason.replace("_", " ")
+            )
+            return
+        event = check_manual_price(
+            pair=str(quote["pair"]),
+            bot_price=float(quote["price"]),
+            real_price=terminal_price,
+        )
+    except Exception:
+        await message.answer("QX feed check could not be completed right now.")
+        return
+
+    if event["flagged"]:
+        await message.answer(
+            "⚠️ <b>QX PRICE DRIFT DETECTED</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            f"Pair: <b>{event['pair']}</b>\n"
+            f"Bot: <code>{event['bot_price']:.10g}</code>\n"
+            f"Terminal: <code>{event['real_price']:.10g}</code>\n"
+            f"Difference: <b>{event['drift_percent']:.4f}%</b>\n\n"
+            "QX analysis is paused while the bot re-authenticates."
+        )
+        return
+    await message.answer(
+        "✅ <b>QX PRICE CHECK PASSED</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"Pair: <b>{event['pair']}</b>\n"
+        f"Bot: <code>{event['bot_price']:.10g}</code>\n"
+        f"Terminal: <code>{event['real_price']:.10g}</code>\n"
+        f"Difference: <b>{event['drift_percent']:.4f}%</b>"
     )
 
 

@@ -22,7 +22,9 @@ import os
 import re
 import sys
 import time
+import uuid
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from threading import Lock
 from typing import Dict, Optional, Tuple
 
@@ -63,6 +65,12 @@ _BROKER_PRICES: Dict[str, Dict[str, Dict]] = defaultdict(dict)
 # completed-candle stream is reconnecting.
 _BROKER_TICKS: Dict[Tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=40))
 _LOCK   = Lock()
+# QX analysis candles are built only from the currently authenticated QX tape.
+# They deliberately do not reuse the generic QX socket cache in
+# otc_feed_combined.py, because synthetic pricing is session-bound.
+_QX_CLOSED_CANDLES: Dict[str, deque] = defaultdict(lambda: deque(maxlen=500))
+_QX_OPEN_CANDLES: Dict[str, Dict] = {}
+_LAST_QX_QUERY_PAIR: Optional[str] = None
 
 # ── ALL OTC pairs for each broker ─────────────────────────────────────────────
 # Quotex — internal WS asset names (lowercase_otc)
@@ -253,6 +261,8 @@ def _normalize_pair(pair: str) -> str:
     clean = re.sub(r"[^A-Z0-9/]", "", s).lower()
     # Remove slashes
     clean = clean.replace("/", "")
+    if clean.endswith("otc") and len(clean) > 3:
+        clean = clean[:-3]
 
     # Check manual map first
     if clean in _LABEL_MAP:
@@ -273,6 +283,51 @@ def _normalize_pair(pair: str) -> str:
 
 # ── Shared buffer API ─────────────────────────────────────────────────────────
 
+def _append_authenticated_qx_candle(
+    key: str,
+    price: float,
+    timestamp: float,
+    session_id: str,
+    session_started_at: float,
+) -> None:
+    """Update the local 1-minute QX candle builder from authenticated ticks."""
+    bucket = int(timestamp // _CANDLE_PERIOD) * _CANDLE_PERIOD
+    candle = _QX_OPEN_CANDLES.get(key)
+    if candle and (
+        candle["bucket"] != bucket or candle["session_id"] != session_id
+    ):
+        _QX_CLOSED_CANDLES[key].append({
+            "time": datetime.fromtimestamp(
+                candle["bucket"], tz=timezone.utc,
+            ).strftime("%Y-%m-%d %H:%M:%S"),
+            "open": candle["open"],
+            "high": candle["high"],
+            "low": candle["low"],
+            "close": candle["close"],
+            "volume": candle["volume"],
+            "source": "qx",
+            "session_id": candle["session_id"],
+            "session_started_at": candle["session_started_at"],
+        })
+        candle = None
+    if candle is None:
+        _QX_OPEN_CANDLES[key] = {
+            "bucket": bucket,
+            "open": price,
+            "high": price,
+            "low": price,
+            "close": price,
+            "volume": 1,
+            "session_id": session_id,
+            "session_started_at": session_started_at,
+        }
+        return
+    candle["high"] = max(float(candle["high"]), price)
+    candle["low"] = min(float(candle["low"]), price)
+    candle["close"] = price
+    candle["volume"] = int(candle["volume"]) + 1
+
+
 def _write_price(asset_key: str, price: float, source: str):
     """Write a live price into the shared buffer (thread-safe).
 
@@ -283,16 +338,41 @@ def _write_price(asset_key: str, price: float, source: str):
         return
     key = asset_key.lower()
     now = time.time()
+    qx_meta = None
+    if source == "qx":
+        try:
+            from session_drift_monitor import active_session_metadata
+            qx_meta = active_session_metadata()
+        except Exception:
+            qx_meta = None
+        # Never retain unauthenticated/stale QX prices in the broker tape.
+        if not qx_meta:
+            return
     with _LOCK:
         existing = _PRICES.get(key)
         # Always write — even if price is identical, update timestamp so
         # the 8-second max-age guard stays satisfied on quiet markets.
         if existing is None or price != existing["price"] or (now - existing["time"]) > 2.0:
             _PRICES[key] = {"price": price, "time": now, "source": source}
+            if qx_meta:
+                _PRICES[key].update(
+                    session_id=qx_meta["session_id"],
+                    session_started_at=qx_meta["session_started_at"],
+                )
         if source in ("qx", "po"):
             broker_entry = {"price": float(price), "time": now, "source": source}
+            if qx_meta:
+                broker_entry.update(
+                    session_id=qx_meta["session_id"],
+                    session_started_at=qx_meta["session_started_at"],
+                )
             _BROKER_PRICES[key][source] = broker_entry
             _BROKER_TICKS[(key, source)].append(broker_entry)
+            if qx_meta:
+                _append_authenticated_qx_candle(
+                    key, float(price), now, qx_meta["session_id"],
+                    float(qx_meta["session_started_at"]),
+                )
 
 
 def get_selected_broker_ticks(
@@ -306,14 +386,92 @@ def get_selected_broker_ticks(
     """
     if broker not in ("po", "qx"):
         return []
+    global _LAST_QX_QUERY_PAIR
     now = time.time()
     key = _normalize_pair(pair)
+    active_session_id = None
+    if broker == "qx":
+        try:
+            from session_drift_monitor import active_session_metadata
+            metadata = active_session_metadata()
+        except Exception:
+            metadata = None
+        if not metadata:
+            return []
+        active_session_id = metadata["session_id"]
+        _LAST_QX_QUERY_PAIR = key
     with _LOCK:
         ticks = list(_BROKER_TICKS.get((key, broker), ()))
     return [
         dict(tick) for tick in ticks[-limit:]
         if 0 <= now - float(tick.get("time") or 0) <= max_age_sec
+        and (
+            broker != "qx"
+            or tick.get("session_id") == active_session_id
+        )
     ]
+
+
+def get_authenticated_qx_candles(
+    pair: str, timeframe: str = "1m", count: int = 100,
+) -> list[Dict]:
+    """Return QX candles built only from the active authenticated tick tape."""
+    if timeframe.lower() != "1m":
+        return []
+    try:
+        from session_drift_monitor import active_session_metadata
+        metadata = active_session_metadata()
+    except Exception:
+        metadata = None
+    if not metadata:
+        return []
+    key = _normalize_pair(pair)
+    session_id = metadata["session_id"]
+    with _LOCK:
+        candles = [
+            dict(c) for c in _QX_CLOSED_CANDLES.get(key, ())
+            if c.get("session_id") == session_id
+        ]
+        current = _QX_OPEN_CANDLES.get(key)
+        if current and current.get("session_id") == session_id:
+            candles.append({
+                "time": datetime.fromtimestamp(
+                    current["bucket"], tz=timezone.utc,
+                ).strftime("%Y-%m-%d %H:%M:%S"),
+                "open": current["open"],
+                "high": current["high"],
+                "low": current["low"],
+                "close": current["close"],
+                "volume": current["volume"],
+                "source": "qx",
+                "session_id": current["session_id"],
+                "session_started_at": current["session_started_at"],
+            })
+    return candles[-count:]
+
+
+def get_authenticated_qx_quote(pair: Optional[str] = None) -> Optional[Dict]:
+    """Return a current QX quote with safe session audit metadata."""
+    try:
+        from session_drift_monitor import active_session_metadata
+        metadata = active_session_metadata()
+    except Exception:
+        metadata = None
+    if not metadata:
+        return None
+    key = _normalize_pair(pair) if pair else _LAST_QX_QUERY_PAIR
+    if not key:
+        return None
+    with _LOCK:
+        entry = dict(_BROKER_PRICES.get(key, {}).get("qx") or {})
+    if (
+        not entry
+        or entry.get("session_id") != metadata["session_id"]
+        or time.time() - float(entry.get("time") or 0) >= _PRICE_STALE_AGE
+    ):
+        return None
+    entry["pair"] = key
+    return entry
 
 
 def get_live_otc_price(
@@ -333,6 +491,16 @@ def get_live_otc_price(
     broker_only=False → legacy behaviour (includes yfinance; not recommended).
     """
     key = _normalize_pair(pair)
+    active_session_id = None
+    if broker == "qx":
+        try:
+            from session_drift_monitor import active_session_metadata
+            metadata = active_session_metadata()
+        except Exception:
+            metadata = None
+        if not metadata:
+            return None
+        active_session_id = metadata["session_id"]
     with _LOCK:
         if broker in ("po", "qx"):
             entry = dict(_BROKER_PRICES.get(key, {}).get(broker) or {})
@@ -341,6 +509,19 @@ def get_live_otc_price(
     if not entry:
         return None
     source = entry.get("source", "")
+    if source == "qx":
+        try:
+            from session_drift_monitor import active_session_metadata
+            current_qx_meta = active_session_metadata()
+        except Exception:
+            current_qx_meta = None
+        if (
+            not current_qx_meta
+            or entry.get("session_id") != current_qx_meta["session_id"]
+        ):
+            return None
+    if broker == "qx" and entry.get("session_id") != active_session_id:
+        return None
     # yfinance is always blocked for OTC (real-market ≠ synthetic broker price)
     if broker_only and source == "yf":
         return None
@@ -613,6 +794,37 @@ async def _qx_stream_once():
         await asyncio.sleep(300)
         return
 
+    # A rotation/drift block must receive a freshly captured managed session
+    # before a replacement WebSocket is allowed to feed analysis again.
+    try:
+        from session_drift_monitor import (
+            MAX_SESSION_AGE_SEC,
+            begin_reauthentication,
+            end_session,
+            mark_authenticated,
+            status as _qx_session_status,
+        )
+    except Exception as exc:
+        raise ConnectionError(f"QX session safety monitor unavailable: {exc}")
+
+    prior_status = _qx_session_status()
+    if (
+        prior_status["requires_reauth"]
+        and prior_status["blocked_reason"] != "not_authenticated"
+    ):
+        try:
+            from qx_auth import refresh_ssid_now
+            refreshed = await asyncio.to_thread(refresh_ssid_now)
+        except Exception:
+            refreshed = False
+        if not refreshed:
+            logger.warning(
+                "[otc_svc:qx] Fresh managed QX session was not available; "
+                "authenticated analysis remains paused"
+            )
+            await asyncio.sleep(60)
+            return
+
     # ── Token bypass: skip Cloudflare HTTP auth ────────────────────────────
     token = os.environ.get("QUOTEX_SSID", "").strip()
     if not token:
@@ -650,6 +862,10 @@ async def _qx_stream_once():
     if not check:
         raise ConnectionError(f"QX connect() failed: {reason}")
 
+    # The local id is audit metadata only.  It is never derived from or logged
+    # with the broker SSID/token.
+    session_id = f"qx-{int(time.time())}-{uuid.uuid4().hex[:10]}"
+    mark_authenticated(session_id)
     logger.info("[otc_svc:qx] ✅ Connected — subscribing OTC pairs …")
 
     # ── Subscribe all OTC pairs ───────────────────────────────────────────────
@@ -680,9 +896,26 @@ async def _qx_stream_once():
 
     # ── Real-time price loop ──────────────────────────────────────────────────
     _no_data_streak = 0
+    rotation_at = time.monotonic() + MAX_SESSION_AGE_SEC
     try:
         while True:
             await asyncio.sleep(0.5)   # 2× per second
+
+            if _qx_session_status()["requires_reauth"]:
+                logger.info(
+                    "[otc_svc:qx] QX session is blocked by the drift monitor; "
+                    "closing current stream for re-authentication"
+                )
+                break
+
+            if time.monotonic() >= rotation_at:
+                begin_reauthentication("scheduled_session_rotation")
+                logger.info(
+                    "[otc_svc:qx] Authenticated QX session reached %d min; "
+                    "rebuilding handshake with a fresh session",
+                    MAX_SESSION_AGE_SEC // 60,
+                )
+                break
 
             # Verify connection is still alive
             try:
@@ -691,6 +924,7 @@ async def _qx_stream_once():
                 still_up = False
             if not still_up:
                 logger.warning("[otc_svc:qx] Connection dropped — reconnecting")
+                end_session(session_id, "connection_lost")
                 break
 
             got_any = False
@@ -705,7 +939,6 @@ async def _qx_stream_once():
                         if v is not None:
                             fv = float(v)
                             if fv > 0:
-                                _write_price(asset, fv, "qx")
                                 _write_price(_normalize_pair(asset), fv, "qx")
                                 got_any = True
                                 break
@@ -719,9 +952,11 @@ async def _qx_stream_once():
                 _no_data_streak += 1
                 if _no_data_streak > 120:   # 60s × 2 polls/s = 120 cycles
                     logger.warning("[otc_svc:qx] No ticks for 60s — reconnecting")
+                    end_session(session_id, "no_qx_ticks")
                     break
 
     finally:
+        end_session(session_id, "qx_stream_closed")
         try:
             await client.close()
         except Exception:

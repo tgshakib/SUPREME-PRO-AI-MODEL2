@@ -173,6 +173,7 @@ async def main():
     await bot.set_my_commands([
         BotCommand(command="start",  description="▶️ Start bot & open menu"),
         BotCommand(command="admin",  description="📩 Contact admin for help"),
+        BotCommand(command="checkprice", description="Check authenticated Quotex feed"),
     ])
 
     # Clear any pre-existing webhook so polling can run cleanly

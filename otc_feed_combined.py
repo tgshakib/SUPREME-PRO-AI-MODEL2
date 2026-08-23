@@ -634,11 +634,21 @@ class OTCFeedManager:
 
     def get_candles(self, asset: str, tf: str, count: int = 100,
                     broker: str | None = None) -> Optional[list]:
-        """Return candles for one broker when requested; never mix OTC books."""
+        """Return candles for one broker when requested; never mix OTC books.
+
+        QX selected-broker analysis is served only from the authenticated QX
+        tick tape.  The generic QX socket is intentionally not a fallback for
+        that request because synthetic pricing is session-specific.
+        """
+        if broker == "qx":
+            try:
+                from otc_price_service import get_authenticated_qx_candles
+                candles = get_authenticated_qx_candles(asset, tf, count)
+                return candles if len(candles) >= 5 else None
+            except Exception:
+                return None
         qx_c = self.qx.get_candles(asset, tf, 500)
         po_c = self.po.get_candles(asset, tf, 500)
-        if broker == "qx":
-            return qx_c[-count:] if len(qx_c) >= 5 else None
         if broker == "po":
             return po_c[-count:] if len(po_c) >= 5 else None
 
@@ -657,7 +667,12 @@ class OTCFeedManager:
     def get_price(self, asset: str, broker: str | None = None) -> Optional[float]:
         """Return a broker-native OTC price when a broker is selected."""
         if broker == "qx":
-            return self.qx.get_price(asset)
+            try:
+                from otc_price_service import get_authenticated_qx_quote
+                quote = get_authenticated_qx_quote(asset)
+                return float(quote["price"]) if quote else None
+            except Exception:
+                return None
         if broker == "po":
             return self.po.get_price(asset)
         qp = self.qx.get_price(asset)

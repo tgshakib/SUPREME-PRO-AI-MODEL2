@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from handlers import signal as signal_handler
 import otc_price_service as price_service
+import session_drift_monitor as qx_monitor
 import self_improve
 import signals
 import tz_utils
@@ -15,10 +16,14 @@ import tz_utils
 
 class BinaryChartFallbackTests(unittest.TestCase):
     def setUp(self) -> None:
+        qx_monitor._reset_for_tests()
+        qx_monitor.mark_authenticated("test-qx-session")
         with price_service._LOCK:
             price_service._PRICES.clear()
             price_service._BROKER_PRICES.clear()
             price_service._BROKER_TICKS.clear()
+            price_service._QX_CLOSED_CANDLES.clear()
+            price_service._QX_OPEN_CANDLES.clear()
 
     @staticmethod
     def _candles(prices: tuple[float, ...], age_sec: int = 30) -> list[dict]:
@@ -84,6 +89,85 @@ class BinaryChartFallbackTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload["direction"], "SELL")
         self.assertEqual(payload["entry_price"], 2.2)
+
+    def test_unauthenticated_quotex_ticks_cannot_reach_analysis(self) -> None:
+        qx_monitor._reset_for_tests()
+        price_service._write_price("audchf_otc", 2.2, "qx")
+        self.assertEqual(
+            price_service.get_selected_broker_ticks("AUD/CHF 〔OTC〕", "qx"),
+            [],
+        )
+        self.assertIsNone(
+            price_service.get_live_otc_price("AUD/CHF 〔OTC〕", broker="qx")
+        )
+
+    def test_drift_blocks_the_active_qx_tape_until_reauthentication(self) -> None:
+        price_service._write_price("audchf_otc", 2.2, "qx")
+        self.assertTrue(
+            price_service.get_selected_broker_ticks("AUD/CHF 〔OTC〕", "qx")
+        )
+
+        event = qx_monitor.check_manual_price(
+            pair="audchf_otc", bot_price=2.2, real_price=2.3,
+        )
+
+        self.assertTrue(event["flagged"])
+        self.assertTrue(qx_monitor.needs_reauthentication())
+        self.assertEqual(
+            price_service.get_selected_broker_ticks("AUD/CHF 〔OTC〕", "qx"),
+            [],
+        )
+        self.assertIsNone(price_service.get_live_otc_price("AUD/CHF 〔OTC〕"))
+
+        qx_monitor.mark_authenticated("fresh-qx-session")
+        price_service._write_price("audchf_otc", 2.25, "qx")
+        ticks = price_service.get_selected_broker_ticks("AUD/CHF 〔OTC〕", "qx")
+        self.assertEqual(len(ticks), 1)
+        self.assertEqual(ticks[0]["session_id"], "fresh-qx-session")
+        self.assertIn("session_started_at", ticks[0])
+
+    def test_qx_candles_are_built_from_authenticated_ticks_only(self) -> None:
+        base = 1_700_000_000.0
+        for offset, price in enumerate((2.1, 2.11, 2.12, 2.13, 2.14, 2.15)):
+            with patch.object(price_service.time, "time", return_value=base + offset * 60):
+                price_service._write_price("audchf_otc", price, "qx")
+
+        candles = price_service.get_authenticated_qx_candles(
+            "AUDCHF-OTC", "1m", count=6,
+        )
+
+        self.assertEqual(len(candles), 6)
+        self.assertTrue(all(candle["source"] == "qx" for candle in candles))
+        self.assertTrue(
+            all(candle["session_id"] == "test-qx-session" for candle in candles)
+        )
+
+    def test_selected_qx_feed_uses_authenticated_candle_tape(self) -> None:
+        base = 1_700_000_000.0
+        for offset, price in enumerate((2.1, 2.11, 2.12, 2.13, 2.14, 2.15)):
+            with patch.object(price_service.time, "time", return_value=base + offset * 60):
+                price_service._write_price("audchf_otc", price, "qx")
+
+        from otc_feed_combined import otc_feed
+        with patch.object(
+            otc_feed.qx, "get_candles",
+            side_effect=AssertionError("generic QX socket must not feed QX analysis"),
+        ):
+            candles = otc_feed.get_candles(
+                "AUDCHF-OTC", "1m", count=6, broker="qx",
+            )
+
+        self.assertEqual(len(candles or []), 6)
+        self.assertEqual(candles[-1]["close"], 2.15)
+
+    def test_session_age_expiry_blocks_qx_reads(self) -> None:
+        qx_monitor.mark_authenticated("expiring-session", started_at=100.0)
+        self.assertFalse(
+            qx_monitor.is_qualified(
+                now=100.0 + qx_monitor.MAX_SESSION_AGE_SEC + 1,
+            )
+        )
+        self.assertTrue(qx_monitor.needs_reauthentication())
 
     def test_quotex_signal_uses_its_own_candles_and_ticks(self) -> None:
         for price in (2.2, 2.2001, 2.2002, 2.2003, 2.2004, 2.2005):
