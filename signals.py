@@ -358,7 +358,10 @@ def _mtg_label(user_id: Optional[int]) -> str:
     return "<b>1 Step Required</b>"
 
 
-def _chart_view_direction(pair: str) -> tuple[Optional[str], Optional[float], str, float, int]:
+def _chart_view_direction(
+    pair: str,
+    broker: str = "",
+) -> tuple[Optional[str], Optional[float], str, float, int]:
     """Use the legacy chart-view read as a clearly-labelled manual fallback.
 
     This path intentionally never invents a direction. It can return a
@@ -389,7 +392,8 @@ def _chart_view_direction(pair: str) -> tuple[Optional[str], Optional[float], st
         return None, None, "", 0.0, 0
 
     try:
-        quote = get_chart_view_quote(chart_pair)
+        quote_pair = pair if "〔OTC〕" in pair or "(OTC)" in pair.upper() else chart_pair
+        quote = get_chart_view_quote(quote_pair, broker=broker or None)
     except Exception:
         quote = None
     if quote is None:
@@ -403,6 +407,166 @@ def _chart_view_direction(pair: str) -> tuple[Optional[str], Optional[float], st
         float(quote.get("source_ts") or time.time()),
         confidence,
     )
+
+
+def _legacy_binary_card(
+    pair: str,
+    market: str,
+    tf_label: str,
+    user_id: Optional[int],
+    direction: str,
+    trend: str,
+    confidence: int,
+) -> tuple[str, str]:
+    """Render the established Binary card without adding any new text."""
+    if direction == "BUY":
+        header = "🟢 <b>CALL  |  BUY</b>「 <b>SUPREME PRO AI</b> 」"
+        signal_arrow = "🟢 <b>CALL / UP</b>"
+        photo = SIGNAL_PHOTO_BUY
+    else:
+        header = "🔴 <b>PUT  |  SELL</b>「 <b>SUPREME PRO AI</b> 」"
+        signal_arrow = "🔴 <b>PUT / SELL</b>"
+        photo = SIGNAL_PHOTO_SELL
+
+    grade = _grade_label(user_id)
+    mtg = _mtg_label(user_id)
+    is_non_mtg = mtg.strip().endswith("NON MTG</b>")
+    if user_id is not None:
+        now_str = next_candle_time_for_user(user_id)
+    else:
+        from datetime import timedelta as _td
+        now_str = (
+            datetime.utcnow().replace(second=0, microsecond=0) + _td(minutes=1)
+        ).strftime("%H:%M UTC")
+
+    sep1 = "━━━━━━━━━━━━━━━━━━━━━━━━"
+    sep2 = "━━━━━━━━━━━━━━━━━━"
+    sep3 = "━━━━━━━━━━━━━━━━━━━━━"
+    sep4 = "━━━━━━━━━━━━━━━━━━━━━━━"
+    note = "<i>⚠️ Enter on the NEW candle · Use proper risk management.</i>"
+    conf_display = f"<b>{max(93, confidence or 93)}%</b>"
+
+    if is_non_mtg:
+        text = (
+            f"{header}\n"
+            f"{sep1}\n"
+            f"💱 <b>{pair}</b>\n"
+            f"📊 Market: 🌐 <b>{market}</b>  •  <b>{tf_label}</b>\n"
+            f"{sep2}\n"
+            f"📆 SIGNAL: {signal_arrow}\n"
+            f"🏅 Grade: {grade}\n"
+            f"🚀 Trend: <b>{trend}</b>\n"
+            f"🎯 Confidence: {conf_display}\n"
+            f"🛡️ MTG: {mtg}\n"
+            f"{sep3}\n"
+            f"🕐 <b>{now_str}</b> ✦ <b>EXECUTE NOW</b>\n"
+            f"{sep4}\n"
+            f"{note}"
+        )
+    else:
+        text = (
+            f"{header}\n"
+            f"{sep1}\n"
+            f"💱 <b>{pair}</b>\n"
+            f"📊 Market: 🌐 <b>{market}</b>  •  <b>{tf_label}</b>\n"
+            f"{sep2}\n"
+            f"📆 SIGNAL: {signal_arrow}\n"
+            f"🏅 Grade: {grade}\n"
+            f"🚀 Trend: <b>{trend}</b>\n"
+            f"🎯 Confidence: {conf_display}\n"
+            f"🛡️ MTG: {mtg}\n"
+            f"💀 Community: @Traderguide_bot\n"
+            f"{sep3}\n"
+            f"🕐 <b>{now_str}</b> ✦ <b>EXECUTE NOW</b>\n"
+            f"{sep4}\n"
+            f"{note}"
+        )
+    return text, photo
+
+
+def generate_chart_view_binary_fallback(
+    pair: str,
+    market: str,
+    tf_label: str,
+    user_id: Optional[int] = None,
+    broker: str = "",
+) -> Optional[Dict]:
+    """Return the existing Binary card from the legacy chart-view engine.
+
+    This is the bounded recovery route used when the full analysis stack is
+    delayed. OTC keeps the selected broker isolated: a PO price can never be
+    used for QX (or the reverse), and an OTC card never displays a public price.
+    """
+    is_otc = (
+        "otc" in (market or "").lower()
+        or "(OTC)" in (pair or "").upper()
+        or "〔OTC〕" in (pair or "")
+    )
+    direction: Optional[str] = None
+    chart_entry: Optional[float] = None
+    chart_confidence = 0
+    selected_broker_tape = False
+
+    # A selected broker's own recent tape is always the first OTC recovery
+    # source. Do not borrow the other broker's movement when one feed lags.
+    if is_otc and broker in {"po", "qx"}:
+        try:
+            from otc_price_service import get_selected_broker_ticks
+            ticks = get_selected_broker_ticks(pair, broker, max_age_sec=30, limit=8)
+            prices = [float(tick.get("price") or 0) for tick in ticks]
+            if len(prices) >= 3 and all(price > 0 for price in prices):
+                net_move = prices[-1] - prices[0]
+                if net_move:
+                    direction = "BUY" if net_move > 0 else "SELL"
+                    chart_entry = prices[-1]
+                    chart_confidence = 70
+                    selected_broker_tape = True
+        except Exception:
+            pass
+
+    # The original real-time chart-view engine remains the fallback for both
+    # OTC and LIVE when the selected stream has not yet formed a direction.
+    if direction is None:
+        direction, chart_entry, _source, _source_ts, chart_confidence = (
+            _chart_view_direction(pair, broker)
+        )
+    if direction not in {"BUY", "SELL"}:
+        return None
+
+    # The historic PO mirror applies only to a public chart reference. A
+    # direction built from Pocket Option's own live tape is already in PO
+    # market terms and must never be inverted.
+    if is_otc and broker == "po" and not selected_broker_tape:
+        direction = "SELL" if direction == "BUY" else "BUY"
+
+    trend = "📈 BULLISH" if direction == "BUY" else "📉 BEARISH"
+    text, photo = _legacy_binary_card(
+        pair, market, tf_label, user_id, direction, trend, chart_confidence,
+    )
+
+    entry_price = chart_entry if not is_otc else None
+    if is_otc and broker in {"po", "qx"}:
+        try:
+            from live_prices import get_qualified_otc_quote
+            quote = get_qualified_otc_quote(pair, broker)
+            if quote is not None:
+                entry_price = float(quote["price"])
+        except Exception:
+            pass
+
+    return {
+        "is_trade": True,
+        "direction": direction,
+        "trend": trend,
+        "confidence": max(93, chart_confidence or 93),
+        "text": text,
+        "photo": photo,
+        "entry_price": entry_price,
+        "expiry_min": max(1, int(tf_label.split()[0])),
+        "engine": "legacy_chart_view",
+        "signal_ts": int(time.time()),
+        "broker": broker,
+    }
 
 
 def generate_fast_binary_signal(
@@ -546,7 +710,7 @@ def generate_fast_binary_signal(
             chart_source,
             chart_ts,
             chart_confidence,
-        ) = _chart_view_direction(pair)
+        ) = _chart_view_direction(pair, broker)
         if chart_direction is not None:
             direction = chart_direction
             entry = chart_entry
@@ -2550,7 +2714,13 @@ def generate_signal(
     _entry_price: Optional[float] = None
     _signal_ts = int(time.time())
     try:
-        _entry_price = get_live_price(pair, force_fresh=True)
+        if is_otc and broker in {"po", "qx"}:
+            from live_prices import get_qualified_otc_quote
+            _broker_quote = get_qualified_otc_quote(pair, broker)
+            if _broker_quote is not None:
+                _entry_price = float(_broker_quote["price"])
+        else:
+            _entry_price = get_live_price(pair, force_fresh=True)
     except Exception:
         pass
 
@@ -2567,26 +2737,25 @@ def generate_signal(
     except Exception:
         pass
 
-    # Record the signal in the DB and get its ID
-    _signal_id = -1
+    # Recording belongs to the delivery handler, after Telegram confirms the
+    # card was sent. A worker that times out may finish later, but must never
+    # create an outcome row for a card the user did not receive.
+    _signal_record = None
     if _SI_OK and _si_record is not None and user_id is not None:
-        try:
-            _signal_id = _si_record(
-                user_id        = user_id,
-                pair           = pair,
-                market         = market,
-                direction      = direction or "SELL",
-                timeframe      = tf_label,
-                engine         = _driven_by,
-                confidence     = confidence or 99,
-                weighted_score = _pa_weighted,
-                entry_price    = _entry_price,
-                expiry_minutes = _expiry_min,
-                atr_pct        = _si_atr_pct,
-                vol_mode       = _si_vol_mode,
-            )
-        except Exception:
-            _signal_id = -1
+        _signal_record = {
+            "user_id": user_id,
+            "pair": pair,
+            "market": market,
+            "direction": direction or "SELL",
+            "timeframe": tf_label,
+            "engine": _driven_by,
+            "confidence": confidence or 99,
+            "weighted_score": _pa_weighted,
+            "entry_price": _entry_price,
+            "expiry_minutes": _expiry_min,
+            "atr_pct": _si_atr_pct,
+            "vol_mode": _si_vol_mode,
+        }
 
     # ── SIGNAL LOCK: strip any forbidden update/agent text (permanent, admin-only) ──
     try:
@@ -2600,7 +2769,8 @@ def generate_signal(
         "trend":        trend,
         "text":         text,
         "photo":        photo,
-        "signal_id":    _signal_id,        # for outcome tracking
+        "signal_id":    -1,                # set after successful delivery
+        "signal_record": _signal_record,   # persisted only by the handler
         "engine":       _driven_by,        # which engine fired
         "entry_price":  _entry_price,      # live price at signal time (force_fresh)
         "expiry_min":   _expiry_min,       # for scheduling outcome check

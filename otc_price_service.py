@@ -316,7 +316,11 @@ def get_selected_broker_ticks(
     ]
 
 
-def get_live_otc_price(pair: str, broker_only: bool = True) -> Optional[float]:
+def get_live_otc_price(
+    pair: str,
+    broker_only: bool = True,
+    broker: Optional[str] = None,
+) -> Optional[float]:
     """Return the freshest live OTC price for a bot pair label.
 
     Source priority (freshness checked per-source):
@@ -330,7 +334,10 @@ def get_live_otc_price(pair: str, broker_only: bool = True) -> Optional[float]:
     """
     key = _normalize_pair(pair)
     with _LOCK:
-        entry = _PRICES.get(key)
+        if broker in ("po", "qx"):
+            entry = dict(_BROKER_PRICES.get(key, {}).get(broker) or {})
+        else:
+            entry = _PRICES.get(key)
     if not entry:
         return None
     source = entry.get("source", "")
@@ -359,10 +366,16 @@ def get_otc_status() -> Dict[str, int]:
     """Return {"qx": N, "po": N, "yf": N} count of live prices per source."""
     now = time.time()
     with _LOCK:
-        qx = sum(1 for v in _PRICES.values()
-                 if v.get("source") == "qx" and now - v["time"] < _PRICE_MAX_AGE)
-        po = sum(1 for v in _PRICES.values()
-                 if v.get("source") == "po" and now - v["time"] < _PRICE_MAX_AGE)
+        qx = sum(
+            1 for sources in _BROKER_PRICES.values()
+            for v in [sources.get("qx")]
+            if v and now - v["time"] < _PRICE_MAX_AGE
+        )
+        po = sum(
+            1 for sources in _BROKER_PRICES.values()
+            for v in [sources.get("po")]
+            if v and now - v["time"] < _PRICE_MAX_AGE
+        )
         yf = sum(1 for v in _PRICES.values()
                  if v.get("source") == "yf" and now - v["time"] < 60)
     return {"qx": qx, "po": po, "yf": yf}

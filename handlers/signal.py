@@ -14,10 +14,14 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 import database as db
 from chat_clean import show_screen, show_photo_screen
 try:
-    from self_improve import schedule_outcome_check as _si_schedule
+    from self_improve import (
+        record_signal as _si_record,
+        schedule_outcome_check as _si_schedule,
+    )
     _SI_OK = True
 except Exception:
     _SI_OK = False
+    _si_record = None  # type: ignore
     _si_schedule = None  # type: ignore
 
 _TIME_PHOTO = os.path.join(
@@ -29,13 +33,25 @@ from keyboards import (
     binary_menu_kb,
 )
 from config import BINARY_TIMEFRAMES, DAILY_FREE_LIMIT
-from signals import generate_signal
+from signals import generate_chart_view_binary_fallback, generate_signal
 
 router = Router()
 
 # 30-second cooldown lock per user after a signal fires.
 SIGNAL_COOLDOWN_SEC = 30
 _recent_signal: dict[int, datetime] = {}
+_active_analysis: dict[int, asyncio.Task] = {}
+
+
+def _record_delivered_signal(sig: dict) -> int:
+    """Persist outcome tracking only after the signal card was delivered."""
+    payload = sig.get("signal_record")
+    if not payload or not _SI_OK or _si_record is None:
+        return -1
+    try:
+        return int(_si_record(**payload))
+    except Exception:
+        return -1
 
 
 def _is_admin(uid: int) -> bool:
@@ -195,6 +211,14 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         )
         return
 
+    running = _active_analysis.get(user_id)
+    if running is not None and not running.done():
+        await call.answer(
+            "⚠️ Your previous Binary analysis is still finishing. Please wait.",
+            show_alert=True,
+        )
+        return
+
     allowed, used, limit = _can_analyze(user_id)
     if not allowed:
         await call.answer()
@@ -249,25 +273,56 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
     # Use the original chart-view signal builder.  It owns the established
     # Binary/OTC/LIVE card text and timing; do not replace it with a new card
     # format in this handler.
-    try:
-        sig = await asyncio.wait_for(
-            asyncio.to_thread(
-                generate_signal,
-                pair, market_name, tf_label, user_id, broker,
-            ),
-            timeout=25.0,
+    analysis_task = asyncio.create_task(
+        asyncio.to_thread(
+            generate_signal,
+            pair, market_name, tf_label, user_id, broker,
         )
+    )
+    _active_analysis[user_id] = analysis_task
+
+    def _consume_analysis_result(done: asyncio.Task) -> None:
+        if _active_analysis.get(user_id) is done:
+            _active_analysis.pop(user_id, None)
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    analysis_task.add_done_callback(_consume_analysis_result)
+    try:
+        sig = await asyncio.wait_for(asyncio.shield(analysis_task), timeout=25.0)
     except asyncio.TimeoutError:
-        sig = {
-            "is_trade": False,
-            "text": (
-                "⏱️ <b>ANALYSIS UNAVAILABLE</b>\n"
-                "━━━━━━━━━━━━━━━━━━━\n"
-                f"💱 <b>{pair}</b>\n"
-                "No current, source-qualified market data arrived within the "
-                "analysis window. No executable entry was created."
-            ),
-        }
+        # The full engine can spend longer than the callback window waiting on
+        # an upstream chart provider. Recover through the established chart-view
+        # engine and render the same legacy card, rather than replacing it with
+        # an unavailable-data screen.
+        try:
+            sig = await asyncio.wait_for(
+                asyncio.to_thread(
+                    generate_chart_view_binary_fallback,
+                    pair, market_name, tf_label, user_id, broker,
+                ),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            sig = None
+        except Exception:
+            sig = None
+
+        if sig is None:
+            sig = {
+                "is_trade": False,
+                "text": (
+                    "🔄 <b>CHART VIEW IS REFRESHING</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    f"💱 <b>{pair}</b>\n"
+                    "No verified chart direction is available yet. "
+                    "The current analysis is still completing."
+                ),
+            }
     # The legacy renderer predates the fast-path metadata flag.  Preserve its
     # established output and let the existing delivery flow treat it as a
     # signal without altering the rendered text.
@@ -325,6 +380,7 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         db.release_binary_signal_reservation(user_id)
         return
 
+    sig["signal_id"] = _record_delivered_signal(sig)
     db.finalize_binary_signal_reservation(user_id, SIGNAL_COOLDOWN_SEC)
     db.log_signal(user_id, pair, tf_label)
     _recent_signal[user_id] = datetime.utcnow()

@@ -577,7 +577,11 @@ def _spot_metal_for_pair(pair: str) -> Optional[float]:
     return None
 
 
-def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
+def get_live_price(
+    pair: str,
+    force_fresh: bool = False,
+    broker: Optional[str] = None,
+) -> Optional[float]:
     """Live mid price for a pair, or None if all sources fail.
 
     Source priority (each tried in order, first valid price wins):
@@ -606,22 +610,29 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
         # get_live_otc_price() enforces a 90-second freshness window internally.
         try:
             from otc_price_service import get_live_otc_price
-            otc_px = get_live_otc_price(pair)
+            otc_px = get_live_otc_price(pair, broker=broker)
             if otc_px and otc_px > 0:
                 return otc_px
         except Exception:
             pass
 
         # Source 0b: Pocket Option candle stream (already-authenticated thread).
-        try:
-            from pocket_option_ws import get_candles as _po_get_candles
-            _po_bars = _po_get_candles(pair, 60)
-            if _po_bars:
-                _last_close = float(_po_bars[-1].get("close", 0))
-                if _last_close > 0:
-                    return _last_close
-        except Exception:
-            pass
+        if broker in (None, "", "po"):
+            try:
+                from pocket_option_ws import get_candles as _po_get_candles
+                _po_bars = _po_get_candles(pair, 60)
+                if _po_bars:
+                    _last_close = float(_po_bars[-1].get("close", 0))
+                    if _last_close > 0:
+                        return _last_close
+            except Exception:
+                pass
+
+        # A broker-specific OTC request must never fall through to the shared
+        # last-writer buffer or public-market bridge. Those sources can belong
+        # to the other broker and are not valid as its synthetic OTC price.
+        if broker in {"po", "qx"}:
+            return None
 
         # Source 0c: last known broker price — WITH strict age gate.
         #
@@ -788,7 +799,7 @@ def get_qualified_market_quote(pair: str) -> Optional[dict]:
     return None
 
 
-def get_chart_view_quote(pair: str) -> Optional[dict]:
+def get_chart_view_quote(pair: str, broker: Optional[str] = None) -> Optional[dict]:
     """Return a named chart reference for manual analysis screens.
 
     Prefer a direct executable quote. When that is unavailable (for example,
@@ -801,7 +812,7 @@ def get_chart_view_quote(pair: str) -> Optional[dict]:
     if qualified is not None:
         return {**qualified, "reference_only": False}
 
-    reference_price = get_live_price(pair)
+    reference_price = get_live_price(pair, broker=broker)
     if reference_price is None or reference_price <= 0:
         return None
     return {
