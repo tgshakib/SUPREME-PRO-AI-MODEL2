@@ -415,29 +415,31 @@ async def msg_fp_pair(message: Message, state: FSMContext, bot: Bot):
     )
 
 
-@router.callback_query(F.data == "fp:fl:active")
+@router.callback_query(F.data.in_({"fp:fl:toggle", "fp:fl:active"}))
 async def cb_fp_floating_active(call: CallbackQuery):
+    """Toggle Floating Limit directly from the active challenge card.
+
+    ``fp:fl:active`` is retained only for old rendered messages; it now uses
+    the same direct toggle behavior and never opens a separate panel.
+    """
     fp = db.get_funded_pass(call.from_user.id)
     if not fp or fp.get("status") != "active":
         await call.answer("Start a Funded Pass challenge first.", show_alert=True)
         return
-    enabled = bool(int(fp.get("floating_limit") or 0))
-    await call.answer()
-    await show_screen(
-        call.bot, call.message.chat.id,
-        "🟡 <b>FLOATING LIMIT — FUNDED PASS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        f"Current status: <b>{'ON ✅' if enabled else 'OFF'}</b>\n\n"
-        "• <b>OFF:</b> standard challenge signal flow.\n"
-        "• <b>ON:</b> waits for A+ sniper zones, uses LIMIT entries, and "
-        "tracks a planned 0.025%–0.05% account-risk cap.\n\n"
-        "<i>Risk control cannot guarantee that a live trade never reaches SL.</i>",
-        fp_floating_active_kb(enabled),
-    )
+    enabled = not bool(int(fp.get("floating_limit") or 0))
+    db.set_funded_pass_floating_limit(call.from_user.id, enabled)
+    await call.answer("Floating Limit ON ✅" if enabled else "Floating Limit OFF")
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=fp_active_kb(floating_limit=enabled)
+        )
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("fp:fl:set:"))
 async def cb_fp_floating_active_set(call: CallbackQuery):
+    """Keep old panel buttons compatible without reopening the panel."""
     fp = db.get_funded_pass(call.from_user.id)
     if not fp or fp.get("status") != "active":
         await call.answer("Start a Funded Pass challenge first.", show_alert=True)
@@ -445,18 +447,12 @@ async def cb_fp_floating_active_set(call: CallbackQuery):
     enabled = call.data.endswith(":on")
     db.set_funded_pass_floating_limit(call.from_user.id, enabled)
     await call.answer("Floating Limit ON ✅" if enabled else "Floating Limit OFF")
-    await show_screen(
-        call.bot, call.message.chat.id,
-        "🟡 <b>FLOATING LIMIT — FUNDED PASS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n"
-        f"Current status: <b>{'ON ✅' if enabled else 'OFF'}</b>\n\n"
-        + (
-            "The bot will wait for stricter sniper/HTF-zone confirmation."
-            if enabled else
-            "The bot will return to the normal funded signal flow."
-        ),
-        fp_floating_active_kb(enabled),
-    )
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=fp_active_kb(floating_limit=enabled)
+        )
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "fp:fl:active:back")

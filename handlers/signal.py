@@ -270,8 +270,8 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
     await asyncio.sleep(_scan_secs)
 
     if tf in {"5s", "15s"}:
-        # Fast sessions use only local buffered evidence. When the feed is
-        # not fresh enough, the builder returns a visible NO TRADE card.
+        # Fast sessions use local buffered evidence and always return a
+        # clearly labelled OTC/LIVE result, including the disclosed fallback.
         sig = generate_fast_binary_signal(
             pair, market_name, tf_label, user_id=user_id, broker=broker
         )

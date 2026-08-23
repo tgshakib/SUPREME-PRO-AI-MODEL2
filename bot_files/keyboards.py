@@ -777,7 +777,7 @@ def fp_active_kb(floating_limit: bool = False) -> InlineKeyboardMarkup:
         else "🟡 FLOATING LIMIT : OFF"
     )
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=floating_label, callback_data="fp:fl:active")],
+        [InlineKeyboardButton(text=floating_label, callback_data="fp:fl:toggle")],
         [InlineKeyboardButton(text="🛑 STOP CHALLENGE", callback_data="fp:stop")],
         [InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")],
     ])
