@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # System libs: needed by pandas / yfinance HTTPS, plus tzdata for timezones
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates tzdata \
+        ca-certificates tzdata \ git\y
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
