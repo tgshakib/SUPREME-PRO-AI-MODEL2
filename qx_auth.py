@@ -17,9 +17,10 @@ TOKEN LIFECYCLE (identical to po_auth.py):
   • On WS rejection → immediate re-login attempted automatically.
 
 Credentials:
-  QUOTEX_EMAIL    env var (default: hosnaranupur@gmail.com)
-  QUOTEX_PASSWORD env var (default: hosnaranupur@)
-  Both are already set in .env — no manual token required.
+   QUOTEX_EMAIL    environment variable
+   QUOTEX_PASSWORD environment variable
+   They may be loaded from the local .env or Replit Secrets. No credentials
+   are stored as source-code defaults.
 """
 from __future__ import annotations
 
@@ -35,8 +36,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-QX_EMAIL    = os.environ.get("QUOTEX_EMAIL",    "hosnaranupur@gmail.com")
-QX_PASSWORD = os.environ.get("QUOTEX_PASSWORD", "hosnaranupur@")
+QX_EMAIL    = os.environ.get("QUOTEX_EMAIL", "").strip()
+QX_PASSWORD = os.environ.get("QUOTEX_PASSWORD", "").strip()
 
 _SSID_FILE         = os.path.join(os.path.dirname(__file__), ".qx_ssid_cache")
 _LOGIN_RETRY_DELAY = 60   # seconds between retries
@@ -141,6 +142,10 @@ def _do_pyquotex_login() -> Optional[str]:
     Returns the raw session token string on success, None on failure.
     """
     import threading
+
+    if not QX_EMAIL or not QX_PASSWORD:
+        logger.error("[qx_auth] QUOTEX_EMAIL and QUOTEX_PASSWORD are not configured")
+        return None
 
     try:
         from pyquotex.stable_api import Quotex as _Quotex
@@ -461,7 +466,7 @@ def refresh_ssid_now() -> bool:
         "          Option A — set QUOTEX_SSID in Replit Secrets:\n"
         "            qxbroker.com → F12 → Console → window.settings.token\n"
         "          Option B — ensure QUOTEX_EMAIL / QUOTEX_PASSWORD are correct\n"
-        "            and pyquotex is installed (pip install pyquotex).\n"
+        "            and use a Python 3.12+ runtime for pyquotex.\n"
         "          The bot retries automatically every 60 seconds."
     )
     return False
@@ -501,7 +506,11 @@ async def run_qx_auth_manager():
     """
     global QX_SSID_REJECTED
     logger.info("[qx_auth] Starting Quotex auth manager …")
-    logger.info(f"[qx_auth] Using account: {QX_EMAIL}")
+    if not QX_EMAIL or not QX_PASSWORD:
+        logger.error(
+            "[qx_auth] Quotex credentials are missing. Configure "
+            "QUOTEX_EMAIL and QUOTEX_PASSWORD in .env or Replit Secrets."
+        )
 
     asyncio.create_task(_keepalive_loop(), name="qx_ssid_keepalive")
 

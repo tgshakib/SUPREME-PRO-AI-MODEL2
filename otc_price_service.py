@@ -28,15 +28,15 @@ from typing import Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ── Credentials ──────────────────────────────────────────────────────────────
-# pyquotex uses email+password directly — no SSID / Chrome needed
-QX_EMAIL    = os.environ.get("QX_EMAIL",    "falgunijakiyakhanom@gmail.com")
-QX_PASSWORD = os.environ.get("QX_PASSWORD", "falgunijakiyakhanom@")
-QX_SSID     = ""   # kept for compatibility — not used by pyquotex stream
+# pyquotex uses email+password directly — no SSID / Chrome needed.
+# Keep these names aligned with qx_auth.py; never store credentials in source.
+QX_EMAIL    = os.environ.get("QUOTEX_EMAIL", "").strip()
+QX_PASSWORD = os.environ.get("QUOTEX_PASSWORD", "").strip()
+QX_SSID     = os.environ.get("QUOTEX_SSID", "").strip()
 
-PO_SSID = os.environ.get(
-    "PO_SSID",
-    "g.a000-Ai13jQkQYD2vmUfrl1__ykff4-QQiOqs6vH3QY6NCDqJsjyyW5gw61CrJei5KRzT8h1rwACgYKAXESARQSFQHGX2MidDQ1Nyi9mQ0B9CaMyNyTdhoVAUF8yKqW_DYkz9SHvUGWIEH008bP0076"
-)
+# The Pocket Option auth manager supplies PO_SSID at runtime. Do not embed a
+# token here; an absent value simply lets po_auth.py recover it.
+PO_SSID = os.environ.get("PO_SSID", "").strip()
 
 # ── Stream settings ───────────────────────────────────────────────────────────
 _CANDLE_PERIOD   = 60      # seconds (1-minute candles match pocket_option_ws)
@@ -555,10 +555,16 @@ async def _qx_stream_once():
     try:
         from pyquotex.stable_api import Quotex, ProxyConfig
     except ImportError:
-        logger.error("[otc_svc:qx] pyquotex not installed — run: "
-                     "pip install git+https://github.com/iahmedani/pyquotex.git "
-                     "--ignore-requires-python")
+        logger.error(
+            "[otc_svc:qx] pyquotex is unavailable. Its supported release "
+            "requires Python 3.12+, while this workflow currently uses Python 3.11."
+        )
         await asyncio.sleep(3600)
+        return
+
+    if not QX_EMAIL or not QX_PASSWORD:
+        logger.error("[otc_svc:qx] QUOTEX_EMAIL and QUOTEX_PASSWORD are not configured")
+        await asyncio.sleep(300)
         return
 
     # ── Token bypass: skip Cloudflare HTTP auth ────────────────────────────
@@ -588,7 +594,7 @@ async def _qx_stream_once():
         lang="en",
         proxy_config=_proxy_cfg,
     )
-    logger.info(f"[otc_svc:qx] Connecting via pyquotex ({QX_EMAIL}) …")
+    logger.info("[otc_svc:qx] Connecting via pyquotex …")
 
     try:
         check, reason = await client.connect()
