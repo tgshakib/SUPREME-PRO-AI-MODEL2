@@ -52,10 +52,12 @@ _claimed_actions: dict[tuple[int, int, int, str], float] = {}
 # {user_id: asyncio.Lock()} — one active request per user
 _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-# How long (seconds) to block repeated clicks on the same button
-# 1.5s is enough to kill accidental double-taps while still feeling instant
+# How long (seconds) to block repeated clicks on the same button.
+# Screens are edited in-place and retain the same Telegram message id, so this
+# must stay short: a long claim would incorrectly block a legitimate BACK or
+# HOME action on a later screen that uses the same callback data.
 COOLDOWN_SEC = 1.5
-ACTION_CLAIM_TTL_SEC = 3600.0
+ACTION_CLAIM_TTL_SEC = 3.0
 
 # Cleanup background task handle
 _cleanup_task: asyncio.Task | None = None

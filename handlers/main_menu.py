@@ -127,7 +127,9 @@ async def render_home(bot, chat_id: int, user=None, *, fast: bool = False):
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "assets", "welcome.jpg",
     )
-    if os.path.exists(welcome_photo) and not fast:
+    # Home should consistently show its welcome image.  ``fast`` controls the
+    # navigation path, not whether the user sees the home visual.
+    if os.path.exists(welcome_photo):
         await show_photo_screen(
             bot, chat_id,
             photo_path=welcome_photo,

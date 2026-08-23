@@ -767,8 +767,9 @@ async def cb_fx_close_view(call: CallbackQuery, bot: Bot):
     """Close the active-view panel and go back to WORKPLACE."""
     await call.answer()
     from handlers.main_menu import render_home
-    await delete_active(bot, call.message.chat.id)
-    await render_home(bot, call.message.chat.id, call.from_user)
+    # Keep the active message so render_home can swap the panel in-place.
+    # Deleting first produced a visible blank gap and made Close feel slow.
+    await render_home(bot, call.message.chat.id, call.from_user, fast=True)
 
 
 

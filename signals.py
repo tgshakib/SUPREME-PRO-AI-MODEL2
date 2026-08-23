@@ -474,13 +474,13 @@ def generate_fast_binary_signal(
             "source": None,
             "source_ts": None,
             "text": (
-                "🛑 <b>NO EXECUTABLE SIGNAL</b>\n"
+                "⏳ <b>MARKET DATA TEMPORARILY UNAVAILABLE</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💱 <b>{pair}</b>\n"
                 f"📊 Market: <b>{market_label}</b>\n"
-                f"🧭 Status: {unavailable_reason}\n\n"
-                "<i>Public or configured fallback prices are not used for "
-                "broker execution. Try again after the feed recovers.</i>"
+                "The selected broker has not provided a current quote yet.\n\n"
+                "<i>No entry was sent. Try again shortly or choose the other "
+                "broker—this avoids creating a trade from an unrelated price.</i>"
             ),
         }
 
