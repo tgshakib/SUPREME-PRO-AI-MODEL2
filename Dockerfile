@@ -17,6 +17,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # SQLite DB lives next to the source — mount a volume here for persistence
-["/app/data"]
+volume ["/app/data"]
 
 CMD ["python", "bot.py"]
