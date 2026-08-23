@@ -33,7 +33,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN
 import database as db
-from handlers import main_menu, signal, purchase, admin, forex, funded_pass, ai_scoreboard, auto_trading, referral
+from handlers import main_menu, signal, purchase, admin, forex, funded_pass, ai_scoreboard, auto_trading, referral, futures_signal
 from expiry_watcher import run_expiry_watcher
 from forex_engine import run_signal_loop
 from handlers.funded_pass import run_funded_pass_loop
@@ -93,6 +93,7 @@ async def main():
     dp.include_router(purchase.router)
     dp.include_router(forex.router)        # forex before main_menu (FSM input)
     dp.include_router(funded_pass.router)  # funded-pass FSM input precedence
+    dp.include_router(futures_signal.router)  # isolated Future Signal • TG flow
     dp.include_router(signal.router)
     dp.include_router(ai_scoreboard.router)
     dp.include_router(auto_trading.router)
@@ -172,6 +173,7 @@ async def main():
     from aiogram.types import BotCommand
     await bot.set_my_commands([
         BotCommand(command="start",  description="▶️ Start bot & open menu"),
+        BotCommand(command="futuresignal", description="🔮 Open Future Signal • TG"),
         BotCommand(command="admin",  description="📩 Contact admin for help"),
     ])
 

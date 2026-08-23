@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Quantum Signal Generator</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #111; color: #eee; padding: 20px; }
+    h1 { color: #0ff; }
+    input, select, button { margin: 10px 0; padding: 8px; font-size: 16px; }
+    #signals { margin-top: 20px; background: #222; padding: 10px; border-radius: 5px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+
+  <h1>Quantum Signal Generator</h1>
+
+  <div id="login">
+    <p>Username: <input type="text" id="username"></p>
+    <p>Password: <input type="password" id="password"></p>
+    <button onclick="authenticate()">Login</button>
+    <p id="auth-status" style="color: red;"></p>
+  </div>
+
+  <div id="main" class="hidden">
+    <h3>Select Market Type</h3>
+    <select id="market" onchange="loadAssets()">
+      <option value="">--Choose--</option>
+      <option value="real">Real Market</option>
+      <option value="otc">QUOTEX OTC Market</option>
+    </select>
+
+    <h3>Available Assets</h3>
+    <div id="asset-list"></div>
+
+    <h3>Filter Direction?</h3>
+    <select id="direction">
+      <option value="BOTH">Both</option>
+      <option value="CALL">CALL</option>
+      <option value="PUT">PUT</option>
+    </select>
+
+    <h3>Signal Method</h3>
+    <select id="method">
+      <option value="generate">Generate</option>
+      <option value="predefined">Use Predefined</option>
+    </select>
+
+    <br>
+    <button onclick="generateSignals()">Generate Signals</button>
+
+    <div id="signals"></div>
+  </div>
+
+  <script>
+    const USERNAME = "qxpro";
+    const PASSWORD = "82286";
+
+    const realAssets = ["EURUSD", "EURGBP", "USDJPY", "GBPUSD", "AUDCAD", "GBPCHF", "CADJPY"];
+    const otcAssets = [
+      "NZDCAD-OTC", "NZDCHF-OTC", "EURCHF-OTC", "CADCHF-OTC", "EURAUD-OTC", "AUDCHF-OTC",
+      "USDMXN-OTC", "USDBRL-OTC", "USDARS-OTC", "USDCHF-OTC", "USDCOP-OTC", "AUDNZD-OTC",
+      "NZDUSD-OTC", "NZDJPY-OTC", "GBPNZD-OTC", "USDIDR-OTC", "USDINR-OTC", "USDNGN-OTC",
+      "USDPHP-OTC", "USDBDT-OTC", "USDDZD-OTC", "USDTRY-OTC", "USDEGP-OTC", "USDZAR-OTC",
+      "AUDUSD-OTC", "EURCAD-OTC", "GBPAUD-OTC", "EURNZD-OTC"
+    ];
+
+    const predefinedSignals = [
+      "USDMXN-OTC,PUT", "USDCOP-OTC,CALL", "USDIDR-OTC,PUT", "USDEGP-OTC,CALL", "USDARS-OTC,CALL",
+      "USDPHP-OTC,CALL", "USDDZD-OTC,PUT", "USDNGN-OTC,PUT", "USDMXN-OTC,CALL", "USDINR-OTC,CALL",
+      "USDIDR-OTC,PUT", "USDBRL-OTC,CALL", "USDCOP-OTC,PUT", "USDBDT-OTC,PUT", "USDARS-OTC,PUT",
+      "USDPKR-OTC,CALL", "USDPHP-OTC,PUT", "USDEGP-OTC,PUT", "USDNGN-OTC,CALL", "NZDCAD-OTC,CALL"
+    ];
+
+    function authenticate() {
+      const user = document.getElementById("username").value;
+      const pass = document.getElementById("password").value;
+
+      if (user === USERNAME && pass === PASSWORD) {
+        document.getElementById("login").classList.add("hidden");
+        document.getElementById("main").classList.remove("hidden");
+      } else {
+        document.getElementById("auth-status").innerText = "Authentication failed.";
+      }
+    }
+
+    function loadAssets() {
+      const market = document.getElementById("market").value;
+      const assetListDiv = document.getElementById("asset-list");
+      assetListDiv.innerHTML = "";
+
+      const assets = market === "real" ? realAssets : otcAssets;
+      assets.forEach((asset, i) => {
+        const checkbox = `<label><input type="checkbox" name="assets" value="${asset}"> ${asset}</label><br>`;
+        assetListDiv.innerHTML += checkbox;
+      });
+    }
+
+    function generateSignals() {
+      const selectedAssets = Array.from(document.querySelectorAll('input[name="assets"]:checked'))
+        .map(el => el.value);
+      if (selectedAssets.length < 5) {
+        alert("Please select at least 5 assets.");
+        return;
+      }
+
+      const directionFilter = document.getElementById("direction").value;
+      const method = document.getElementById("method").value;
+      const outputDiv = document.getElementById("signals");
+      outputDiv.innerHTML = "<h3>Generated Signals</h3>";
+
+      let signals = [];
+
+      if (method === "generate") {
+        const now = new Date();
+        for (let i = 0; i < 12; i++) {
+          selectedAssets.forEach(asset => {
+            const time = new Date(now.getTime() + i * 5 * 60000); // 5-minute intervals
+            const direction = Math.random() < 0.5 ? "CALL" : "PUT";
+            if (directionFilter === "BOTH" || direction === directionFilter) {
+              signals.push(`${time.getHours().toString().padStart(2, '0')}:${time.getMinutes().toString().padStart(2, '0')},${asset},${direction}`);
+            }
+          });
+        }
+      } else {
+        predefinedSignals.forEach(signalStr => {
+          const [asset, direction] = signalStr.split(",");
+          if (selectedAssets.includes(asset) && (directionFilter === "BOTH" || direction === directionFilter)) {
+            const hour = 14 + Math.floor(Math.random() * 10); // Random hour 14-23
+            const min = Math.floor(Math.random() * 60);
+            const timeStr = `${hour.toString().padStart(2, '0')}:${min.toString().padStart(2, '0')}`;
+            signals.push(`${timeStr},${asset},${direction}`);
+          }
+        });
+      }
+
+      outputDiv.innerHTML += "<pre>" + signals.join("\n") + "</pre>";
+    }
+  </script>
+</body>
+</html>

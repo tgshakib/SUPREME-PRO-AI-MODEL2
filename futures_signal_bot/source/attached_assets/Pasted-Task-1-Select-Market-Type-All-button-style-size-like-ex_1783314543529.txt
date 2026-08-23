@@ -1,0 +1,58 @@
+Task 1: 
+📊 Select Market Type
+All button style size like example : 
+
+Real market | Quotex OTC 
+Pocket option otc  | Iq options OTC
+
+Task : 
+Asses user panel  after Click add user, bot ask me for username after username all available package With duration show.i just Chose duration and confirm user get asses according packs lifetime /temporary,  with this text user see after asses approve  " 🎉 Payment Received! Congratulations!
+🟢 Your account is now active. 
+
+🔮 Types : Future Signal 
+⏳ Duration : ( according package Lifetime /temporary asses) 
+END : ( lifetime / Temporary asses can se end last date)  
+
+Join our exclusive All  community here, please Share with your friends  click the link below : T.me/traderguide.bot
+" all Test with stylish front highlight test
+
+After user asses expired 
+User get Before 1hr subscription expired user get this massage. " your Future signal generators Subscription expired after 1hr Get asses now before it too late  " this massge with Asses Buy button, back button, chat button, , 
+Also After Click asses user name i can remove user easy, 
+
+Asses all price button after Click price package user see this text " ✅ You selected:
+
+📦 💎 ASSES · 60 Days ( accoding PACKAGE) 
+💰 Amount: 20$ ( ( accoding PACKAGE price ) 
+⏱ Duration: 2 Months Future Signal 
+
+Click below to proceed to payment.
+" 
+DOWN blew 2 Button 
+Processed to payment, Back to packages, 
+
+After click Processed to payment, button user see this
+"
+💳 Payment Instructions
+
+📦 Package: 💎 SVIP · 60 Days
+💰 Amount: $66
+
+💛 Binance Pay (Business Official)
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+🪪  Pay ID:
+582355370
+
+🔷 Crypto — USDT (TRC20 Network)
+┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+🏷  Wallet Address:
+TYudgrH88fCWzNqthy6tXQAieeNcCBYmER
+" with Down blew 2 button Send payment Screenshot, cencle, after click Send payment Screenshot, bot ask 
+
+📸 Please send your payment screenshot now.
+
+Take a screenshot of your completed payment and send it here as a photo.
+
+After user send payment screenshot on chatbot, bot direct send this payment screenshot to admin. With user info & package data advance signal user ,  
+And ask for admin approve or Reject,  After approved user get approved massage and auto asses according the package,  if admin click reject then user get this massage  payment not receive, if you think this is misunderstand DM here then show chat box for admin chat, 
+All test stylish front highlight,  all button Perfect work enter and exit,  new panel open old panel auto hide vanish on chat,  admin after approved or rejected this massage Will text in chat box,  active user data will see on asser user panel 
