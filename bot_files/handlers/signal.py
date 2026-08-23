@@ -29,7 +29,7 @@ from keyboards import (
     binary_menu_kb,
 )
 from config import BINARY_TIMEFRAMES, DAILY_FREE_LIMIT
-from signals import generate_signal
+from signals import generate_signal, generate_fast_binary_signal
 
 router = Router()
 
@@ -60,6 +60,8 @@ def _market_meta(market: str, broker: str):
 def _tf_label(code: str) -> str:
     if code == "auto":
         return random.choice(["1 MIN", "2 MIN", "3 MIN"])
+    if code == "5s":
+        return "5 SEC"
     if code == "15s":
         return "15 SEC"
     for label, c in BINARY_TIMEFRAMES:
@@ -181,17 +183,18 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
             await show_screen(call.bot, call.message.chat.id, _wknd_text, binary_menu_kb())
         return
 
-    # ── 15-second timeframe: access-only gate ─────────────────────────────
-    if tf == "15s":
+    # ── Fast timeframe: access-only gate ──────────────────────────────────
+    if tf in {"5s", "15s"}:
         if not db.has_active_access(user_id) and not _is_admin(user_id):
             await call.answer()
             _access_text = (
-                "⚡ <b>15 Seconds Timeframe — VIP Only</b>\n"
+                f"⚡ <b>{_tf_label(tf)} Timeframe — VIP Only</b>\n"
                 "━━━━━━━━━━━━━━━━━━━\n\n"
-                "🔒 The <b>15-second signal</b> is available for <b>paid access</b> users only.\n\n"
+                f"🔒 The <b>{_tf_label(tf)} signal</b> is available for "
+                "<b>paid access</b> users only.\n\n"
                 "You don't have active access.\n\n"
                 "👉 Tap <b>BUY ACCESS</b> below to unlock:\n"
-                "• ⚡ 15-second OTC signals\n"
+                "• ⚡ 5/15-second OTC & LIVE signals\n"
                 "• 🔓 Unlimited daily signals\n"
                 "• 📊 All timeframes\n"
                 "• 🎯 Premium signal quality"
@@ -260,12 +263,29 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         call.bot, chat_id, loading, reply_markup=None,
     )
 
-    # Hard-locked scan window: 3–6 seconds — all users/modes (max total ≤ 10s).
+    # Fast sessions use a deterministic 5-second analysis window.  The
+    # signal engine then reads the live 1m tape/microstructure proxy.
     import random as _rnd
-    _scan_secs = _rnd.choice([3.0, 4.0, 5.0, 6.0])
+    _scan_secs = 5.0 if tf in {"5s", "15s"} else _rnd.choice(
+        [3.0, 4.0, 5.0, 6.0]
+    )
     await asyncio.sleep(_scan_secs)
 
-    sig = generate_signal(pair, market_name, tf_label, user_id=user_id, broker=broker)
+    if tf in {"5s", "15s"}:
+        # Keep the user-visible fast contract bounded even when the full
+        # multi-engine stack is waiting on slow public APIs.
+        sig = generate_fast_binary_signal(
+            pair, market_name, tf_label, user_id=user_id, broker=broker
+        )
+    else:
+        sig = await asyncio.to_thread(
+            generate_signal,
+            pair,
+            market_name,
+            tf_label,
+            user_id,
+            broker,
+        )
 
     db.log_signal(user_id, pair, tf_label)
     _recent_signal[user_id] = datetime.utcnow()

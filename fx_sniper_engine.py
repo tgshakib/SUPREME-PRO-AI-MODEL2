@@ -59,6 +59,29 @@ def fx_sniper_decide(pair: str) -> dict:
     return result
 
 
+def confirm_gold_with_silver(direction: str) -> dict:
+    """Use XAG/USD as the leading confirmation for an XAU/USD setup.
+
+    A gold setup is not approved in Floating Limit mode unless the silver
+    multi-timeframe bias agrees.  This is a confirmation gate, not a promise
+    that XAU will follow or that a stop cannot be hit.
+    """
+    if not _CF_OK or get_mtf_bias is None or direction not in ("BUY", "SELL"):
+        return {"approved": False, "bias": "UNKNOWN", "strength": 0.0}
+    try:
+        mtf = get_mtf_bias("XAG/USD", tfs=["15m", "1h", "4h", "1d"])
+        bias = mtf.get("bias", "NEUTRAL")
+        strength = float(mtf.get("strength", 0) or 0)
+        return {
+            "approved": bias == direction and strength >= 0.45,
+            "bias": bias,
+            "strength": round(strength, 3),
+        }
+    except Exception as exc:
+        print(f"[fx_sniper] silver confirmation error: {exc}")
+        return {"approved": False, "bias": "UNKNOWN", "strength": 0.0}
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def _f(val) -> Optional[float]:

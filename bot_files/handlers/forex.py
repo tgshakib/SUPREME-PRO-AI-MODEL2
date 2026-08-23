@@ -76,7 +76,7 @@ class ForexState(StatesGroup):
 async def _fx_quick_analyze_and_signal(
     bot: Bot, chat_id: int, user_id: int, *, wipe_first: bool = False
 ):
-    """Show a 6-7 second 'Quick AI Scan' screen then fire a forex signal.
+    """Show an 8-10 second 'Quick AI Scan' screen then fire a forex signal.
 
     Called on first activation AND every time the user taps NEW SIGNAL.
     Signal text, buttons, and all downstream formatting are UNCHANGED.
@@ -107,8 +107,8 @@ async def _fx_quick_analyze_and_signal(
         # NOTE: do NOT set more_signal_requested here — the background loop
         # would pick it up during our sleep and fire a duplicate, blocking us.
 
-    # ── Show Analysis screen — animated loading dots (6-7 s total) ──────────
-    _dots_frames = ["⏳", "⌛", "⏳", "⌛", "⏳", "⌛"]
+    # ── Show Analysis screen — animated loading dots (8-10 s total) ─────────
+    _dots_frames = ["⏳", "⌛", "⏳", "⌛", "⏳", "⌛", "⏳", "⌛", "⏳"]
     _base_text   = "<b>FX SUPREME PRO AI ANALYSING CHARTS</b>"
     loading_id   = await show_screen(
         bot, chat_id,
@@ -372,8 +372,20 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
     )
     setup_now = db.get_forex_setup(call.from_user.id) or {}
     gold_on = bool(int(setup_now.get("gold_king_mode") or 0))
+    floating_on = bool(int(setup_now.get("floating_limit") or 0))
     await show_screen(call.bot, call.message.chat.id, text,
-                      forex_active_kb(gold_king=gold_on))
+                      forex_active_kb(gold_king=gold_on,
+                                      floating_limit=floating_on))
+
+    # ── Immediate first signal — fire within 7-10 s ───────────────────────
+    # After the user completes TF → Pairs → Pips setup, launch the animated
+    # analysis scan immediately. Signal (text + photo) fires at the end.
+    asyncio.create_task(
+        _fx_quick_analyze_and_signal(
+            call.bot, call.message.chat.id, call.from_user.id,
+            wipe_first=False,
+        )
+    )
 
 
 # ── STOP ──────────────────────────────────────────────────
@@ -448,6 +460,37 @@ async def cb_fx_gold(call: CallbackQuery):
     try:
         await call.message.edit_reply_markup(
             reply_markup=forex_active_kb(gold_king=new_val)
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("fx:floating"))
+async def cb_fx_floating(call: CallbackQuery):
+    """Toggle conservative pending-entry mode for normal Forex setups."""
+    user_id = call.from_user.id
+    setup = db.get_forex_setup(user_id)
+    if not setup:
+        await call.answer("Activate the 24/7 engine first.", show_alert=True)
+        return
+    action = call.data.split(":")[-1]
+    new_val = (
+        action == "on"
+        if action in {"on", "off"}
+        else not bool(int(setup.get("floating_limit") or 0))
+    )
+    db.set_forex_floating_limit(user_id, new_val)
+    await call.answer(
+        "Floating Limit ON — waiting for sniper zones"
+        if new_val else "Floating Limit OFF",
+        show_alert=False,
+    )
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=forex_active_kb(
+                gold_king=bool(int(setup.get("gold_king_mode") or 0)),
+                floating_limit=new_val,
+            )
         )
     except Exception:
         pass

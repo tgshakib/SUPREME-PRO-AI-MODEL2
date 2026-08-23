@@ -140,8 +140,15 @@ def pair_by_index(market: str, idx: int) -> str:
 def binary_tf_kb(market: str, broker: str, pair_idx: int,
                  has_access: bool = False) -> InlineKeyboardMarkup:
     rows = []
-    # ⚡ 15-second timeframe — OTC only (Pocket Option / Quotex)
-    if market == "otc":
+    # ⚡ Fast binary timeframes — available for OTC and LIVE.
+    # These use the live 1m tape/microstructure as the safest public-data
+    # proxy because free feeds do not provide reliable 5-second OHLC candles.
+    if market in {"otc", "live"}:
+        _5s_text = "⚡ 5 Seconds" if has_access else "⚡ 5 Seconds  🔒 VIP"
+        rows.append([InlineKeyboardButton(
+            text=_5s_text,
+            callback_data=f"tf:{market}:{broker}:{pair_idx}:5s",
+        )])
         _15s_text = "⚡ 15 Seconds" if has_access else "⚡ 15 Seconds  🔒 VIP"
         rows.append([InlineKeyboardButton(
             text=_15s_text,
@@ -254,8 +261,14 @@ def forex_packages_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def package_payment_kb(pkg_id: str, back: str = "m:buy") -> InlineKeyboardMarkup:
+def package_payment_kb(pkg_id: str, back: str = "m:buy",
+                       page: int = 1) -> InlineKeyboardMarkup:
+    other_page = 2 if page == 1 else 1
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"💳 PAYMENT METHODS · PAGE {other_page}/2",
+            callback_data=f"pay:page:{pkg_id}:{other_page}",
+        )],
         [InlineKeyboardButton(text="📤 SEND SCREENSHOT", callback_data=f"send_ss:{pkg_id}")],
         [InlineKeyboardButton(text="⬅️ BACK", callback_data=back),
          InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")],
@@ -432,10 +445,19 @@ def forex_pip_target_label(max_tp: int) -> str:
     return f"{pips}+ PIPS"
 
 
-def forex_active_kb(gold_king: bool = False) -> InlineKeyboardMarkup:
+def forex_active_kb(gold_king: bool = False,
+                    floating_limit: bool = False) -> InlineKeyboardMarkup:
     gold_label = ("🥇 GOLD KING : ON ✅" if gold_king
                   else "🥇 GOLD KING : OFF")
+    floating_label = (
+        "🟡 FLOATING LIMIT : ON ✅" if floating_limit
+        else "🟡 FLOATING LIMIT : OFF"
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=floating_label,
+            callback_data="fx:floating:on" if floating_limit else "fx:floating:off",
+        )],
         [InlineKeyboardButton(text=gold_label, callback_data="fx:gold")],
         [InlineKeyboardButton(text="🛑 STOP",  callback_data="fx:stop")],
         [InlineKeyboardButton(text="📋 MENU", callback_data="m:home")],
@@ -664,9 +686,28 @@ def fp_profit_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=f"🎯 {pct}%", callback_data=f"fp:pt:{pct}")
             for pct in chunk
         ])
+    rows.append([InlineKeyboardButton(
+        text="🟡 FLOATING LIMIT · OPTIONAL",
+        callback_data="fp:fl:choose",
+    )])
     rows.append([InlineKeyboardButton(text="⬅️ BACK", callback_data="m:fp"),
                  InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def fp_floating_limit_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🟢 FLOATING LIMIT · ON",
+            callback_data="fp:fl:on",
+        )],
+        [InlineKeyboardButton(
+            text="⚪ FLOATING LIMIT · OFF",
+            callback_data="fp:fl:off",
+        )],
+        [InlineKeyboardButton(text="⬅️ BACK", callback_data="fp:back_pt"),
+         InlineKeyboardButton(text="🏢 WORKPLACE", callback_data="m:home")],
+    ])
 
 
 def fp_daily_kb() -> InlineKeyboardMarkup:

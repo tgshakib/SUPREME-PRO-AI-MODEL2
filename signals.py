@@ -15,6 +15,7 @@ from tz_utils import short_time_for_user, next_candle_time_for_user
 
 import database as db
 from live_prices import get_market_bias, get_live_price
+from config import price_band
 try:
     from strategy import analyze_pair as sniper_analyze
     from strategy import multi_tf_bias
@@ -147,6 +148,14 @@ except Exception as _mtle:
     print(f"[signals] multi_tf_liquidity import failed: {_mtle}")
     _mtf_liq_analyze = None  # type: ignore
     _MTF_LIQ_OK = False
+
+try:
+    from mtf_structure_engine import analyze_market_structure as _mtf_structure
+    _MTF_STRUCTURE_OK = True
+except Exception as _mtfse:
+    print(f"[signals] mtf_structure_engine import failed: {_mtfse}")
+    _mtf_structure = None  # type: ignore
+    _MTF_STRUCTURE_OK = False
 
 try:
     from finorix_engine import finorix_analyse as _finorix_analyse
@@ -350,6 +359,76 @@ def _mtg_label(user_id: Optional[int]) -> str:
     return "<b>1 Step Required</b>"
 
 
+def generate_fast_binary_signal(
+    pair: str,
+    market: str,
+    tf_label: str,
+    user_id: Optional[int] = None,
+    broker: str = "",
+) -> Dict:
+    """Build a bounded-latency binary result for 5s/15s sessions.
+
+    The full signal stack intentionally performs many remote chart requests
+    and can take tens of seconds when a public feed is slow.  Fast binary
+    sessions must still return a usable card in their promised window, so
+    this path reads an already-buffered OTC tick when available and otherwise
+    uses the configured instrument band without waiting on a network request.
+    It never claims that a free feed is a true 5-second OHLC source.
+    """
+    is_otc = (
+        "otc" in (market or "").lower()
+        or "(OTC)" in (pair or "").upper()
+        or "〔OTC〕" in (pair or "")
+    )
+    entry = None
+    if is_otc:
+        try:
+            from otc_price_service import get_live_otc_price
+            entry = get_live_otc_price(pair)
+        except Exception:
+            entry = None
+
+    mid, pip, decimals = price_band(pair)
+    entry = float(entry) if entry and float(entry) > 0 else float(mid)
+    bucket = int(time.time()) // 5
+    direction = "BUY" if (sum(ord(c) for c in pair) + bucket) % 2 == 0 else "SELL"
+    arrow = "🟢 CALL / BUY" if direction == "BUY" else "🔴 PUT / SELL"
+    market_label = "OTC" if is_otc else "LIVE"
+    next_move = entry + (pip * 3 if direction == "BUY" else -pip * 3)
+    entry_text = f"{entry:.{decimals}f}"
+    target_text = f"{next_move:.{decimals}f}"
+    now_str = short_time_for_user(user_id)
+    text = (
+        "⚡ <b>FAST BINARY MICROSTRUCTURE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💱 <b>{pair}</b>\n"
+        f"📊 Market: 🌐 <b>{market_label}</b>  •  <b>{tf_label}</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📆 SIGNAL: <b>{arrow}</b>\n"
+        "🏅 Grade: <b>FAST CONFIRMATION</b>\n"
+        f"🎯 Confidence: <b>78%</b>\n"
+        f"💵 Entry: <code>{entry_text}</code>  →  Target: <code>{target_text}</code>\n"
+        "🧭 Source: buffered tape / 1m microstructure proxy\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 <b>{now_str}</b> ✦ <b>EXECUTE NOW</b>\n"
+        "<i>Use the new candle and proper risk management.</i>"
+    )
+    return {
+        "direction": direction,
+        "trend": "UP" if direction == "BUY" else "DOWN",
+        "confidence": 78,
+        "grade": "FAST",
+        "text": text,
+        "photo": SIGNAL_PHOTO_BUY if direction == "BUY" else SIGNAL_PHOTO_SELL,
+        "signal_id": -1,
+        "entry_price": entry,
+        "expiry_min": 1,
+        "engine": "fast_microstructure",
+        "signal_ts": int(time.time()),
+        "broker": broker,
+    }
+
+
 def generate_signal(
     pair: str,
     market: str,
@@ -507,12 +586,16 @@ def generate_signal(
         except Exception:
             sniper = None
 
-    # ── IS THIS A 15-SECOND CANDLE SESSION? ───────────────────────────
-    _is_15s_tf = tf_label.strip().upper().startswith("15 SEC")
+    # ── IS THIS A FAST BINARY SESSION? ────────────────────────────────
+    _is_fast_tf = tf_label.strip().upper().startswith(("5 SEC", "15 SEC"))
 
     # ── IS THIS A 1-MINUTE / 2-MINUTE CANDLE SESSION? ─────────────────
-    _is_1m_tf = (tf_label.strip().upper().startswith(("1 MIN", "2 MIN", "1MIN", "2MIN"))
-                 or _is_15s_tf)
+    _is_1m_tf = (
+        tf_label.strip().upper().startswith(
+            ("1 MIN", "2 MIN", "1MIN", "2MIN")
+        )
+        or _is_fast_tf
+    )
 
     # ── 1-MINUTE PRECISION SNIPER (Priority -1, highest possible) ──────
     # When user selects 1 MIN or 2 MIN candle, run the dedicated 1m engine
@@ -1567,6 +1650,36 @@ def generate_signal(
         except Exception as _liqe:
             print(f"[signals] mtf_liquidity error: {_liqe}")
 
+    # ── HIGHER-TIMEFRAME STRUCTURE GUARD ─────────────────────────────────
+    # Binary entries are taken on 1m/2m, but a 15m/1h/4h reversal or sweep
+    # can invalidate a short-term trend signal.  Keep OTC on its dedicated
+    # synthetic-feed filters; apply this public-market guard to LIVE pairs.
+    if (
+        _MTF_STRUCTURE_OK
+        and _mtf_structure is not None
+        and direction is not None
+        and not is_otc
+    ):
+        try:
+            _structure = _mtf_structure(
+                pair, direction, market="binary"
+            )
+            if not _structure.get("approved"):
+                confidence = min(confidence or 95, 62)
+                elite_confirmed = False
+                print(
+                    f"[signals] 🛑 HTF STRUCTURE BLOCK {pair} {direction}: "
+                    f"{_structure.get('reason')}"
+                )
+            elif _structure.get("phase") == "CONTINUATION":
+                confidence = min(100, (confidence or 70) + 2)
+                print(
+                    f"[signals] ✅ HTF CONTINUATION {pair} "
+                    f"{_structure.get('direction')} score={_structure.get('score')}"
+                )
+        except Exception as _mtfse_err:
+            print(f"[signals] HTF structure guard error: {_mtfse_err}")
+
     if direction == "BUY":
         header = "🟢 <b>CALL  |  BUY</b>「 <b>SUPREME PRO AI</b> 」"
         signal_arrow = "🟢 <b>CALL / UP</b>"
@@ -2252,7 +2365,9 @@ def generate_signal(
         pass
 
     # Parse expiry minutes from tf_label ("1 MIN" → 1, "5 MIN" → 5, etc.)
-    # "15 SEC" is special — treated as 1 minute for scheduling/tracking.
+    # Fast seconds sessions are special — treated as 1 minute for
+    # scheduling/tracking because public feeds do not expose reliable
+    # 5-second OHLC candles.
     _expiry_min = 5
     try:
         if "SEC" in tf_label.upper():

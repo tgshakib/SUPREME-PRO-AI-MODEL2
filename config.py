@@ -212,3 +212,26 @@ PAYMENT_INFO = (
     "📌 <i>No hassle of opening a new ID. Just pay and get access — "
     "enjoy SVIP. You will get this bot 100% FREE FULL ACCESS.</i>"
 )
+
+# Payment display is split into two pages so wallet addresses remain easy to
+# copy on Telegram.  Binance Pay and the legacy USDT method stay unchanged.
+PAYMENT_INFO_PAGE_1 = (
+    "💸 <b>PAYMENT METHODS · PAGE 1/2</b> 💳\n\n"
+    "🔸 <b>Binance Pay:</b>\n<code>582355370</code>\n\n"
+    "🔸 <b>USDT — TRC20:</b>\n"
+    "<code>TYudgrH88fCWzNqthy6tXQAieeNcCBYmER</code>\n\n"
+    "🔸 <b>BTC · Bitcoin:</b>\n"
+    "<code>1KgTBewwyvg6wd1F5jy9PKMy3mkvajbaCf</code>\n\n"
+    "🔸 <b>BNB Smart Chain · BEP20:</b>\n"
+    "<code>0x3dc13af0ff1a7f4585360ab416d35d335afe68e3</code>"
+)
+
+PAYMENT_INFO_PAGE_2 = (
+    "💸 <b>PAYMENT METHODS · PAGE 2/2</b> 💳\n\n"
+    "🔸 <b>Ethereum · ERC20:</b>\n"
+    "<code>0x3dc13af0ff1a7f4585360ab416d35d335afe68e3</code>\n\n"
+    "🔸 <b>Solana:</b>\n"
+    "<code>CuG5iW99W8fKCPyT34Zkgyox2aa7hzyK8eRL3CXBvjXC</code>\n\n"
+    "📌 <i>Send only on the selected network. After paying, submit your "
+    "screenshot for admin review.</i>"
+)

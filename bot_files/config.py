@@ -39,8 +39,8 @@ OTC_PAIRS = [
 
 # ── Binary LIVE pairs ─────────────────────────────────────
 LIVE_PAIRS = [
-    "AUD/CAD", "AUD/CHF", "AUD/JPY", "CAD/JPY", "CHF/JPY",
-    "SP/ASX 200", "CAD/CHF", "EUR/AUD", "EUR/CAD", "EUR/CHF",
+    "AUD/CAD", "AUD/CHF", "AUD/JPY", "AUD/USD", "CAD/JPY", "CHF/JPY",
+    "CAD/CHF", "EUR/AUD", "EUR/CAD", "EUR/CHF",
     "EUR/GBP", "EUR/JPY", "EUR/USD", "GBP/AUD", "GBP/CAD",
     "GBP/CHF", "GBP/JPY", "GBP/USD", "USD/CAD", "USD/CHF",
     "USD/JPY",
@@ -62,11 +62,27 @@ FOREX_TIMEFRAMES = [
 ]
 
 FOREX_PAIRS = [
-    "CAD/JPY", "CHF/JPY", "CAD/CHF", "EUR/GBP", "EUR/JPY", "EUR/USD",
-    "GBP/CAD", "GBP/CHF", "GBP/JPY", "GBP/USD", "USD/CAD", "USD/CHF",
-    "USD/JPY", "ETHUSD", "SOLUSDT", "BTCUSD", "ETHUSDT", "BTCUSDT",
-    "BTC", "GOLD", "SILVER", "DXY", "USOIL", "XAU/USD",
-    "XAG/USD", "NAS100", "US100",
+    # ── Majors ────────────────────────────────────────────────
+    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD",
+    "USD/CHF", "NZD/USD",
+    # ── Euro crosses ──────────────────────────────────────────
+    "EUR/GBP", "EUR/JPY", "EUR/AUD", "EUR/CAD", "EUR/CHF", "EUR/NZD",
+    # ── GBP crosses ───────────────────────────────────────────
+    "GBP/JPY", "GBP/AUD", "GBP/CAD", "GBP/CHF", "GBP/NZD",
+    # ── AUD / NZD crosses ─────────────────────────────────────
+    "AUD/JPY", "AUD/CAD", "AUD/CHF", "AUD/NZD",
+    "NZD/JPY", "NZD/CAD", "NZD/CHF",
+    # ── CAD / CHF crosses ─────────────────────────────────────
+    "CAD/JPY", "CAD/CHF", "CHF/JPY",
+    # ── Metals ────────────────────────────────────────────────
+    "XAU/USD", "XAG/USD", "GOLD", "SILVER",
+    # ── Energy / DXY ──────────────────────────────────────────
+    "USOIL", "DXY",
+    # ── Indices ───────────────────────────────────────────────
+    "NAS100", "US100", "DJ30", "SP500",
+    # ── Crypto ────────────────────────────────────────────────
+    "BTC/USD", "ETH/USD", "BNB/USD", "SOL/USD", "XRP/USD",
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BTCUSD", "ETHUSD", "BTC",
 ]
 
 # Approximate price ranges for synthetic signal pricing per pair
@@ -95,13 +111,31 @@ def price_band(pair: str) -> tuple[float, float, int]:
 
 
 TP_LEVELS = [
-    ("TP 1 (+60 pips)",  1),
-    ("TP 2 (+90 pips)",  2),
-    ("TP 3 (+130 pips)", 3),
-    ("TP 4 (+160 pips)", 4),
-    ("TP 5 (+190 pips)", 5),
-    ("TP 6 (+250 pips)", 6),
+    ("TP¹ 30+pips",   30),
+    ("TP² 40+pips",   40),
+    ("TP³ 60+pips",   60),
+    ("TP⁴ 80+pips",   80),
+    ("TP⁵ 100+pips", 100),
+    ("TP⁶ 120pips",  120),
+    ("TP⁷ 160+pips", 160),
+    ("TP⁸ 220+pips", 220),
+    ("🎯 300+ PIPS",  300),
+    ("🎯 500+ PIPS",  500),
+    ("🎯 900+ PIPS",  900),
 ]
+
+# Legacy max_tp values (1-6) came from old TP-count format.
+# New values (>=10) are pip targets. Use this helper everywhere.
+def pip_target_from_max_tp(max_tp: int) -> int:
+    """Convert stored max_tp to a pip target.
+    Old format  : 1-6  → mapped to legacy pip steps [60,90,130,160,190,250]
+    New format  : >=10 → already a pip target
+    """
+    if max_tp >= 10:
+        return int(max_tp)
+    legacy = [60, 90, 130, 160, 190, 250]
+    idx = max(0, min(max_tp - 1, len(legacy) - 1))
+    return legacy[idx]
 
 # ── Binary pricing (MTG / NON-MTG) ────────────────────────
 # `was` = 3× current price → shown struck-through so the live `price`
@@ -177,4 +211,27 @@ PAYMENT_INFO = (
     "<code>TYudgrH88fCWzNqthy6tXQAieeNcCBYmER</code>\n\n"
     "📌 <i>No hassle of opening a new ID. Just pay and get access — "
     "enjoy SVIP. You will get this bot 100% FREE FULL ACCESS.</i>"
+)
+
+# Payment display is split into two pages so wallet addresses remain easy to
+# copy on Telegram.  Binance Pay and the legacy USDT method stay unchanged.
+PAYMENT_INFO_PAGE_1 = (
+    "💸 <b>PAYMENT METHODS · PAGE 1/2</b> 💳\n\n"
+    "🔸 <b>Binance Pay:</b>\n<code>582355370</code>\n\n"
+    "🔸 <b>USDT — TRC20:</b>\n"
+    "<code>TYudgrH88fCWzNqthy6tXQAieeNcCBYmER</code>\n\n"
+    "🔸 <b>BTC · Bitcoin:</b>\n"
+    "<code>1KgTBewwyvg6wd1F5jy9PKMy3mkvajbaCf</code>\n\n"
+    "🔸 <b>BNB Smart Chain · BEP20:</b>\n"
+    "<code>0x3dc13af0ff1a7f4585360ab416d35d335afe68e3</code>"
+)
+
+PAYMENT_INFO_PAGE_2 = (
+    "💸 <b>PAYMENT METHODS · PAGE 2/2</b> 💳\n\n"
+    "🔸 <b>Ethereum · ERC20:</b>\n"
+    "<code>0x3dc13af0ff1a7f4585360ab416d35d335afe68e3</code>\n\n"
+    "🔸 <b>Solana:</b>\n"
+    "<code>CuG5iW99W8fKCPyT34Zkgyox2aa7hzyK8eRL3CXBvjXC</code>\n\n"
+    "📌 <i>Send only on the selected network. After paying, submit your "
+    "screenshot for admin review.</i>"
 )

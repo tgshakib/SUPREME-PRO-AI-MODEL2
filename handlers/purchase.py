@@ -17,7 +17,8 @@ from keyboards import (
     cancel_payment_kb, payment_received_kb,
 )
 from config import (
-    PAYMENT_INFO, MTG_PACKAGES, NONMTG_PACKAGES, GOLDZILA_PACKAGES,
+    PAYMENT_INFO_PAGE_1, PAYMENT_INFO_PAGE_2,
+    MTG_PACKAGES, NONMTG_PACKAGES, GOLDZILA_PACKAGES,
     get_package, SUPPORT_USERNAME,
 )
 
@@ -273,12 +274,36 @@ async def cb_pkg(call: CallbackQuery, state: FSMContext):
         f"📦 <b>Selected:</b> {pkg['type']} · {pkg['label']}\n"
         f"💵 <b>Price:</b> ${pkg['price']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"{PAYMENT_INFO}\n\n"
+        f"{PAYMENT_INFO_PAGE_1}\n\n"
         f"➡️ After paying, tap <b>SEND SCREENSHOT</b> below."
     )
     await call.answer()
     await show_screen(call.bot, call.message.chat.id, text,
                       package_payment_kb(pkg["id"], _back_for(pkg["id"])))
+
+
+@router.callback_query(F.data.startswith("pay:page:"))
+async def cb_payment_page(call: CallbackQuery, state: FSMContext):
+    """Switch wallet page while keeping the selected package and flow."""
+    _, _, pkg_id, raw_page = call.data.split(":", 3)
+    pkg = get_package(pkg_id)
+    if not pkg:
+        await call.answer("Package not found", show_alert=True)
+        return
+    page = 2 if raw_page == "2" else 1
+    wallet_text = PAYMENT_INFO_PAGE_2 if page == 2 else PAYMENT_INFO_PAGE_1
+    text = (
+        f"📦 <b>Selected:</b> {pkg['type']} · {pkg['label']}\n"
+        f"💵 <b>Price:</b> ${pkg['price']}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"{wallet_text}\n\n"
+        f"➡️ After paying, tap <b>SEND SCREENSHOT</b> below."
+    )
+    await call.answer(f"Payment methods page {page}/2")
+    await show_screen(
+        call.bot, call.message.chat.id, text,
+        package_payment_kb(pkg["id"], _back_for(pkg["id"]), page=page),
+    )
 
 
 @router.callback_query(F.data.startswith("send_ss:"))

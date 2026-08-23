@@ -311,8 +311,26 @@ def init_db():
                     "ALTER TABLE forex_setup ADD COLUMN gold_king_mode "
                     "INTEGER DEFAULT 0"
                 )
+            if "floating_limit" not in cols:
+                conn.execute(
+                    "ALTER TABLE forex_setup ADD COLUMN floating_limit "
+                    "INTEGER DEFAULT 0"
+                )
         except Exception as _e:
             print(f"⚠️  forex_setup migration skipped: {_e}")
+
+        # Migration: optional conservative floating-limit mode for funded
+        # challenges.  Existing users stay OFF by default.
+        try:
+            cols = [r["name"] for r in
+                    conn.execute("PRAGMA table_info(funded_pass)").fetchall()]
+            if "floating_limit" not in cols:
+                conn.execute(
+                    "ALTER TABLE funded_pass ADD COLUMN floating_limit "
+                    "INTEGER DEFAULT 0"
+                )
+        except Exception as _e:
+            print(f"⚠️  funded_pass migration skipped: {_e}")
 
         env_admin = os.environ.get("ADMIN_ID", "0")
         if env_admin and env_admin != "0":
@@ -780,17 +798,20 @@ def signals_today(user_id: int) -> int:
 
 
 # ── Forex setup ───────────────────────────────────────────
-def upsert_forex_setup(user_id: int, tf: str, pairs: str, max_tp: int):
+def upsert_forex_setup(user_id: int, tf: str, pairs: str, max_tp: int,
+                       floating_limit: bool = False):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO forex_setup(user_id, tf, pairs, max_tp, status, sent_today, day, more_signal_requested, updated_at) "
-            "VALUES(?,?,?,?, 'active', 0, ?, 1, datetime('now')) "
+            "INSERT INTO forex_setup(user_id, tf, pairs, max_tp, floating_limit, "
+            "status, sent_today, day, more_signal_requested, updated_at) "
+            "VALUES(?,?,?,?,?, 'active', 0, ?, 1, datetime('now')) "
             "ON CONFLICT(user_id) DO UPDATE SET "
             "tf=excluded.tf, pairs=excluded.pairs, max_tp=excluded.max_tp, "
+            "floating_limit=excluded.floating_limit, "
             "status='active', sent_today=0, day=excluded.day, "
             "more_signal_requested=1, "
             "updated_at=datetime('now')",
-            (user_id, tf, pairs, max_tp, today_str()),
+            (user_id, tf, pairs, max_tp, 1 if floating_limit else 0, today_str()),
         )
 
 
@@ -810,6 +831,14 @@ def set_gold_king_mode(user_id: int, value: bool):
     with get_conn() as conn:
         conn.execute(
             "UPDATE forex_setup SET gold_king_mode=? WHERE user_id=?",
+            (1 if value else 0, user_id),
+        )
+
+
+def set_forex_floating_limit(user_id: int, value: bool):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE forex_setup SET floating_limit=? WHERE user_id=?",
             (1 if value else 0, user_id),
         )
 
@@ -1036,22 +1065,25 @@ def stats() -> Dict[str, int]:
 
 # ── Funded Pass ───────────────────────────────────────────
 def upsert_funded_pass(user_id: int, account_size: int, profit_pct: float,
-                       daily_loss_pct: float, max_dd_pct: float):
+                       daily_loss_pct: float, max_dd_pct: float,
+                       floating_limit: bool = False):
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO funded_pass(user_id, account_size, profit_pct, "
-            "daily_loss_pct, max_dd_pct, equity_pct, daily_pct, day, status) "
-            "VALUES(?,?,?,?,?, 0, 0, ?, 'active') "
+            "daily_loss_pct, max_dd_pct, floating_limit, equity_pct, "
+            "daily_pct, day, status) "
+            "VALUES(?,?,?,?,?,?, 0, 0, ?, 'active') "
             "ON CONFLICT(user_id) DO UPDATE SET "
             "account_size=excluded.account_size, "
             "profit_pct=excluded.profit_pct, "
             "daily_loss_pct=excluded.daily_loss_pct, "
             "max_dd_pct=excluded.max_dd_pct, "
+            "floating_limit=excluded.floating_limit, "
             "equity_pct=0, daily_pct=0, day=excluded.day, "
             "status='active', tf=NULL, pair=NULL, last_signal_at=NULL, "
             "created_at=datetime('now')",
             (user_id, account_size, profit_pct, daily_loss_pct, max_dd_pct,
-             today_str()),
+             1 if floating_limit else 0, today_str()),
         )
 
 

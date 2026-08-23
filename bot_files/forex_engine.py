@@ -114,12 +114,22 @@ except Exception as _fxe:
     _FX_EXPERT_OK = False
 
 try:
-    from fx_sniper_engine import fx_sniper_decide as _fx_sniper_decide
+    from fx_sniper_engine import (
+        fx_sniper_decide as _fx_sniper_decide,
+        confirm_gold_with_silver as _confirm_gold_with_silver,
+    )
     _FX_SNIPER_OK = True
 except Exception as _fxse:
     print(f"[forex_engine] fx_sniper_engine import failed: {_fxse}")
     _fx_sniper_decide = None  # type: ignore
+    _confirm_gold_with_silver = None  # type: ignore
     _FX_SNIPER_OK = False
+
+try:
+    from mtf_structure_engine import analyze_market_structure as _mtf_structure
+except Exception as _mse:
+    print(f"[forex_engine] mtf_structure_engine import failed: {_mse}")
+    _mtf_structure = None  # type: ignore
 
 try:
     from forex_quick_engine import forex_quick_sniper as _fqs
@@ -1679,7 +1689,9 @@ def _smart_limit_entry(pair: str, direction: str, current_price: float,
     return entry, sl, tps
 
 
-def _generate_levels_force_fallback(pair: str, max_tp: int):
+def _generate_levels_force_fallback(
+    pair: str, max_tp: int, *, fast: bool = False
+):
     """Last-resort level generator used ONLY when force_signal=True and all
     analysis paths (Smart AI / sniper / bias) returned no direction.
     Uses the live Stooq price + a time+pair seeded direction so the user's
@@ -1690,13 +1702,14 @@ def _generate_levels_force_fallback(pair: str, max_tp: int):
 
     # Direction: compare force-fresh vs cached Stooq price (momentum proxy).
     direction: str | None = None
-    try:
-        px_fresh  = get_live_price(pair, force_fresh=True)
-        px_cached = get_live_price(pair)
-        if px_fresh and px_cached and abs(px_fresh - px_cached) > pip * 0.5:
-            direction = "BUY" if px_fresh > px_cached else "SELL"
-    except Exception:
-        pass
+    if not fast:
+        try:
+            px_fresh  = get_live_price(pair, force_fresh=True)
+            px_cached = get_live_price(pair)
+            if px_fresh and px_cached and abs(px_fresh - px_cached) > pip * 0.5:
+                direction = "BUY" if px_fresh > px_cached else "SELL"
+        except Exception:
+            pass
 
     if direction is None:
         # Deterministic per-pair 5-min flip — always produces a direction
@@ -1704,7 +1717,9 @@ def _generate_levels_force_fallback(pair: str, max_tp: int):
         direction = "BUY" if _seed % 2 == 0 else "SELL"
 
     # Entry price
-    entry_px = get_live_price(pair, force_fresh=True) or get_live_price(pair)
+    entry_px = None if fast else (
+        get_live_price(pair, force_fresh=True) or get_live_price(pair)
+    )
     if entry_px is None:
         try:
             from config import price_band as _pb
@@ -1805,33 +1820,43 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     sniper: dict | None = None
     pair: str
     free_kinds: list[str]
-    best = sniper_pick(scan_names)
-    if best is None and cold_eligible and hot_eligible:
-        # Nothing fired in the hot window — try cold as last resort
-        best = sniper_pick([FOREX_PAIRS[i] for (i, _) in cold_eligible])
-    if best is not None:
-        pair, sniper = best
-        # Find the matching entry in `eligible` so we know which kinds
-        # are free for this specific pair.
-        free_kinds = next(
-            (free for (i, free) in eligible if FOREX_PAIRS[i] == pair),
-            ["LIVE"],
-        )
-        sc = _session_score(pair)
-        print(f"[forex_engine] 🎯 SNIPER {pair} {sniper['direction']} "
-              f"score={sniper['score']} rsi={sniper['rsi']} "
-              f"fresh={sniper['fresh_bars']}b  session_score={sc}/10")
-    else:
-        # No sniper fired — pick the highest-session-score pair from hot list
-        fallback_pool = scan_pool if scan_pool else eligible
-        pair_idx_pick, free_kinds = fallback_pool[0]
+    if force_signal:
+        pair_idx_pick, free_kinds = eligible[0]
         pair = FOREX_PAIRS[pair_idx_pick]
-        sc = _session_score(pair)
-        print(f"[forex_engine] ⚡ fallback {pair}  session_score={sc}/10")
+        sniper = None
+        print(f"[forex_engine] ⚡ fast forced scan → {pair}")
+    else:
+        best = sniper_pick(scan_names)
+        if best is None and cold_eligible and hot_eligible:
+            # Nothing fired in the hot window — try cold as last resort
+            best = sniper_pick([FOREX_PAIRS[i] for (i, _) in cold_eligible])
+        if best is not None:
+            pair, sniper = best
+            # Find the matching entry in `eligible` so we know which kinds
+            # are free for this specific pair.
+            free_kinds = next(
+                (free for (i, free) in eligible if FOREX_PAIRS[i] == pair),
+                ["LIVE"],
+            )
+            sc = _session_score(pair)
+            print(f"[forex_engine] 🎯 SNIPER {pair} {sniper['direction']} "
+                  f"score={sniper['score']} rsi={sniper['rsi']} "
+                  f"fresh={sniper['fresh_bars']}b  session_score={sc}/10")
+        else:
+            # No sniper fired — pick the highest-session-score pair from hot list
+            fallback_pool = scan_pool if scan_pool else eligible
+            pair_idx_pick, free_kinds = fallback_pool[0]
+            pair = FOREX_PAIRS[pair_idx_pick]
+            sc = _session_score(pair)
+            print(f"[forex_engine] ⚡ fallback {pair}  session_score={sc}/10")
 
     max_tp = int(setup["max_tp"])
     tf_label = _tf_label(setup.get("tf") or "")
-    _levels = _generate_levels(pair, max_tp, sniper=sniper)
+    _levels = (
+        _generate_levels_force_fallback(pair, max_tp, fast=True)
+        if force_signal
+        else _generate_levels(pair, max_tp, sniper=sniper)
+    )
     if (_levels is None or _levels[0] is None) and force_signal:
         # User tapped NEW SIGNAL — always produce output even when yfinance /
         # bias paths return nothing (Stooq-based price momentum fallback).
@@ -1841,6 +1866,36 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
         return   # no direction available, do not send random signal
     direction, entry, tps, sl, dec, pattern = _levels
     pip = live_pip_size(pair)
+    floating_limit = bool(int(setup.get("floating_limit") or 0))
+
+    # Floating Limit is a conservative wait mode.  It blocks mixed HTF
+    # structure, requires sniper confidence, and uses silver as the leading
+    # confirmation for Gold.  Force scans do not bypass this safety gate.
+    if floating_limit:
+        if not _FX_SNIPER_OK or _fx_sniper_decide is None:
+            print(f"[forex_engine] Floating Limit unavailable for {pair}")
+            return
+        _float_dec = _fx_sniper_decide(pair)
+        if int(_float_dec.get("confidence", 0)) < 88:
+            print(f"[forex_engine] Floating Limit waiting {pair}: "
+                  f"confidence={_float_dec.get('confidence', 0)}")
+            return
+        if _mtf_structure is not None:
+            _float_struct = _mtf_structure(
+                pair, _float_dec.get("direction"), market="forex"
+            )
+            if not _float_struct.get("approved"):
+                print(f"[forex_engine] Floating Limit waiting {pair}: "
+                      f"{_float_struct.get('reason')}")
+                return
+        if any(token in pair.upper() for token in ("XAU", "GOLD")):
+            if _confirm_gold_with_silver is None:
+                return
+            _silver = _confirm_gold_with_silver(_float_dec.get("direction"))
+            if not _silver.get("approved"):
+                print(f"[forex_engine] Floating Limit waiting for XAG "
+                      f"confirmation {pair}: {_silver}")
+                return
 
     # ── GOD LEVEL: SUPREME FOREX GATE ────────────────────────────
     # Final session + anti-whipsaw + ADX gate before the signal goes out.
@@ -1862,13 +1917,14 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     _has_pattern = (pattern is not None)
     _has_liq_anchor = False
     _liq_for_levels = None
-    try:
-        if liquidity_analyze is not None:
-            _liq_for_levels = liquidity_analyze(pair)
-            if _liq_for_levels and _liq_for_levels.get("liq_grade", 0) >= 20:
-                _has_liq_anchor = True
-    except Exception:
-        pass
+    if not force_signal:
+        try:
+            if liquidity_analyze is not None:
+                _liq_for_levels = liquidity_analyze(pair)
+                if _liq_for_levels and _liq_for_levels.get("liq_grade", 0) >= 20:
+                    _has_liq_anchor = True
+        except Exception:
+            pass
 
     # ── INSTITUTIONAL ORDER FLOW GATE ──────────────────────────────────────
     # Read real bid×ask volume, footprint delta, absorption, trap detection.
@@ -1876,7 +1932,7 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     # If it AGREES (or no data) → signal passes. Trap detection = instant pass.
     _inst_flow = None
     _inst_agrees = True   # default = allow when no data
-    if _INST_FLOW_OK and _inst_flow_analyze is not None:
+    if not force_signal and _INST_FLOW_OK and _inst_flow_analyze is not None:
         try:
             _inst_flow = _inst_flow_analyze(pair, is_otc=False)
             if _inst_flow.get("ok") and _inst_flow.get("confidence", 0) >= 0.50:
@@ -1912,25 +1968,26 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     # DXY correlation · COT proxy · HTF level magnet · Session liquidity hunt
     # Hidden divergence · Day-of-week seasonality · Market structure shift
     # Runs after elite gate — adjusts quality tier and confidence silently.
-    try:
-        from forex_hidden_power import forex_power_analyze as _fhp_analyze
-        _fhp = _fhp_analyze(pair, direction)
-        if not force_signal and not _fhp.get("approved", True):
-            print(f"[forex_engine] ⛔ FHP BLOCK {pair} {direction} — "
-                  f"power_score={_fhp['power_score']} tier={_fhp['quality_tier']}")
-            return
-        _fhp_adj = _fhp.get("confidence_adj", 0)
-        if _fhp_adj > 0:
-            print(f"[forex_engine] 💎 FHP {_fhp['quality_tier']} {pair} "
-                  f"score={_fhp['power_score']} adj={_fhp_adj:+d}")
-    except Exception:
-        pass
+    if not force_signal:
+        try:
+            from forex_hidden_power import forex_power_analyze as _fhp_analyze
+            _fhp = _fhp_analyze(pair, direction)
+            if not _fhp.get("approved", True):
+                print(f"[forex_engine] ⛔ FHP BLOCK {pair} {direction} — "
+                      f"power_score={_fhp['power_score']} tier={_fhp['quality_tier']}")
+                return
+            _fhp_adj = _fhp.get("confidence_adj", 0)
+            if _fhp_adj > 0:
+                print(f"[forex_engine] 💎 FHP {_fhp['quality_tier']} {pair} "
+                      f"score={_fhp['power_score']} adj={_fhp_adj:+d}")
+        except Exception:
+            pass
 
     # ── FINORIX SUPREME ANALYSIS ENGINE — silent confirmation layer ──────
     # Runs the 12-model weighted AI (SMC, Indicators, Wyckoff, Divergence,
     # Market Structure). When Finorix has a hard VETO (split consensus) AND
     # no sniper backed us → skip. When it agrees → log elite confirmation.
-    if _FINORIX_FX_OK and _finorix_analyse is not None:
+    if not force_signal and _FINORIX_FX_OK and _finorix_analyse is not None:
         try:
             _fx = _finorix_analyse(pair, "FOREX")
             if not force_signal and _fx.get("veto") and not _has_sniper:
@@ -1959,7 +2016,9 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     # Signal kind: FX SNIPER AI decides LIVE vs LIMIT from real market state.
     # Pattern setups always force LIVE — the measured-move geometry is
     # anchored to current price so a LIMIT shift would break the SL/target.
-    if pattern is not None:
+    if floating_limit:
+        kind = "LIMIT"
+    elif pattern is not None:
         kind = "LIVE"
     else:
         kind = "LIVE"  # safe default before sniper runs
@@ -2016,14 +2075,15 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
 
     # ── FOOTPRINT DATA (crypto via Binance WS) ──────────────────────
     _footprint = None
-    try:
-        from footprint_engine import get_footprint
-        _footprint = get_footprint(pair)
-    except Exception:
-        pass
+    if not force_signal:
+        try:
+            from footprint_engine import get_footprint
+            _footprint = get_footprint(pair)
+        except Exception:
+            pass
 
     # ── SIGNAL CLASSIFICATION ───────────────────────────────────────
-    smart_pkt = last_smart(pair)
+    smart_pkt = None if force_signal else last_smart(pair)
     _move_class = _signal_move_class(
         est_pips, sniper, smart_pkt, _liq_for_levels
     )

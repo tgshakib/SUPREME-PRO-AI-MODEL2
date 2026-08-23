@@ -43,11 +43,19 @@ _seen_lock   = asyncio.Lock()
 _last_click: dict[int, tuple[str, float]] = {}
 _click_lock = asyncio.Lock()
 
+# A callback belongs to one rendered Telegram message.  Once that exact
+# button has been claimed, re-delivered/new callback IDs for the same button
+# cannot execute the action again.  A new screen normally has a new message
+# id, so legitimate navigation remains available.
+_claimed_actions: dict[tuple[int, int, int, str], float] = {}
+
 # {user_id: asyncio.Lock()} — one active request per user
 _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 # How long (seconds) to block repeated clicks on the same button
-COOLDOWN_SEC = 5.0
+# 1.5s is enough to kill accidental double-taps while still feeling instant
+COOLDOWN_SEC = 1.5
+ACTION_CLAIM_TTL_SEC = 3600.0
 
 # Cleanup background task handle
 _cleanup_task: asyncio.Task | None = None
@@ -69,6 +77,12 @@ async def _cleanup_loop():
                      if now - ts > 60]
             for uid in stale:
                 del _last_click[uid]
+            stale_actions = [
+                key for key, ts in _claimed_actions.items()
+                if now - ts > ACTION_CLAIM_TTL_SEC
+            ]
+            for key in stale_actions:
+                del _claimed_actions[key]
 
 
 def start_cleanup(loop: asyncio.AbstractEventLoop | None = None):
@@ -106,6 +120,10 @@ class AntiSpamMiddleware(BaseMiddleware):
 
         # ── 2. Per-user same-button cooldown ───────────────────────────
         now = time.monotonic()
+        message = event.message
+        chat_id = message.chat.id if message and message.chat else 0
+        message_id = message.message_id if message else 0
+        action_key = (user_id, chat_id, message_id, cb_data)
         async with _click_lock:
             prev_data, prev_ts = _last_click.get(user_id, ("", 0.0))
             if cb_data == prev_data and (now - prev_ts) < COOLDOWN_SEC:
@@ -114,6 +132,13 @@ class AntiSpamMiddleware(BaseMiddleware):
                 except Exception:
                     pass
                 return
+            if action_key in _claimed_actions:
+                try:
+                    await event.answer()
+                except Exception:
+                    pass
+                return
+            _claimed_actions[action_key] = now
             _last_click[user_id] = (cb_data, now)
 
         # ── 3. Per-user async lock (one request at a time) ────────────
