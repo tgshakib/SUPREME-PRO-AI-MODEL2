@@ -1,0 +1,66 @@
+TASK: Fix Quotex OTC real-time price feed desync (analysis layer only)
+
+🔒 ABSOLUTE RULE — READ FIRST:
+Do NOT modify, refactor, reformat, or touch the signal text generation/output 
+logic anywhere in this project. That file/function is password-protected and 
+off-limits. If your fix requires anything to pass through the signal output 
+path, stop and route it as a separate additive check instead — never inline 
+into the existing signal text code.
+
+PROBLEM:
+The bot's Quotex OTC WebSocket feed is desynced from the actual authenticated 
+Quotex account session. Quotex OTC synthetic pricing is account/session-bound — 
+it is NOT a shared public feed. Right now the bot's Quotex price stream doesn't 
+match what the real logged-in Quotex chart shows in real time, causing the 
+analysis engine to read the wrong trend direction and fire losing signals. 
+Pocket Option's feed is confirmed working correctly and should NOT be touched — 
+this is isolated to the Quotex leg only.
+
+ROOT CAUSE (most likely):
+The Quotex WS connection is either (a) using a stale/expired session token that 
+was never refreshed after the initial connection, or (b) opening on a generic/
+unauthenticated handshake instead of one tied to the actual logged-in account 
+session. Either way, the data received diverges from the real account's price 
+path over time even while the connection shows "connected."
+
+WHAT TO DO:
+
+1. Locate the existing Quotex WebSocket connection logic (likely inside 
+   otc_feed_combined.py or wherever the Quotex leg is implemented). Inspect 
+   how the session token/auth is currently obtained and passed into the WS 
+   handshake.
+
+2. Add a session re-authentication cycle: rebuild the Quotex WS handshake 
+   with a freshly captured session token on a timer (every 15–30 minutes), 
+   instead of assuming one connection stays valid indefinitely. Log every 
+   re-auth event with a timestamp.
+
+3. Add a new isolated file `session_drift_monitor.py` that:
+   - Tracks session age since last re-auth
+   - Exposes a manual drift-check function (bot_price vs real_price) wired 
+     to a new Telegram command `/checkprice <price>` so I can spot-check the 
+     bot's feed against my real Quotex terminal on demand
+   - Auto-flags drift above a configurable % threshold and blocks new signal 
+     dispatch until re-auth happens, WITHOUT touching signal text generation — 
+     it should sit as a pre-dispatch check the existing signal engine calls, 
+     the same pattern as any other filter/gate already in this codebase
+   - Logs every drift event with old/new price, % difference, and timestamp
+
+4. Tag every incoming tick with its source and session-start-time so it's 
+   auditable later which session generated which candle.
+
+5. Make sure the candle builder / confirmation gate / any existing analysis 
+   layer consumes ticks ONLY from a session that has been authenticated within 
+   the last `max_session_age_sec` window. If the session is stale, pause 
+   analysis silently and log why — do not let stale-session data reach the 
+   signal engine at all.
+
+DO NOT TOUCH:
+- Signal text generation, formatting, or the password-protected output file
+- Pocket Option WS logic — leave it exactly as-is, it works correctly
+- Any existing user-facing bot commands unrelated to this feed fix
+- Signal count / History button / Instance Signal per-user state logic
+
+WHEN DONE:
+Give me a short summary of exactly which files you changed and which new 
+files you created, so I can review the diff before this goes live.
