@@ -367,9 +367,9 @@ def generate_fast_binary_signal(
 ) -> Dict:
     """Build a bounded binary result using only fresh, named data sources.
 
-    OTC entries are allowed only when the selected broker's own candle buffer
-    is fresh.  LIVE entries use a recent real-market cache.  Missing, stale,
-    mixed-broker, or inconclusive data always yields a no-trade result.
+    OTC entries use the selected broker's fresh candle buffer, or its recent
+    tick buffer while candles are reconnecting. LIVE entries use a recent
+    real-market cache. Missing or stale data yields a no-trade result.
     """
     is_otc = (
         "otc" in (market or "").lower()
@@ -386,16 +386,13 @@ def generate_fast_binary_signal(
     if is_otc:
         try:
             from otc_feed_combined import otc_feed, label_to_otc_key
+            from otc_price_service import get_selected_broker_ticks
             asset = label_to_otc_key(pair) or pair
             candles = otc_feed.get_candles(
                 asset, "1m", count=6, broker=broker
             ) or []
             closes = [float(c.get("close", 0)) for c in candles]
             volumes = [float(c.get("volume", 0)) for c in candles]
-            feed_status = otc_feed.status()
-            broker_connected = bool(feed_status.get(
-                "pocketoption_connected" if broker == "po" else "quotex_connected"
-            ))
             latest_time = candles[-1].get("time") if candles else None
             if isinstance(latest_time, (int, float)):
                 latest_ts = float(latest_time)
@@ -405,13 +402,12 @@ def generate_fast_binary_signal(
                 ).replace(tzinfo=timezone.utc).timestamp()
             else:
                 latest_ts = 0.0
-            # A completed 1m candle can be almost one minute old. Allow a
-            # small transport grace period, but never reuse a stale buffer
-            # after the broker socket disconnects.
+            # A completed 1m candle can be almost one minute old. A fresh
+            # selected-broker buffer remains valid during a brief socket
+            # reconnect; the connection status alone must not discard it.
             candles_fresh = 0 <= time.time() - latest_ts <= 95
             if (
-                broker_connected
-                and candles_fresh
+                candles_fresh
                 and len(closes) >= 5
                 and all(close > 0 for close in closes[-5:])
             ):
@@ -433,8 +429,35 @@ def generate_fast_binary_signal(
                     source_ts = latest_ts
                 else:
                     unavailable_reason = "Broker candles are inconclusive; no trade was created."
-            else:
-                unavailable_reason = "Selected broker data is stale or unavailable."
+            # The direct broker tick service is independent from the
+            # completed-candle stream. Use it when candles are temporarily
+            # unavailable or neutral, but only from the broker the user chose.
+            if direction is None:
+                ticks = get_selected_broker_ticks(pair, broker, limit=12)
+                prices = [float(tick.get("price") or 0) for tick in ticks]
+                if len(prices) >= 3 and all(price > 0 for price in prices):
+                    net_move = prices[-1] - prices[0]
+                    if net_move:
+                        direction = "BUY" if net_move > 0 else "SELL"
+                        entry = prices[-1]
+                        same_way = sum(
+                            1 for left, right in zip(prices, prices[1:])
+                            if (right - left) * net_move > 0
+                        )
+                        confidence = min(
+                            80,
+                            max(62, 62 + int(18 * same_way / max(1, len(prices) - 1))),
+                        )
+                        source_text = (
+                            "Pocket Option selected-broker tick buffer"
+                            if broker == "po" else
+                            "Quotex selected-broker tick buffer"
+                        )
+                        source_ts = float(ticks[-1]["time"])
+                    else:
+                        unavailable_reason = "Selected broker is flat; waiting for price movement."
+                else:
+                    unavailable_reason = "Selected broker data is not yet available."
         except Exception:
             unavailable_reason = "Selected broker data could not be verified."
     else:
@@ -474,13 +497,12 @@ def generate_fast_binary_signal(
             "source": None,
             "source_ts": None,
             "text": (
-                "⏳ <b>MARKET DATA TEMPORARILY UNAVAILABLE</b>\n"
+                "🔄 <b>REFRESHING SELECTED BROKER DATA</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💱 <b>{pair}</b>\n"
                 f"📊 Market: <b>{market_label}</b>\n"
-                "The selected broker has not provided a current quote yet.\n\n"
-                "<i>No entry was sent. Try again shortly or choose the other "
-                "broker—this avoids creating a trade from an unrelated price.</i>"
+                "<i>Tap Again Analyze once the selected broker price stream "
+                "has refreshed.</i>"
             ),
         }
 

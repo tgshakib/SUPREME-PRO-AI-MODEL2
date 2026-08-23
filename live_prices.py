@@ -793,14 +793,13 @@ def get_qualified_otc_quote(pair: str, broker: str) -> Optional[dict]:
     if broker not in {"po", "qx"}:
         return None
     try:
-        from otc_price_service import _LOCK, _PRICES, _normalize_pair
+        from otc_price_service import _BROKER_PRICES, _LOCK, _normalize_pair
         key = _normalize_pair(pair)
         with _LOCK:
-            item = dict(_PRICES.get(key) or {})
-        source = item.get("source")
+            item = dict(_BROKER_PRICES.get(key, {}).get(broker) or {})
         timestamp = float(item.get("time") or 0)
         age = time.time() - timestamp
-        if source != broker or item.get("price", 0) <= 0 or not 0 <= age <= 5:
+        if item.get("price", 0) <= 0 or not 0 <= age <= 5:
             return None
         return {
             "price": float(item["price"]),

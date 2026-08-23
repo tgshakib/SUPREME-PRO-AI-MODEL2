@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import time
+from collections import defaultdict, deque
 from threading import Lock
 from typing import Dict, Optional, Tuple
 
@@ -54,6 +55,13 @@ _PO_RECONNECT    = 15
 # key: normalised asset name lowercase  e.g. "eurusd_otc"
 # val: {"price": float, "time": float, "source": "qx"|"po"}
 _PRICES: Dict[str, Dict] = {}
+# Keep each broker's latest tick separately.  The old shared latest-price map
+# is retained for legacy callers, but it cannot answer "what did the selected
+# broker say?" after the other broker has emitted a newer tick.
+_BROKER_PRICES: Dict[str, Dict[str, Dict]] = defaultdict(dict)
+# Recent broker-native ticks make a short OTC momentum read possible while the
+# completed-candle stream is reconnecting.
+_BROKER_TICKS: Dict[Tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=40))
 _LOCK   = Lock()
 
 # ── ALL OTC pairs for each broker ─────────────────────────────────────────────
@@ -281,6 +289,31 @@ def _write_price(asset_key: str, price: float, source: str):
         # the 8-second max-age guard stays satisfied on quiet markets.
         if existing is None or price != existing["price"] or (now - existing["time"]) > 2.0:
             _PRICES[key] = {"price": price, "time": now, "source": source}
+        if source in ("qx", "po"):
+            broker_entry = {"price": float(price), "time": now, "source": source}
+            _BROKER_PRICES[key][source] = broker_entry
+            _BROKER_TICKS[(key, source)].append(broker_entry)
+
+
+def get_selected_broker_ticks(
+    pair: str, broker: str, *, max_age_sec: float = 90.0, limit: int = 12,
+) -> list[Dict]:
+    """Return recent ticks from exactly one OTC broker.
+
+    A QX tick must never replace a PO tick (or the reverse) for a user who
+    explicitly selected that broker.  Entries older than the source window are
+    excluded so reconnecting feeds cannot create signals from old prices.
+    """
+    if broker not in ("po", "qx"):
+        return []
+    now = time.time()
+    key = _normalize_pair(pair)
+    with _LOCK:
+        ticks = list(_BROKER_TICKS.get((key, broker), ()))
+    return [
+        dict(tick) for tick in ticks[-limit:]
+        if 0 <= now - float(tick.get("time") or 0) <= max_age_sec
+    ]
 
 
 def get_live_otc_price(pair: str, broker_only: bool = True) -> Optional[float]:
