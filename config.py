@@ -1,7 +1,16 @@
 import os
 
+
+def _env_int(name: str, default: int = 0) -> int:
+    """Read an integer setting without preventing the bot from starting."""
+    try:
+        return int(os.environ.get(name, str(default)).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 BOT_TOKEN = "".join(os.environ.get("BOT_TOKEN", "").split()).strip().strip('"').strip("'")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+ADMIN_ID = _env_int("ADMIN_ID")
 
 SUPPORT_USERNAME = os.environ.get("SUPPORT_USERNAME", "@JAYITAUTOBO")
 OWNER_USERNAME = os.environ.get("OWNER_USERNAME", "@OAWHIDSHAKIB")

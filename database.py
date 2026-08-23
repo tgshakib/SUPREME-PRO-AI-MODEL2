@@ -462,12 +462,62 @@ def init_db():
 
 
 # ── Settings ──────────────────────────────────────────────
-def get_admin_id() -> int:
+def _safe_positive_int(value: Any) -> int:
+    try:
+        parsed = int(str(value).strip())
+        return parsed if parsed > 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_configured_admin_id() -> int:
+    """Return the deployment-configured owner ID, or zero when unset."""
+    return _safe_positive_int(os.environ.get("ADMIN_ID", "0"))
+
+
+def get_stored_admin_id() -> int:
+    """Return the owner persisted by an in-bot ownership transfer."""
     with get_conn() as conn:
         row = conn.execute("SELECT value FROM settings WHERE key='admin_id'").fetchone()
         if row:
-            return int(row["value"])
-    return int(os.environ.get("ADMIN_ID", "0"))
+            return _safe_positive_int(row["value"])
+    return 0
+
+
+def get_admin_id() -> int:
+    """Return the active owner, preferring an intentional stored transfer."""
+    return get_stored_admin_id() or get_configured_admin_id()
+
+
+def is_admin(user_id: int) -> bool:
+    admin_id = get_admin_id()
+    return bool(admin_id and int(user_id) == admin_id)
+
+
+def is_configured_admin(user_id: int) -> bool:
+    """True only for the owner set in deployment configuration."""
+    configured_id = get_configured_admin_id()
+    return bool(configured_id and int(user_id) == configured_id)
+
+
+def needs_admin_recovery(user_id: int) -> bool:
+    """Whether the configured owner may deliberately replace a stale owner."""
+    configured_id = get_configured_admin_id()
+    stored_id = get_stored_admin_id()
+    return bool(
+        configured_id
+        and stored_id
+        and configured_id != stored_id
+        and int(user_id) == configured_id
+    )
+
+
+def recover_admin_from_config(user_id: int) -> bool:
+    """Promote the configured owner only after that owner confirms recovery."""
+    if not needs_admin_recovery(user_id):
+        return False
+    set_admin_id(get_configured_admin_id())
+    return True
 
 
 def set_admin_id(new_id: int):

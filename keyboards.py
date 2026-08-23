@@ -25,7 +25,8 @@ def join_required_kb() -> InlineKeyboardMarkup:
 # ── Main menu ─────────────────────────────────────────────
 def main_menu_kb(is_admin: bool = False,
                  show_active_fx: bool = False,
-                 show_referral: bool = False) -> InlineKeyboardMarkup:
+                 show_referral: bool = False,
+                 show_admin_recovery: bool = False) -> InlineKeyboardMarkup:
     rows = []
     if show_active_fx:
         rows.append([InlineKeyboardButton(
@@ -50,6 +51,11 @@ def main_menu_kb(is_admin: bool = False,
     if is_admin:
         rows.append([InlineKeyboardButton(text="🛡️ ADMINISTRATION ACCESS",
                                           callback_data="adm:open")])
+    elif show_admin_recovery:
+        rows.append([InlineKeyboardButton(
+            text="⚠️ RESTORE ADMINISTRATION ACCESS",
+            callback_data="adm:recover",
+        )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

@@ -1,5 +1,6 @@
 """Admin panel: stats, members, pending payments, remove, transfer, add user."""
 import asyncio
+import logging
 from datetime import timedelta
 from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
@@ -22,6 +23,7 @@ from keyboards import (
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 class AdmState(StatesGroup):
@@ -32,7 +34,31 @@ class AdmState(StatesGroup):
 
 
 def _is_admin(uid: int) -> bool:
-    return int(uid) == int(db.get_admin_id())
+    return db.is_admin(uid)
+
+
+def _panel_text() -> str:
+    s = db.stats()
+    return (
+        f"🛡️ <b>ADMINISTRATION PANEL</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 Total users: <b>{s['total_users']}</b>\n"
+        f"⏳ Active temporary: <b>{s['active_temporary']}</b>\n"
+        f"♾️ Lifetime: <b>{s['lifetime']}</b>\n"
+        f"📥 Pending payments: <b>{s['pending_payments']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Choose an action 👇"
+    )
+
+
+async def _show_admin_panel(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await show_screen(
+        call.bot,
+        call.message.chat.id,
+        _panel_text(),
+        admin_panel_kb(),
+    )
 
 
 def _duration_meta(code: str):
@@ -58,21 +84,47 @@ def _delta_for(unit: str, amount: int):
 @router.callback_query(F.data == "adm:open")
 async def cb_open(call: CallbackQuery, state: FSMContext):
     if not _is_admin(call.from_user.id):
-        await call.answer("Not authorized", show_alert=True); return
-    await state.clear()
+        if db.needs_admin_recovery(call.from_user.id):
+            await call.answer(
+                "Open the home menu and tap Restore Administration Access.",
+                show_alert=True,
+            )
+        elif not db.get_admin_id():
+            await call.answer(
+                "Administration owner is not configured. Set ADMIN_ID and restart.",
+                show_alert=True,
+            )
+        else:
+            await call.answer("Not authorized", show_alert=True)
+        return
     await call.answer()
-    s = db.stats()
-    text = (
-        f"🛡️ <b>ADMINISTRATION PANEL</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"👥 Total users: <b>{s['total_users']}</b>\n"
-        f"⏳ Active temporary: <b>{s['active_temporary']}</b>\n"
-        f"♾️ Lifetime: <b>{s['lifetime']}</b>\n"
-        f"📥 Pending payments: <b>{s['pending_payments']}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Choose an action 👇"
-    )
-    await show_screen(call.bot, call.message.chat.id, text, admin_panel_kb())
+    try:
+        await _show_admin_panel(call, state)
+    except Exception:
+        logger.exception("Unable to open administration panel")
+        await call.bot.send_message(
+            call.message.chat.id,
+            "❌ <b>Could not open the administration panel.</b>\n"
+            "Use /start to refresh the menu, then try again.",
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data == "adm:recover")
+async def cb_recover_admin(call: CallbackQuery, state: FSMContext):
+    if not db.recover_admin_from_config(call.from_user.id):
+        await call.answer("Administration recovery is not available.", show_alert=True)
+        return
+    await call.answer("Administration access restored.")
+    try:
+        await _show_admin_panel(call, state)
+    except Exception:
+        logger.exception("Administration recovery completed but panel did not open")
+        await call.bot.send_message(
+            call.message.chat.id,
+            "✅ Administration access was restored. Use /start to open the panel.",
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data == "adm:close")

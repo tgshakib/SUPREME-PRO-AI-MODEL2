@@ -24,7 +24,7 @@ router = Router()
 
 
 def _is_admin(user_id: int) -> bool:
-    return int(user_id) == int(db.get_admin_id())
+    return db.is_admin(user_id)
 
 
 def _welcome_text(user, has_access: bool, is_admin: bool = False) -> str:
@@ -99,13 +99,17 @@ async def _check_required_bot_alive(bot, user_id: int) -> bool:
 
 
 async def render_home(bot, chat_id: int, user=None, *, fast: bool = False):
+    is_adm = _is_admin(chat_id)
+    is_configured_owner = db.is_configured_admin(chat_id)
+    needs_admin_recovery = db.needs_admin_recovery(chat_id)
+
     # Verification gate
-    if not db.is_verified(chat_id):
+    if not db.is_verified(chat_id) and not (is_adm or is_configured_owner):
         await show_screen(bot, chat_id, JOIN_REQUIRED_TEXT, join_required_kb())
         return
     # Expired temporary access → renew prompt (admin always bypasses this)
     a = db.get_access(chat_id)
-    if not _is_admin(chat_id) and a and a["access_type"] == "temporary" and not db.has_active_access(chat_id):
+    if not is_adm and a and a["access_type"] == "temporary" and not db.has_active_access(chat_id):
         text = (
             "⌛ <b>Your access has expired.</b>\n\n"
             "Renew your access to continue receiving unlimited "
@@ -118,8 +122,7 @@ async def render_home(bot, chat_id: int, user=None, *, fast: bool = False):
         await show_screen(bot, chat_id, text, renew_kb())
         return
     has = db.has_active_access(chat_id)
-    is_adm = _is_admin(chat_id)
-    show_ref = not has and not is_adm   # referral button only for free users
+    show_ref = not has and not (is_adm or is_configured_owner)
     welcome_photo = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "assets", "welcome.jpg",
@@ -133,6 +136,7 @@ async def render_home(bot, chat_id: int, user=None, *, fast: bool = False):
                 is_admin=is_adm,
                 show_active_fx=_has_active_fx(chat_id),
                 show_referral=show_ref,
+                show_admin_recovery=needs_admin_recovery,
             ),
         )
     else:
@@ -143,6 +147,7 @@ async def render_home(bot, chat_id: int, user=None, *, fast: bool = False):
                 is_admin=is_adm,
                 show_active_fx=_has_active_fx(chat_id),
                 show_referral=show_ref,
+                show_admin_recovery=needs_admin_recovery,
             ),
         )
 
