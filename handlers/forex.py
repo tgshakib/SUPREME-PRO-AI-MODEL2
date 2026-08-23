@@ -108,8 +108,8 @@ async def _fx_quick_analyze_and_signal(
         # NOTE: do NOT set more_signal_requested here — the background loop
         # would pick it up during our sleep and fire a duplicate, blocking us.
 
-    # ── Show Analysis screen — animated loading dots (8-10 s total) ─────────
-    _dots_frames = ["⏳", "⌛", "⏳", "⌛", "⏳", "⌛", "⏳", "⌛", "⏳"]
+    # ── Show bounded analysis screen (under ten seconds end-to-end) ─────────
+    _dots_frames = ["⏳", "⌛", "⏳", "⌛"]
     _base_text   = "<b>FX SUPREME PRO AI ANALYSING CHARTS</b>"
     loading_id   = await show_screen(
         bot, chat_id,
@@ -118,7 +118,7 @@ async def _fx_quick_analyze_and_signal(
     )
 
     for _frame in _dots_frames[1:]:
-        await asyncio.sleep(_rnd.uniform(0.9, 1.1))
+        await asyncio.sleep(_rnd.uniform(0.7, 0.9))
         try:
             await bot.edit_message_text(
                 chat_id=chat_id, message_id=loading_id,
@@ -129,7 +129,7 @@ async def _fx_quick_analyze_and_signal(
         except Exception:
             pass
 
-    await asyncio.sleep(_rnd.uniform(0.8, 1.2))
+    await asyncio.sleep(_rnd.uniform(0.5, 0.7))
 
     # ── Delete the analysis screen ────────────────────────────────────────
     try:
@@ -141,7 +141,26 @@ async def _fx_quick_analyze_and_signal(
     # ── Fire the signal immediately ───────────────────────────────────────
     try:
         from forex_engine import trigger_immediate_scan
-        await trigger_immediate_scan(bot, user_id)
+        sent = await asyncio.wait_for(
+            trigger_immediate_scan(bot, user_id),
+            timeout=5.0,
+        )
+        if not sent:
+            await show_screen(
+                bot, chat_id,
+                "🛑 <b>NO QUALIFIED FOREX SETUP</b>\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "The current price, source, or confirmation checks did not "
+                "qualify for an entry. No trade was created.",
+                reply_markup=None,
+            )
+    except asyncio.TimeoutError:
+        await show_screen(
+            bot, chat_id,
+            "⏱️ <b>FOREX ANALYSIS TIMED OUT</b>\n"
+            "No qualified setup was created. Try again after market data recovers.",
+            reply_markup=None,
+        )
     except Exception as _qe:
         print(f"[forex] _fx_quick_analyze_and_signal error: {_qe}")
 

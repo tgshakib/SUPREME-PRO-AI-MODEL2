@@ -146,20 +146,6 @@ def pair_by_index(market: str, idx: int) -> str:
 def binary_tf_kb(market: str, broker: str, pair_idx: int,
                  has_access: bool = False) -> InlineKeyboardMarkup:
     rows = []
-    # ⚡ Fast binary timeframes — available for OTC and LIVE.
-    # These use the live 1m tape/microstructure as the safest public-data
-    # proxy because free feeds do not provide reliable 5-second OHLC candles.
-    if market in {"otc", "live"}:
-        _5s_text = "⚡ FAST ANALYSIS · 5S" if has_access else "⚡ FAST ANALYSIS · 5S  🔒 VIP"
-        rows.append([InlineKeyboardButton(
-            text=_5s_text,
-            callback_data=f"tf:{market}:{broker}:{pair_idx}:5s",
-        )])
-        _15s_text = "⚡ PRECISION ANALYSIS · 15S" if has_access else "⚡ PRECISION ANALYSIS · 15S  🔒 VIP"
-        rows.append([InlineKeyboardButton(
-            text=_15s_text,
-            callback_data=f"tf:{market}:{broker}:{pair_idx}:15s",
-        )])
     for label, code in BINARY_TIMEFRAMES:
         rows.append([InlineKeyboardButton(
             text=f"⏱️ {label}",

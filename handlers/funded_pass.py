@@ -16,6 +16,7 @@ Hits:
 """
 import asyncio
 import random
+import time
 from datetime import datetime
 from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
@@ -45,6 +46,7 @@ from mtf_structure_engine import analyze_market_structure
 from keyboards import forex_signal_kb
 from live_prices import (
     pip_size as live_pip_size, decimals as live_decimals, get_live_price,
+    get_qualified_market_quote,
 )
 from tz_utils import short_time_for_user
 
@@ -525,6 +527,7 @@ def _per_win_pct(fp: dict) -> float:
 
 
 async def _send_fp_signal(bot: Bot, fp: dict):
+    started_at = time.monotonic()
     user_id = fp["user_id"]
     pair = fp["pair"]
     tf_label = _tf_label(fp["tf"] or "")
@@ -563,18 +566,31 @@ async def _send_fp_signal(bot: Bot, fp: dict):
     # Floating Limit still runs the full sniper/HTF gate above; standard mode
     # uses the bounded local level builder instead of waiting on every remote
     # chart provider.
-    _lvls = (
-        _generate_levels(pair, max_tp=1)
-        if require_sharper_entry
-        else _generate_levels_force_fallback(pair, 1, fast=True)
-    )
-    if _lvls is None or _lvls[0] is None:
-        _lvls = _generate_levels_force_fallback(pair, 1)
+    try:
+        _lvls = await asyncio.wait_for(
+            asyncio.to_thread(
+                _generate_levels if require_sharper_entry
+                else _generate_levels_force_fallback,
+                pair, 1,
+            ),
+            timeout=8.0,
+        )
+    except asyncio.TimeoutError:
+        print(f"[funded_pass] analysis timed out for {pair}; no trade")
+        return
     if _lvls is None or _lvls[0] is None:
         print(f"[funded_pass] no levels available for {pair} — skipping signal")
         return
     direction, entry, tps, sl, dec, _pat = _lvls
     pip = live_pip_size(pair)
+    quote = await asyncio.to_thread(get_qualified_market_quote, pair)
+    if quote is None:
+        print(f"[funded_pass] no fresh qualified quote for {pair}; no trade")
+        return
+    source_price = float(quote["price"])
+    if abs(source_price - float(entry)) > max(pip * 3, abs(float(entry)) * 0.002):
+        print(f"[funded_pass] inconsistent market price for {pair}; no trade")
+        return
 
     # Funded-pass SL clamp — standard forex only: 15–25 pips hard cap.
     # Metals / crypto / indices retain their ATR-scaled SL from _generate_levels.
@@ -595,10 +611,17 @@ async def _send_fp_signal(bot: Bot, fp: dict):
         tps = [entry + 30 * pip] if direction == "BUY" else [entry - 30 * pip]
         sl = entry - 25 * pip if direction == "BUY" else entry + 25 * pip
 
-    sig_id = db.create_forex_signal(
+    sig_id = db.reserve_forex_signal(
         user_id=user_id, chat_id=user_id, pair=pair, direction=direction,
         entry=entry, tp_prices=tps, sl_price=sl, max_tp=1, kind=kind,
+        source=str(quote["source"]), source_ts=float(quote["source_ts"]),
+        freshness_sec=float(quote["freshness_sec"]),
+        analysis_ms=int((time.monotonic() - started_at) * 1000),
+        cooldown_sec=180, post_loss_cooldown_sec=300,
     )
+    if sig_id is None:
+        print(f"[funded_pass] duplicate/cooldown reservation blocked {pair}")
+        return
     smart_pkt = _fx_last_smart(pair)
     if smart_pkt is not None:
         _FX_SIGNAL_SMART[sig_id] = smart_pkt

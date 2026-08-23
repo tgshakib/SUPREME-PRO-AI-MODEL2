@@ -33,7 +33,7 @@ from keyboards import (
 )
 from live_prices import (
     get_live_price, pip_size as live_pip_size, decimals as live_decimals,
-    get_market_bias,
+    get_market_bias, get_qualified_market_quote,
 )
 from strategy import (
     analyze_pair as sniper_analyze, pick_best_pair as sniper_pick,
@@ -679,8 +679,10 @@ def _generate_levels_raw(pair: str, max_tp: int,
 
     if smart is not None:
         direction = smart["direction"]
-        live = get_live_price(pair, force_fresh=True)
-        entry = float(live) if live is not None else float(smart["entry"])
+        quote = get_qualified_market_quote(pair)
+        if quote is None:
+            return None, 0.0, [], 0.0, dec, None
+        entry = float(quote["price"])
 
         # Optional pattern overlay — only kept if it agrees with smart
         if pattern_for_direction is not None:
@@ -750,8 +752,10 @@ def _generate_levels_raw(pair: str, max_tp: int,
             except Exception:
                 pattern = None
 
-        live = get_live_price(pair, force_fresh=True)
-        entry = float(live) if live is not None else float(sniper["entry"])
+        quote = get_qualified_market_quote(pair)
+        if quote is None:
+            return None, 0.0, [], 0.0, dec, None
+        entry = float(quote["price"])
     else:
         # ── 2. Fallback: short-term chart bias (no fresh sniper)
         # ELITE GATE: require bias_strength ≥ 0.60 so weak / choppy market
@@ -770,12 +774,10 @@ def _generate_levels_raw(pair: str, max_tp: int,
             # Return a None-like signal that the caller will skip.
             return None, 0.0, [], 0.0, 5, None
 
-        live = get_live_price(pair, force_fresh=True)
-        if live is not None:
-            entry = float(live)
-        else:
-            mid, pip, dec = price_band(pair)
-            entry = mid * random.uniform(0.998, 1.002)
+        quote = get_qualified_market_quote(pair)
+        if quote is None:
+            return None, 0.0, [], 0.0, dec, None
+        entry = float(quote["price"])
 
         # Even on the bias path, look for a pattern that agrees so we
         # can still ride a measured-move structure if one is present.
@@ -816,15 +818,10 @@ def _generate_levels_raw(pair: str, max_tp: int,
     # as a higher-conviction entry so the SL stays tight.
     if direction is None and _quick_direction is not None:
         direction = _quick_direction
-        live = get_live_price(pair, force_fresh=True)
-        entry = float(live) if live is not None else 0.0
-        if entry == 0.0:
-            try:
-                from config import price_band as _pb
-                mid, _, _ = _pb(pair)
-                entry = float(mid)
-            except Exception:
-                pass
+        quote = get_qualified_market_quote(pair)
+        if quote is None:
+            return None, 0.0, [], 0.0, dec, None
+        entry = float(quote["price"])
         print(f"[forex_engine] 🎯 QUICK SNIPER set direction={direction} for {pair}")
 
     if direction is None:
@@ -947,6 +944,7 @@ def _generate_levels(pair: str, max_tp: int,
     On volatile days, the volatility guard widens both SL and TP proportionally
     so price has room to breathe without stopping out prematurely.
     """
+    _quick_min_tp = 100.0
     direction, entry, tps, sl, dec, pattern = _generate_levels_raw(
         pair, max_tp, sniper
     )
@@ -1692,42 +1690,16 @@ def _smart_limit_entry(pair: str, direction: str, current_price: float,
 def _generate_levels_force_fallback(
     pair: str, max_tp: int, *, fast: bool = False
 ):
-    """Last-resort level generator used ONLY when force_signal=True and all
-    analysis paths (Smart AI / sniper / bias) returned no direction.
-    Uses the live Stooq price + a time+pair seeded direction so the user's
-    explicit 'NEW SIGNAL' tap always produces a real signal."""
-    import time as _t
+    """Bounded fallback for a manual scan; never fabricates a trade."""
     pip = live_pip_size(pair)
     dec = live_decimals(pair)
 
-    # Direction: compare force-fresh vs cached Stooq price (momentum proxy).
-    direction: str | None = None
-    if not fast:
-        try:
-            px_fresh  = get_live_price(pair, force_fresh=True)
-            px_cached = get_live_price(pair)
-            if px_fresh and px_cached and abs(px_fresh - px_cached) > pip * 0.5:
-                direction = "BUY" if px_fresh > px_cached else "SELL"
-        except Exception:
-            pass
-
-    if direction is None:
-        # Deterministic per-pair 5-min flip — always produces a direction
-        _seed = sum(ord(c) for c in pair) + int(_t.time()) // 300
-        direction = "BUY" if _seed % 2 == 0 else "SELL"
-
-    # Entry price
-    entry_px = None if fast else (
-        get_live_price(pair, force_fresh=True) or get_live_price(pair)
-    )
-    if entry_px is None:
-        try:
-            from config import price_band as _pb
-            mid, _, _ = _pb(pair)
-            entry_px = float(mid)
-        except Exception:
-            entry_px = 1.10
-    entry = float(entry_px)
+    quote = get_qualified_market_quote(pair)
+    bias = get_market_bias(pair)
+    if quote is None or bias is None or float(bias[1]) < 0.60:
+        return None, 0.0, [], 0.0, dec, None
+    direction = bias[0]
+    entry = float(quote["price"])
 
     mid_price = max(entry, 1.0)
     pct_steps = [0.007, 0.014, 0.022, 0.032, 0.045, 0.062]
@@ -1745,7 +1717,7 @@ def _generate_levels_force_fallback(
     except Exception:
         sl = raw_sl
 
-    print(f"[forex_engine] 🔄 FORCE FALLBACK {pair} {direction} "
+    print(f"[forex_engine] qualified fallback {pair} {direction} "
           f"entry={round(entry, dec)}")
     return direction, entry, tps, sl, dec, None
 
@@ -2103,12 +2075,29 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     print(f"[forex_engine] 🏷 {_move_class[0]} ({est_pips} pips)  "
           f"pip_target={pip_target}  pair={pair} {direction}")
 
+    quote = get_qualified_market_quote(pair)
+    if quote is None:
+        print(f"[forex_engine] no fresh qualified quote for {pair} — skipping")
+        return
+    # Re-anchor immediately before persistence so the stored entry has a named,
+    # current market source.  Existing SL/TP geometry remains relative to the
+    # analysed entry and is rejected if the fresh quote materially disagrees.
+    source_price = float(quote["price"])
+    if abs(source_price - float(entry)) > max(pip * 3, abs(float(entry)) * 0.002):
+        print(f"[forex_engine] inconsistent price for {pair} — skipping")
+        return
     seq = _next_session_seq(user_id)
-    sig_id = db.create_forex_signal(
+    sig_id = db.reserve_forex_signal(
         user_id=user_id, chat_id=user_id, pair=pair, direction=direction,
         entry=entry, tp_prices=tps, sl_price=sl, max_tp=max_tp, kind=kind,
-        session_seq=seq,
+        session_seq=seq, source=str(quote["source"]),
+        source_ts=float(quote["source_ts"]),
+        freshness_sec=float(quote["freshness_sec"]), analysis_ms=0,
+        cooldown_sec=120, post_loss_cooldown_sec=300,
     )
+    if sig_id is None:
+        print(f"[forex_engine] duplicate/cooldown reservation blocked {pair}")
+        return
     is_turning_point = _LAST_TURNING_POINT.get(pair, False)
     _SIGNAL_TURNING_POINT[sig_id] = is_turning_point
     _SIGNAL_MOVE_CLASS[sig_id]  = _move_class
@@ -2178,6 +2167,7 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
             )
         except Exception:
             pass
+    return True
 
 
 async def run_signal_loop(bot: Bot):
@@ -2249,16 +2239,17 @@ async def trigger_immediate_scan(bot: Bot, user_id: int):
     try:
         setup = db.get_forex_setup(user_id)
         if not setup or setup.get("status") != "active":
-            return
+            return False
         # Skip if there's already an open signal — wait for it to close.
         try:
             if db.list_open_forex_signals(user_id):
-                return
+                return False
         except Exception:
             pass
-        await _send_signal(bot, setup, force_signal=True)
+        return await _send_signal(bot, setup, force_signal=True)
     except Exception as e:
         print(f"[forex_engine] immediate scan error: {e}")
+        return False
     finally:
         _FORCE_IMMEDIATE.discard(int(user_id))
 
@@ -2288,8 +2279,8 @@ def _crossed_sl(direction: str, price: float, sl_level: float) -> bool:
 async def run_im_in_simulation(bot: Bot, signal_id: int):
     """Tracks the signal against the LIVE chart price (Yahoo Finance feed).
     Edits the message in-place as price actually crosses each TP, and only
-    flags SL when price truly touches it. Falls back to a tiny synthetic
-    drift if Yahoo can't quote the symbol so the user always gets a result.
+    flags SL when price truly touches it. Missing prices remain unclassified;
+    the tracker never invents movement or an outcome.
     """
     sig = db.get_forex_signal(signal_id)
     if not sig:
@@ -2311,7 +2302,6 @@ async def run_im_in_simulation(bot: Bot, signal_id: int):
     tps_hit = 0
     final: str | None = None
     started = datetime.utcnow()
-    last_synthetic = entry_price or 0.0
     # SL needs TWO consecutive confirming polls before we mark it hit
     # — that kills "ghost SL" prints from a single bad Yahoo tick that
     # spikes and immediately reverts (this was the user's #1 complaint).

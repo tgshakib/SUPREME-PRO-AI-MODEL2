@@ -14,7 +14,6 @@ from typing import Dict, Optional
 from tz_utils import short_time_for_user, next_candle_time_for_user
 
 import database as db
-from config import price_band
 from live_prices import get_market_bias, get_live_price
 try:
     from strategy import analyze_pair as sniper_analyze
@@ -366,12 +365,11 @@ def generate_fast_binary_signal(
     user_id: Optional[int] = None,
     broker: str = "",
 ) -> Dict:
-    """Build a bounded-latency result from already-buffered 1m evidence.
+    """Build a bounded binary result using only fresh, named data sources.
 
-    This function deliberately performs no remote fetches. It prefers the
-    broker candle buffer (OTC) or fresh cached 1m market snapshot (LIVE).
-    If those are unavailable, it still returns a clearly marked fallback
-    result so every requested analysis has an OTC/LIVE output.
+    OTC entries are allowed only when the selected broker's own candle buffer
+    is fresh.  LIVE entries use a recent real-market cache.  Missing, stale,
+    mixed-broker, or inconclusive data always yields a no-trade result.
     """
     is_otc = (
         "otc" in (market or "").lower()
@@ -382,19 +380,22 @@ def generate_fast_binary_signal(
     confidence = 0
     entry = None
     source_text = ""
+    source_ts = 0.0
+    unavailable_reason = "No qualified data is available for this market."
 
     if is_otc:
         try:
             from otc_feed_combined import otc_feed, label_to_otc_key
             asset = label_to_otc_key(pair) or pair
-            candles = otc_feed.get_candles(asset, "1m", count=6) or []
+            candles = otc_feed.get_candles(
+                asset, "1m", count=6, broker=broker
+            ) or []
             closes = [float(c.get("close", 0)) for c in candles]
             volumes = [float(c.get("volume", 0)) for c in candles]
             feed_status = otc_feed.status()
-            broker_connected = bool(
-                feed_status.get("quotex_connected")
-                or feed_status.get("pocketoption_connected")
-            )
+            broker_connected = bool(feed_status.get(
+                "pocketoption_connected" if broker == "po" else "quotex_connected"
+            ))
             latest_time = candles[-1].get("time") if candles else None
             if isinstance(latest_time, (int, float)):
                 latest_ts = float(latest_time)
@@ -425,9 +426,17 @@ def generate_fast_binary_signal(
                     entry = closes[-1]
                     move = abs(closes[-1] - closes[-4]) / max(abs(closes[-4]), 1e-9)
                     confidence = min(82, max(62, int(62 + move * 100000)))
-                    source_text = "fresh broker 1m candle buffer"
+                    source_text = (
+                        "Pocket Option broker candle buffer"
+                        if broker == "po" else "Quotex broker candle buffer"
+                    )
+                    source_ts = latest_ts
+                else:
+                    unavailable_reason = "Broker candles are inconclusive; no trade was created."
+            else:
+                unavailable_reason = "Selected broker data is stale or unavailable."
         except Exception:
-            pass
+            unavailable_reason = "Selected broker data could not be verified."
     else:
         try:
             from candle_feed import _CACHE as _CANDLE_CACHE
@@ -448,23 +457,39 @@ def generate_fast_binary_signal(
                     entry = close
                     confidence = min(82, max(62, int(60 + strength * 30)))
                     source_text = f"cached 1m {snapshot.get('source', 'market')} snapshot"
+                    source_ts = float(timestamp)
+                else:
+                    unavailable_reason = "Real-market data is stale or inconclusive."
+            else:
+                unavailable_reason = "No real-market snapshot is available."
         except Exception:
-            pass
+            unavailable_reason = "Real-market data could not be verified."
 
     if direction is None or entry is None:
-        # Always return a result for the requested analysis, but expose that
-        # it is a low-confidence configured-band fallback rather than fresh
-        # broker evidence.
-        mid, _, _ = price_band(pair)
-        entry = float(mid)
-        direction = "BUY" if sum(ord(char) for char in pair) % 2 == 0 else "SELL"
-        confidence = 55
-        source_text = "configured price-band fallback; feed confirmation unavailable"
-
-    fallback_result = confidence == 55
+        market_label = "OTC" if is_otc else "LIVE"
+        return {
+            "is_trade": False,
+            "direction": None,
+            "entry_price": None,
+            "source": None,
+            "source_ts": None,
+            "text": (
+                "🛑 <b>NO EXECUTABLE SIGNAL</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💱 <b>{pair}</b>\n"
+                f"📊 Market: <b>{market_label}</b>\n"
+                f"🧭 Status: {unavailable_reason}\n\n"
+                "<i>Public or configured fallback prices are not used for "
+                "broker execution. Try again after the feed recovers.</i>"
+            ),
+        }
 
     decimals = 5 if abs(entry) < 10 else 2
     pip = 0.0001 if decimals == 5 else 0.01
+    try:
+        expiry_min = max(1, int(tf_label.strip().split()[0]))
+    except (ValueError, IndexError):
+        expiry_min = 1
     arrow = "🟢 CALL / BUY" if direction == "BUY" else "🔴 PUT / SELL"
     market_label = "OTC" if is_otc else "LIVE"
     next_move = entry + (pip * 3 if direction == "BUY" else -pip * 3)
@@ -472,40 +497,37 @@ def generate_fast_binary_signal(
     target_text = f"{next_move:.{decimals}f}"
     now_str = short_time_for_user(user_id)
     text = (
-        "⚡ <b>FAST BINARY MICROSTRUCTURE</b>\n"
+        "📊 <b>BINARY DATA-QUALIFIED SIGNAL</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💱 <b>{pair}</b>\n"
         f"📊 Market: 🌐 <b>{market_label}</b>\n"
-        f"⚡ Analysis profile: <b>{tf_label}</b>\n"
+        f"⏱️ Trading time: <b>{tf_label}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"📆 SIGNAL: <b>{arrow}</b>\n"
-        f"🏅 Grade: <b>{'FAST FALLBACK RESULT' if fallback_result else 'FAST CONFIRMATION'}</b>\n"
+        f"🏅 Grade: <b>DATA-QUALIFIED CONFIRMATION</b>\n"
         f"🎯 Confidence: <b>{confidence}%</b>\n"
         f"💵 Entry: <code>{entry_text}</code>  →  Target: <code>{target_text}</code>\n"
         f"🧭 Source: {source_text}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 <b>{now_str}</b> ✦ <b>EXECUTE NOW</b>\n"
-        + (
-            "<i>Feed confirmation was unavailable; use extra caution and "
-            "proper risk management.</i>"
-            if fallback_result else
-            "<i>Use the new candle and proper risk management.</i>"
-        )
+        f"🕐 <b>{now_str}</b> ✦ <b>CHECK BROKER PRICE BEFORE ENTRY</b>\n"
+        "<i>Feed freshness is checked, but prices can still differ at execution.</i>"
     )
     return {
         "direction": direction,
         "trend": "UP" if direction == "BUY" else "DOWN",
         "confidence": confidence,
-        "grade": "FAST",
+        "grade": "QUALIFIED",
         "text": text,
         "photo": SIGNAL_PHOTO_BUY if direction == "BUY" else SIGNAL_PHOTO_SELL,
         "signal_id": -1,
         "entry_price": entry,
-        "expiry_min": 1,
+        "expiry_min": expiry_min,
         "engine": "fast_microstructure",
         "signal_ts": int(time.time()),
         "broker": broker,
         "is_trade": True,
+        "source": source_text,
+        "source_ts": source_ts,
     }
 
 
@@ -666,15 +688,11 @@ def generate_signal(
         except Exception:
             sniper = None
 
-    # ── IS THIS A FAST BINARY SESSION? ────────────────────────────────
-    _is_fast_tf = tf_label.strip().upper().startswith(("5 SEC", "15 SEC"))
-
     # ── IS THIS A 1-MINUTE / 2-MINUTE CANDLE SESSION? ─────────────────
     _is_1m_tf = (
         tf_label.strip().upper().startswith(
             ("1 MIN", "2 MIN", "1MIN", "2MIN")
         )
-        or _is_fast_tf
     )
 
     # ── 1-MINUTE PRECISION SNIPER (Priority -1, highest possible) ──────

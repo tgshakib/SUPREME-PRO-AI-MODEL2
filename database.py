@@ -58,6 +58,17 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now'))
         );
 
+        -- Short-lived, persistent reservation for one Binary analysis/output.
+        -- This protects concurrent Telegram callback deliveries across tasks
+        -- and process-local handler instances.
+        CREATE TABLE IF NOT EXISTS binary_signal_reservation (
+            user_id      INTEGER PRIMARY KEY,
+            pair         TEXT NOT NULL,
+            market       TEXT NOT NULL,
+            timeframe    TEXT NOT NULL,
+            expires_at   REAL NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS forex_setup (
             user_id        INTEGER PRIMARY KEY,
             tf             TEXT,
@@ -293,6 +304,16 @@ def init_db():
                     "ALTER TABLE forex_signal ADD COLUMN session_seq INTEGER "
                     "DEFAULT 0"
                 )
+            for col, definition in [
+                ("source", "TEXT"),
+                ("source_ts", "REAL"),
+                ("freshness_sec", "REAL"),
+                ("analysis_ms", "INTEGER"),
+            ]:
+                if col not in cols:
+                    conn.execute(
+                        f"ALTER TABLE forex_signal ADD COLUMN {col} {definition}"
+                    )
         except Exception as _e:
             print(f"⚠️  forex_signal migration skipped: {_e}")
 
@@ -838,6 +859,49 @@ def log_signal(user_id: int, pair: str, tf: str):
         )
 
 
+def reserve_binary_signal(
+        user_id: int, pair: str, market: str, timeframe: str,
+        lease_seconds: int = 10,
+) -> bool:
+    """Atomically reserve one Binary request before analysis begins."""
+    now = datetime.utcnow().timestamp()
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM binary_signal_reservation WHERE expires_at <= ?",
+            (now,),
+        )
+        try:
+            conn.execute(
+                "INSERT INTO binary_signal_reservation"
+                "(user_id, pair, market, timeframe, expires_at) VALUES(?,?,?,?,?)",
+                (user_id, pair, market, timeframe, now + max(1, lease_seconds)),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def finalize_binary_signal_reservation(
+        user_id: int, cooldown_seconds: int = 30,
+) -> None:
+    """Keep a completed Binary reservation as the persistent cooldown."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE binary_signal_reservation SET expires_at=? WHERE user_id=?",
+            (datetime.utcnow().timestamp() + max(1, cooldown_seconds), user_id),
+        )
+
+
+def release_binary_signal_reservation(user_id: int) -> None:
+    """Release an analysis lease when no executable signal was delivered."""
+    with get_conn() as conn:
+        conn.execute(
+            "DELETE FROM binary_signal_reservation WHERE user_id=?",
+            (user_id,),
+        )
+
+
 def signals_today(user_id: int) -> int:
     with get_conn() as conn:
         row = conn.execute(
@@ -944,15 +1008,74 @@ def increment_forex_sent(user_id: int):
 def create_forex_signal(user_id: int, chat_id: int, pair: str, direction: str,
                         entry: float, tp_prices: List[float], sl_price: float,
                         max_tp: int, kind: str = "LIVE",
-                        session_seq: int = 0) -> int:
+                        session_seq: int = 0, source: str = "",
+                        source_ts: Optional[float] = None,
+                        freshness_sec: Optional[float] = None,
+                        analysis_ms: Optional[int] = None) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO forex_signal(user_id, chat_id, pair, direction, "
-            "entry, tp_prices, sl_price, max_tp, kind, session_seq) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "entry, tp_prices, sl_price, max_tp, kind, session_seq, source, "
+            "source_ts, freshness_sec, analysis_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (user_id, chat_id, pair, direction, entry,
              ",".join(f"{p:.5f}" for p in tp_prices), sl_price, max_tp, kind,
-             int(session_seq)),
+              int(session_seq), source, source_ts, freshness_sec, analysis_ms),
+        )
+        return cur.lastrowid
+
+
+def reserve_forex_signal(
+        user_id: int, chat_id: int, pair: str, direction: str, entry: float,
+        tp_prices: List[float], sl_price: float, max_tp: int, *, kind: str,
+        source: str, source_ts: float, freshness_sec: float,
+        analysis_ms: int = 0, cooldown_sec: int = 120,
+        post_loss_cooldown_sec: int = 300, session_seq: int = 0,
+) -> Optional[int]:
+    """Atomically reserve one qualified open entry for a user/pair.
+
+    A single transaction protects simultaneous manual and background scans.
+    Source and freshness are required: callers cannot reserve a signal based
+    on a configured band, random direction, or an unlabelled price.
+    """
+    if not source or entry <= 0 or source_ts <= 0 or freshness_sec < 0:
+        return None
+    now = datetime.utcnow().timestamp()
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        open_row = conn.execute(
+            "SELECT id FROM forex_signal WHERE user_id=? AND pair=? "
+            "AND status='open' LIMIT 1",
+            (user_id, pair),
+        ).fetchone()
+        if open_row:
+            return None
+        recent = conn.execute(
+            "SELECT outcome, status, CAST(strftime('%s', "
+            "COALESCE(closed_at, created_at)) AS INTEGER) AS event_ts "
+            "FROM forex_signal WHERE user_id=? AND pair=? "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id, pair),
+        ).fetchone()
+        if recent:
+            age = max(0, now - float(recent["event_ts"] or 0))
+            min_wait = (
+                post_loss_cooldown_sec
+                if recent["status"] == "closed" and recent["outcome"] == "sl"
+                else cooldown_sec
+            )
+            if age < min_wait:
+                return None
+        cur = conn.execute(
+            "INSERT INTO forex_signal(user_id, chat_id, pair, direction, "
+            "entry, tp_prices, sl_price, max_tp, kind, session_seq, source, "
+            "source_ts, freshness_sec, analysis_ms) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                user_id, chat_id, pair, direction, entry,
+                ",".join(f"{p:.5f}" for p in tp_prices), sl_price, max_tp,
+                kind, int(session_seq), source, float(source_ts),
+                float(freshness_sec), int(analysis_ms),
+            ),
         )
         return cur.lastrowid
 

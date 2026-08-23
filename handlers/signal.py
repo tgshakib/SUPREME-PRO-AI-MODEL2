@@ -29,7 +29,7 @@ from keyboards import (
     binary_menu_kb,
 )
 from config import BINARY_TIMEFRAMES, DAILY_FREE_LIMIT
-from signals import generate_signal, generate_fast_binary_signal
+from signals import generate_fast_binary_signal
 
 router = Router()
 
@@ -60,10 +60,6 @@ def _market_meta(market: str, broker: str):
 def _tf_label(code: str) -> str:
     if code == "auto":
         return random.choice(["1 MIN", "2 MIN", "3 MIN"])
-    if code == "5s":
-        return "5 SEC"
-    if code == "15s":
-        return "15 SEC"
     for label, c in BINARY_TIMEFRAMES:
         if c == code:
             return label
@@ -142,12 +138,18 @@ async def cb_pair(call: CallbackQuery):
 @router.callback_query(F.data.startswith("tf:"))
 async def cb_tf(call: CallbackQuery):
     _, market, broker, idx, tf = call.data.split(":")
+    if tf not in {code for _, code in BINARY_TIMEFRAMES}:
+        await call.answer("This trading-time option is no longer available.", show_alert=True)
+        return
     await _analyze_and_send(call, market, broker, int(idx), tf)
 
 
 @router.callback_query(F.data.startswith("again:"))
 async def cb_again(call: CallbackQuery):
     _, market, broker, idx, tf = call.data.split(":")
+    if tf not in {code for _, code in BINARY_TIMEFRAMES}:
+        await call.answer("This trading-time option is no longer available.", show_alert=True)
+        return
     await _analyze_and_send(call, market, broker, int(idx), tf)
 
 
@@ -183,31 +185,6 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
             await show_screen(call.bot, call.message.chat.id, _wknd_text, binary_menu_kb())
         return
 
-    # ── Fast timeframe: access-only gate ──────────────────────────────────
-    if tf in {"5s", "15s"}:
-        if not db.has_active_access(user_id) and not _is_admin(user_id):
-            await call.answer()
-            _access_text = (
-                f"⚡ <b>{_tf_label(tf)} Timeframe — VIP Only</b>\n"
-                "━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🔒 The <b>{_tf_label(tf)} signal</b> is available for "
-                "<b>paid access</b> users only.\n\n"
-                "You don't have active access.\n\n"
-                "👉 Tap <b>BUY ACCESS</b> below to unlock:\n"
-                "• ⚡ 5/15-second OTC & LIVE signals\n"
-                "• 🔓 Unlimited daily signals\n"
-                "• 📊 All timeframes\n"
-                "• 🎯 Premium signal quality"
-            )
-            from keyboards import binary_menu_kb
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            _buy_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 BUY ACCESS", callback_data="m:buy")],
-                [InlineKeyboardButton(text="⬅️ BACK", callback_data=f"back_pairs:{market}:{broker}")],
-            ])
-            await show_screen(call.bot, call.message.chat.id, _access_text, _buy_kb)
-            return
-
     # 30-second cooldown after a fresh signal
     cd = _cooldown_remaining(user_id)
     if cd > 0:
@@ -237,6 +214,12 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
 
     market_name, broker_name = _market_meta(market, broker)
     tf_label = _tf_label(tf)
+    if not db.reserve_binary_signal(user_id, pair, market_name, tf_label):
+        await call.answer(
+            "⚠️ A Binary analysis is already running or was just sent. Please wait.",
+            show_alert=True,
+        )
+        return
 
     await call.answer()
     # When this fires from AGAIN ANALYSE / TF, the previous photo card +
@@ -263,49 +246,28 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         call.bot, chat_id, loading, reply_markup=None,
     )
 
-    # Fast sessions use a deterministic 5-second analysis window.  The
-    # signal engine then reads the live 1m tape/microstructure proxy.
-    import random as _rnd
-    _scan_secs = 5.0 if tf in {"5s", "15s"} else _rnd.choice([3.0, 4.0, 5.0])
-    await asyncio.sleep(_scan_secs)
-
-    if tf in {"5s", "15s"}:
-        # Fast sessions use local buffered evidence and always return a
-        # clearly labelled OTC/LIVE result, including the disclosed fallback.
-        sig = generate_fast_binary_signal(
-            pair, market_name, tf_label, user_id=user_id, broker=broker
+    # This analysis only reads already-buffered, source-qualified data.  A
+    # strict budget keeps the Telegram response quick even while a broker feed
+    # is unhealthy; the builder returns an explicit no-trade result on timeout.
+    try:
+        sig = await asyncio.wait_for(
+            asyncio.to_thread(
+                generate_fast_binary_signal,
+                pair, market_name, tf_label, user_id, broker,
+            ),
+            timeout=4.5,
         )
-    else:
-        # Preserve the full validated engine and all normal risk gates for
-        # standard binary timeframes.
-        sig = await asyncio.to_thread(
-            generate_signal, pair, market_name, tf_label, user_id, broker,
-        )
-
-    if sig.get("is_trade", True):
-        db.log_signal(user_id, pair, tf_label)
-        _recent_signal[user_id] = datetime.utcnow()
-
-    # ── Self-improve: schedule auto outcome check after expiry ────────
-    # user_id / bot / chat_id are forwarded so the daily alert system
-    # can fire streak-based loss/win notifications when outcome is known.
-    if sig.get("is_trade", True) and _SI_OK and _si_schedule is not None:
-        try:
-            _si_schedule(
-                signal_id        = sig.get("signal_id", -1),
-                pair             = pair,
-                market           = market_name,
-                direction        = sig.get("direction", "BUY"),
-                entry_price      = sig.get("entry_price"),
-                expiry_minutes   = sig.get("expiry_min", 5),
-                engine           = sig.get("engine", "unknown"),
-                user_id          = user_id,
-                bot              = call.bot,
-                chat_id          = chat_id,
-                signal_timestamp = sig.get("signal_ts", 0),
-            )
-        except Exception:
-            pass
+    except asyncio.TimeoutError:
+        sig = {
+            "is_trade": False,
+            "text": (
+                "⏱️ <b>ANALYSIS UNAVAILABLE</b>\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                f"💱 <b>{pair}</b>\n"
+                "No current, source-qualified market data arrived within the "
+                "analysis window. No executable entry was created."
+            ),
+        }
 
     # Send the signal card as a photo (BUY → green image, SELL → red image)
     # with the full caption + the signal-actions keyboard.
@@ -339,12 +301,37 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
 
     if sent is None:
         # Photo missing or send failed — fall back to a plain text card.
-        await show_screen(
-            call.bot, chat_id,
-            sig["text"],
-            signal_actions_kb(market, broker, idx, tf),
-        )
+        try:
+            sent = await show_screen(
+                call.bot, chat_id,
+                sig["text"],
+                signal_actions_kb(market, broker, idx, tf),
+            )
+        except Exception:
+            sent = None
     else:
         # Track the photo card so the home/WORKPLACE screen can replace it
         # cleanly on the next click (show_screen will delete + resend).
         db.set_active_msg(chat_id, sent.message_id)
+
+    if not sig.get("is_trade", False) or sent is None:
+        db.release_binary_signal_reservation(user_id)
+        return
+
+    db.finalize_binary_signal_reservation(user_id, SIGNAL_COOLDOWN_SEC)
+    db.log_signal(user_id, pair, tf_label)
+    _recent_signal[user_id] = datetime.utcnow()
+    # ── Self-improve: schedule outcome only for a delivered trade. ──────
+    if _SI_OK and _si_schedule is not None:
+        try:
+            _si_schedule(
+                signal_id=sig.get("signal_id", -1), pair=pair,
+                market=market_name, direction=sig.get("direction", "BUY"),
+                entry_price=sig.get("entry_price"),
+                expiry_minutes=sig.get("expiry_min", 5),
+                engine=sig.get("engine", "unknown"), user_id=user_id,
+                bot=call.bot, chat_id=chat_id,
+                signal_timestamp=sig.get("signal_ts", 0),
+            )
+        except Exception:
+            pass

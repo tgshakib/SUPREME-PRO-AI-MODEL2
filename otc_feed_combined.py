@@ -632,9 +632,15 @@ class OTCFeedManager:
         self.qx.stop()
         self.po.stop()
 
-    def get_candles(self, asset: str, tf: str, count: int = 100) -> Optional[list]:
+    def get_candles(self, asset: str, tf: str, count: int = 100,
+                    broker: str | None = None) -> Optional[list]:
+        """Return candles for one broker when requested; never mix OTC books."""
         qx_c = self.qx.get_candles(asset, tf, count)
         po_c = self.po.get_candles(asset, tf, count)
+        if broker == "qx":
+            return qx_c if len(qx_c) >= 5 else None
+        if broker == "po":
+            return po_c if len(po_c) >= 5 else None
 
         # Both available — merge & average for best accuracy
         if len(qx_c) >= 10 and len(po_c) >= 10:

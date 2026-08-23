@@ -747,9 +747,69 @@ def get_live_price(pair: str, force_fresh: bool = False) -> Optional[float]:
                 _CACHE[ticker] = (now, cg_px)
                 return cg_px
 
-    # ── 6. Stale cache — never return None to the signal engine ─────
+    # A forced refresh is used for executable entries.  Do not silently
+    # relabel an old in-memory quote as a fresh market observation.
+    if force_fresh:
+        return None
+
+    # ── 6. Stale cache — display-only continuity, never forced entries ──
     cached = _CACHE.get(ticker)
     return cached[1] if cached else None
+
+
+def get_qualified_market_quote(pair: str) -> Optional[dict]:
+    """Return a direct, fresh real-market quote plus auditable provenance.
+
+    OTC synthetic symbols are deliberately rejected here: they require a
+    selected-broker quote through ``get_qualified_otc_quote`` instead.
+    Delayed yfinance and stale cache fallbacks are intentionally excluded.
+    """
+    if "〔OTC〕" in pair or "(OTC)" in pair.upper() or "_otc" in pair.lower():
+        return None
+    ticker = yf_ticker(pair)
+    if not ticker:
+        return None
+    base = _crypto_base(pair)
+    if base and base in _BINANCE_SPOT_MAP:
+        price = _fetch_binance(_BINANCE_SPOT_MAP[base])
+        if price and price > 0:
+            return {
+                "price": float(price), "source": "Binance spot",
+                "source_ts": time.time(), "freshness_sec": 0.0,
+            }
+    stooq_sym = _stooq_sym_for_ticker(ticker)
+    if stooq_sym:
+        price = _fetch_stooq(stooq_sym)
+        if price and price > 0:
+            return {
+                "price": float(price), "source": f"Stooq ({stooq_sym})",
+                "source_ts": time.time(), "freshness_sec": 0.0,
+            }
+    return None
+
+
+def get_qualified_otc_quote(pair: str, broker: str) -> Optional[dict]:
+    """Return only a current tick from the user-selected OTC broker."""
+    if broker not in {"po", "qx"}:
+        return None
+    try:
+        from otc_price_service import _LOCK, _PRICES, _normalize_pair
+        key = _normalize_pair(pair)
+        with _LOCK:
+            item = dict(_PRICES.get(key) or {})
+        source = item.get("source")
+        timestamp = float(item.get("time") or 0)
+        age = time.time() - timestamp
+        if source != broker or item.get("price", 0) <= 0 or not 0 <= age <= 5:
+            return None
+        return {
+            "price": float(item["price"]),
+            "source": "Pocket Option broker tick" if broker == "po" else "Quotex broker tick",
+            "source_ts": timestamp,
+            "freshness_sec": age,
+        }
+    except Exception:
+        return None
 
 
 def get_market_bias(pair: str, lookback_bars: int = 15
