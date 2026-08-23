@@ -327,6 +327,7 @@ async def _check_and_record_outcome(
     bot                    = None,
     chat_id:          int  = 0,
     signal_timestamp: int  = 0,
+    broker:            str  = "",
 ) -> None:
     """Wait until the ENTRY candle closes + 45 s buffer, then evaluate outcome.
 
@@ -375,7 +376,7 @@ async def _check_and_record_outcome(
 
     try:
         from live_prices import get_live_price, yf_ticker
-        price_now = get_live_price(pair)
+        price_now = get_live_price(pair, broker=broker or None)
 
         # ── Candle-colour primary check (OTC excluded — synthetic prices) ─
         _is_otc = ("〔OTC〕" in pair or "(OTC)" in (pair or "").upper()
@@ -504,6 +505,7 @@ def schedule_outcome_check(
     bot                    = None,
     chat_id:          int  = 0,
     signal_timestamp: int  = 0,
+    broker:            str  = "",
 ) -> None:
     """Fire-and-forget — schedule the outcome check coroutine.
 
@@ -523,6 +525,7 @@ def schedule_outcome_check(
                 entry_price, expiry_minutes, engine,
                 user_id=user_id, bot=bot, chat_id=chat_id,
                 signal_timestamp=signal_timestamp,
+                broker=broker,
             )
         )
     except RuntimeError:

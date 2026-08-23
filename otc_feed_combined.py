@@ -635,12 +635,12 @@ class OTCFeedManager:
     def get_candles(self, asset: str, tf: str, count: int = 100,
                     broker: str | None = None) -> Optional[list]:
         """Return candles for one broker when requested; never mix OTC books."""
-        qx_c = self.qx.get_candles(asset, tf, count)
-        po_c = self.po.get_candles(asset, tf, count)
+        qx_c = self.qx.get_candles(asset, tf, 500)
+        po_c = self.po.get_candles(asset, tf, 500)
         if broker == "qx":
-            return qx_c if len(qx_c) >= 5 else None
+            return qx_c[-count:] if len(qx_c) >= 5 else None
         if broker == "po":
-            return po_c if len(po_c) >= 5 else None
+            return po_c[-count:] if len(po_c) >= 5 else None
 
         # Both available — merge & average for best accuracy
         if len(qx_c) >= 10 and len(po_c) >= 10:
@@ -654,7 +654,12 @@ class OTCFeedManager:
         # Neither ready — return None → existing bot fallback kicks in
         return None
 
-    def get_price(self, asset: str) -> Optional[float]:
+    def get_price(self, asset: str, broker: str | None = None) -> Optional[float]:
+        """Return a broker-native OTC price when a broker is selected."""
+        if broker == "qx":
+            return self.qx.get_price(asset)
+        if broker == "po":
+            return self.po.get_price(asset)
         qp = self.qx.get_price(asset)
         pp = self.po.get_price(asset)
         if qp and pp:

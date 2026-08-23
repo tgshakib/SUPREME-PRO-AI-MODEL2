@@ -395,6 +395,7 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
                 engine=sig.get("engine", "unknown"), user_id=user_id,
                 bot=call.bot, chat_id=chat_id,
                 signal_timestamp=sig.get("signal_ts", 0),
+                broker=sig.get("broker") or broker,
             )
         except Exception:
             pass

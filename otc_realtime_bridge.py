@@ -82,7 +82,8 @@ def _to_feed_key(pair: str) -> Optional[str]:
 # ── Core: get a DataFrame from the live WS feed ──────────────────────────────
 
 def get_otc_df(pair: str, timeframe: str = "1m", count: int = 200,
-               max_age_sec: float = STALE_SEC) -> Optional["pd.DataFrame"]:
+               max_age_sec: float = STALE_SEC,
+               broker: Optional[str] = None) -> Optional["pd.DataFrame"]:
     """Return a real-time OHLCV DataFrame for `pair` on `timeframe`.
 
     Returns None if:
@@ -104,7 +105,9 @@ def get_otc_df(pair: str, timeframe: str = "1m", count: int = 200,
         return None
 
     try:
-        candles: List[dict] = _feed.get_candles(feed_key, timeframe, count=count)
+        candles: List[dict] = _feed.get_candles(
+            feed_key, timeframe, count=count, broker=broker,
+        )
     except Exception:
         return None
 
@@ -145,22 +148,25 @@ def get_otc_df(pair: str, timeframe: str = "1m", count: int = 200,
         return None
 
 
-def get_otc_price(pair: str) -> Optional[float]:
-    """Return the latest live tick price for an OTC pair, or None."""
+def get_otc_price(pair: str, broker: Optional[str] = None) -> Optional[float]:
+    """Return the latest OTC price, scoped to ``broker`` when selected."""
     try:
         from otc_feed_combined import otc_feed as _feed
         feed_key = _to_feed_key(pair)
         if not feed_key:
             return None
-        return _feed.get_price(feed_key)
+        return _feed.get_price(feed_key, broker=broker)
     except Exception:
         return None
 
 
 def feed_is_live(pair: str, timeframe: str = "1m",
-                 max_age_sec: float = STALE_SEC) -> bool:
+                 max_age_sec: float = STALE_SEC,
+                 broker: Optional[str] = None) -> bool:
     """True when the WS feed for `pair` has fresh candles within max_age_sec."""
-    df = get_otc_df(pair, timeframe, count=5, max_age_sec=max_age_sec)
+    df = get_otc_df(
+        pair, timeframe, count=5, max_age_sec=max_age_sec, broker=broker,
+    )
     return df is not None and len(df) >= 1
 
 
@@ -170,6 +176,10 @@ def get_otc_mtf(
     pair: str,
     timeframes: tuple = ("1m", "5m", "15m", "30m"),
     count: int = 300,
+    broker: Optional[str] = None,
 ) -> Dict[str, Optional["pd.DataFrame"]]:
     """Return dict of {tf: DataFrame|None} for requested timeframes."""
-    return {tf: get_otc_df(pair, tf, count=count) for tf in timeframes}
+    return {
+        tf: get_otc_df(pair, tf, count=count, broker=broker)
+        for tf in timeframes
+    }

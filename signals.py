@@ -368,6 +368,12 @@ def _chart_view_direction(
     directional chart read with no numeric entry, in which case the user must
     use the current selected-broker chart price at the next candle.
     """
+    is_otc = "〔OTC〕" in pair or "(OTC)" in pair.upper()
+    # Quotex synthetic candles are independent from public charts. A QX
+    # request must be decided by the selected-broker feed or withheld.
+    if is_otc and broker == "qx":
+        return None, None, "", 0.0, 0
+
     chart_pair = (pair.replace("〔OTC〕", "").replace("(OTC)", "").strip())
     direction: Optional[str] = None
     confidence = 62
@@ -407,6 +413,162 @@ def _chart_view_direction(
         float(quote.get("source_ts") or time.time()),
         confidence,
     )
+
+
+def _candle_timestamp(value) -> float:
+    """Normalize combined-feed candle times without guessing a timezone."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(
+                value, "%Y-%m-%d %H:%M:%S",
+            ).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _generate_quotex_otc_signal(
+    pair: str,
+    market: str,
+    tf_label: str,
+    user_id: Optional[int],
+) -> Dict:
+    """Build the established Binary card from Quotex-native OTC data only.
+
+    A QX trade needs either a fresh multi-candle move confirmed by recent QX
+    ticks, or a sufficiently coherent fresh QX tick tape. PO, public charts,
+    and generic market indicators are deliberately excluded.
+    """
+    direction: Optional[str] = None
+    source = ""
+    confidence = 0
+    entry_price: Optional[float] = None
+    agreement = 0.0
+    reason = "Quotex data is still warming up."
+
+    try:
+        from otc_feed_combined import label_to_otc_key, otc_feed
+        from otc_price_service import get_selected_broker_ticks
+
+        asset = label_to_otc_key(pair) or pair
+        candles = otc_feed.get_candles(asset, "1m", count=6, broker="qx") or []
+        closes = [float(c.get("close") or 0) for c in candles]
+        latest_ts = _candle_timestamp(candles[-1].get("time")) if candles else 0.0
+        candles_fresh = bool(latest_ts and 0 <= time.time() - latest_ts <= 95)
+        candle_direction = None
+        if (
+            candles_fresh
+            and len(closes) >= 5
+            and all(price > 0 for price in closes[-5:])
+        ):
+            if closes[-1] > closes[-2] > closes[-3]:
+                candle_direction = "BUY"
+            elif closes[-1] < closes[-2] < closes[-3]:
+                candle_direction = "SELL"
+
+        ticks = get_selected_broker_ticks(
+            pair, "qx", max_age_sec=15, limit=12,
+        )
+        prices = [float(tick.get("price") or 0) for tick in ticks]
+        tick_direction = None
+        if len(prices) >= 6 and all(price > 0 for price in prices):
+            net_move = prices[-1] - prices[0]
+            if net_move:
+                tick_direction = "BUY" if net_move > 0 else "SELL"
+                same_way = sum(
+                    1
+                    for left, right in zip(prices, prices[1:])
+                    if (right - left) * net_move > 0
+                )
+                agreement = same_way / max(1, len(prices) - 1)
+                if agreement < 0.70:
+                    tick_direction = None
+                    reason = "Quotex tick flow is not coherent enough yet."
+
+        if candle_direction and tick_direction:
+            if candle_direction == tick_direction:
+                direction = candle_direction
+                entry_price = prices[-1]
+                confidence = min(82, max(70, int(64 + agreement * 22)))
+                source = "Quotex broker candles + tick consensus"
+            else:
+                reason = "Quotex candles and live ticks disagree; no trade created."
+        elif tick_direction:
+            direction = tick_direction
+            entry_price = prices[-1]
+            confidence = min(76, max(66, int(60 + agreement * 20)))
+            source = "Quotex selected-broker tick consensus"
+        elif candle_direction:
+            reason = "Waiting for Quotex live-tick confirmation."
+        elif candles and not candles_fresh:
+            reason = "Quotex candle feed is stale; waiting for a fresh stream."
+        elif not ticks:
+            reason = "Quotex price stream is not yet available."
+        else:
+            reason = "Quotex market movement is inconclusive; no trade created."
+    except Exception:
+        reason = "Quotex broker data could not be verified."
+
+    if direction not in {"BUY", "SELL"} or entry_price is None:
+        return {
+            "is_trade": False,
+            "direction": None,
+            "entry_price": None,
+            "source": None,
+            "text": (
+                "🔄 <b>REFRESHING SELECTED BROKER DATA</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💱 <b>{pair}</b>\n"
+                "<i>" + reason + "</i>"
+            ),
+        }
+
+    print(
+        f"[signals] QX native match {pair} {direction} "
+        f"tick_agreement={agreement:.0%} source={source}"
+    )
+    trend = "📈 BULLISH" if direction == "BUY" else "📉 BEARISH"
+    text, photo = _legacy_binary_card(
+        pair, market, tf_label, user_id, direction, trend, confidence,
+    )
+    try:
+        expiry_min = max(1, int(tf_label.split()[0]))
+    except (ValueError, IndexError):
+        expiry_min = 1
+    signal_record = None
+    if _SI_OK and _si_record is not None and user_id is not None:
+        signal_record = {
+            "user_id": user_id,
+            "pair": pair,
+            "market": market,
+            "direction": direction,
+            "timeframe": tf_label,
+            "engine": "quotex_native_match",
+            "confidence": confidence,
+            "weighted_score": agreement,
+            "entry_price": entry_price,
+            "expiry_minutes": expiry_min,
+            "atr_pct": 0.0,
+            "vol_mode": "quotex_native",
+        }
+    return {
+        "direction": direction,
+        "trend": trend,
+        "text": text,
+        "photo": photo,
+        "signal_id": -1,
+        "signal_record": signal_record,
+        "engine": "quotex_native_match",
+        "entry_price": entry_price,
+        "expiry_min": expiry_min,
+        "signal_ts": int(time.time()),
+        "broker": "qx",
+        "source": source,
+        "agreement": agreement,
+        "is_trade": True,
+    }
 
 
 def _legacy_binary_card(
@@ -502,6 +664,9 @@ def generate_chart_view_binary_fallback(
         or "(OTC)" in (pair or "").upper()
         or "〔OTC〕" in (pair or "")
     )
+    if is_otc and broker == "qx":
+        return _generate_quotex_otc_signal(pair, market, tf_label, user_id)
+
     direction: Optional[str] = None
     chart_entry: Optional[float] = None
     chart_confidence = 0
@@ -527,6 +692,8 @@ def generate_chart_view_binary_fallback(
     # The original real-time chart-view engine remains the fallback for both
     # OTC and LIVE when the selected stream has not yet formed a direction.
     if direction is None:
+        if is_otc and broker == "qx":
+            return None
         direction, chart_entry, _source, _source_ts, chart_confidence = (
             _chart_view_direction(pair, broker)
         )
@@ -703,7 +870,7 @@ def generate_fast_binary_signal(
     # It only uses a real chart direction, never a time-based/random fallback.
     # OTC keeps the selected broker as the preferred source above; this is
     # used only when that source has not started delivering data.
-    if direction is None:
+    if direction is None and not (is_otc and broker == "qx"):
         (
             chart_direction,
             chart_entry,
@@ -811,6 +978,8 @@ def generate_signal(
     # OTC pairs (Pocket Option / Quotex) use SYNTHETIC broker-generated
     # candles that do NOT track the live market trend reliably.
     is_otc = "otc" in (market or "").lower() or "(OTC)" in (pair or "").upper() or "〔OTC〕" in (pair or "")
+    if is_otc and broker == "qx":
+        return _generate_quotex_otc_signal(pair, market, tf_label, user_id)
 
     # ── VOLATILITY GUARD — pre-flight check ──────────────────────────────
     # Detect Friday close / news windows / ATR spike BEFORE running any
