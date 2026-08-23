@@ -1,6 +1,7 @@
 """Main menu, /start, join-required gate, navigation home."""
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     Message, CallbackQuery,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
@@ -203,7 +204,6 @@ async def cmd_start(message: Message):
         pass
 
 
-@router.message(Command("admin"))
 @router.message(Command("help"))
 @router.message(Command("support"))
 async def cmd_admin_contact(message: Message):
@@ -231,6 +231,31 @@ async def cmd_admin_contact(message: Message):
     ])
     from chat_clean import show_screen
     await show_screen(message.bot, message.chat.id, text, kb)
+
+
+@router.message(Command("admin"))
+async def cmd_admin_panel(message: Message, state: FSMContext):
+    """Open the real administration panel for the configured owner.
+
+    `/admin` previously shared the support-contact handler, making the owner
+    command appear broken despite valid administration configuration.
+    """
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    if not _is_admin(message.from_user.id):
+        await cmd_admin_contact(message)
+        return
+    from handlers.admin import _panel_text
+    from keyboards import admin_panel_kb
+    await state.clear()
+    await show_screen(
+        message.bot,
+        message.chat.id,
+        _panel_text(),
+        admin_panel_kb(),
+    )
 
 
 @router.message(Command("home"))
@@ -261,12 +286,15 @@ async def cb_home(call: CallbackQuery):
     Clears the user's recent forex signal cards from the chat (best-effort —
     Telegram only allows the bot to delete its own messages, and only those
     sent within the last ~48h) so the chat returns to a clean home view."""
-    await call.answer("🧹 Clearing recent signals…")
+    await call.answer()
+    # Render first so BACK / WORKPLACE is immediate. Deleting old tracking
+    # cards is best-effort housekeeping and must not delay navigation.
+    await render_home(call.bot, call.message.chat.id, call.from_user, fast=True)
     try:
-        await wipe_user_signals(call.bot, call.from_user.id)
+        import asyncio
+        asyncio.create_task(wipe_user_signals(call.bot, call.from_user.id))
     except Exception:
         pass
-    await render_home(call.bot, call.message.chat.id, call.from_user, fast=True)
 
 
 # ── Timezone picker (inline keyboard from home) ─────────────────────────

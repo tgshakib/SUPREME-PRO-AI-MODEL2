@@ -9,7 +9,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 
 import database as db
-from chat_clean import show_screen, delete_active, safe_delete
+from chat_clean import show_screen, safe_delete
 try:
     from self_improve import get_improvement_report as _si_report
     _SI_OK = True
@@ -133,7 +133,10 @@ async def cb_close(call: CallbackQuery, state: FSMContext):
         await call.answer(); return
     await state.clear()
     await call.answer("Closed")
-    await delete_active(call.bot, call.message.chat.id)
+    # Close should behave like the other navigation exits: return to the
+    # workplace instead of deleting the only active panel and leaving a gap.
+    from handlers.main_menu import render_home
+    await render_home(call.bot, call.message.chat.id, call.from_user, fast=True)
 
 
 @router.callback_query(F.data == "adm:stats")
