@@ -585,18 +585,18 @@ def generate_fast_binary_signal(
         f"💵 Entry: <code>{entry:.{decimals}f}</code>  →  "
         f"Target: <code>{entry + (pip * 3 if direction == 'BUY' else -pip * 3):.{decimals}f}</code>\n"
         if has_numeric_entry else
-        "💵 Entry: <b>Use the current selected-broker chart price at the next candle</b>\n"
+        ""
     )
     now_str = short_time_for_user(user_id)
     text = (
-        "📊 <b>BINARY CHART-VIEW SIGNAL</b>\n"
+        "📊 <b>BINARY DATA-QUALIFIED SIGNAL</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💱 <b>{pair}</b>\n"
         f"📊 Market: 🌐 <b>{market_label}</b>\n"
         f"⏱️ Trading time: <b>{tf_label}</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"📆 SIGNAL: <b>{arrow}</b>\n"
-        f"🏅 Grade: <b>CHART DIRECTION CONFIRMATION</b>\n"
+        f"🏅 Grade: <b>DATA-QUALIFIED CONFIRMATION</b>\n"
         f"🎯 Confidence: <b>{confidence}%</b>\n"
         f"{price_line}"
         f"🧭 Source: {source_text}\n"

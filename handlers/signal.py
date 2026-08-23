@@ -29,7 +29,7 @@ from keyboards import (
     binary_menu_kb,
 )
 from config import BINARY_TIMEFRAMES, DAILY_FREE_LIMIT
-from signals import generate_fast_binary_signal
+from signals import generate_signal
 
 router = Router()
 
@@ -246,16 +246,16 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         call.bot, chat_id, loading, reply_markup=None,
     )
 
-    # This analysis only reads already-buffered, source-qualified data.  A
-    # strict budget keeps the Telegram response quick even while a broker feed
-    # is unhealthy; the builder returns an explicit no-trade result on timeout.
+    # Use the original chart-view signal builder.  It owns the established
+    # Binary/OTC/LIVE card text and timing; do not replace it with a new card
+    # format in this handler.
     try:
         sig = await asyncio.wait_for(
             asyncio.to_thread(
-                generate_fast_binary_signal,
+                generate_signal,
                 pair, market_name, tf_label, user_id, broker,
             ),
-            timeout=6.0,
+            timeout=25.0,
         )
     except asyncio.TimeoutError:
         sig = {
@@ -268,6 +268,13 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
                 "analysis window. No executable entry was created."
             ),
         }
+    # The legacy renderer predates the fast-path metadata flag.  Preserve its
+    # established output and let the existing delivery flow treat it as a
+    # signal without altering the rendered text.
+    sig.setdefault(
+        "is_trade",
+        sig.get("direction") in {"BUY", "SELL"},
+    )
 
     # Send the signal card as a photo (BUY → green image, SELL → red image)
     # with the full caption + the signal-actions keyboard.
