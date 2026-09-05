@@ -109,6 +109,7 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         middleware = FutureSignalRelayMiddleware()
 
         event = _Event(payload)
+        event.callback_query = SimpleNamespace(data="tgadv:futuresignal")
         with (
             patch.dict(os.environ, {"SESSION_SECRET": "relay-test-secret"}),
             patch(
@@ -162,6 +163,23 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "middleware.httpx.AsyncClient",
                 return_value=_Client(post),
             ),
+        ):
+            result = await middleware(handler, event, {})
+
+        self.assertEqual(result, "handled")
+        post.assert_not_awaited()
+        handler.assert_awaited_once()
+
+    async def test_ordinary_admin_callback_skips_future_relay(self):
+        post = AsyncMock(return_value=_Response())
+        handler = AsyncMock(return_value="handled")
+        middleware = FutureSignalRelayMiddleware()
+        event = _Event({"update_id": 45})
+        event.callback_query = SimpleNamespace(data="adm:open")
+
+        with (
+            patch.dict(os.environ, {"SESSION_SECRET": "relay-test-secret"}),
+            patch("middleware.httpx.AsyncClient", return_value=_Client(post)),
         ):
             result = await middleware(handler, event, {})
 

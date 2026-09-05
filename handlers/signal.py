@@ -41,6 +41,41 @@ router = Router()
 SIGNAL_COOLDOWN_SEC = 30
 _recent_signal: dict[int, datetime] = {}
 _active_analysis: dict[int, asyncio.Task] = {}
+_pair_warm_tasks: dict[tuple[int, str], asyncio.Task] = {}
+
+
+def _warm_quotex_pair(pair: str) -> None:
+    """Prime fresh QX broker data while the user chooses a trading time."""
+    try:
+        from otc_realtime_bridge import get_otc_df, get_otc_price
+        from otc_price_service import get_selected_broker_ticks
+
+        get_otc_df(pair, "1m", count=60, max_age_sec=95, broker="qx")
+        get_otc_price(pair, broker="qx")
+        get_selected_broker_ticks(pair, "qx", max_age_sec=15, limit=50)
+    except Exception:
+        # The final signal engine remains the authority and will explicitly
+        # withhold a trade if the authenticated tape is unavailable.
+        pass
+
+
+def _start_pair_warm(user_id: int, pair: str) -> None:
+    key = (user_id, pair)
+    previous = _pair_warm_tasks.get(key)
+    if previous is not None and not previous.done():
+        return
+    task = asyncio.create_task(asyncio.to_thread(_warm_quotex_pair, pair))
+    _pair_warm_tasks[key] = task
+
+    def _done(done: asyncio.Task) -> None:
+        if _pair_warm_tasks.get(key) is done:
+            _pair_warm_tasks.pop(key, None)
+        try:
+            done.result()
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    task.add_done_callback(_done)
 
 
 def _record_delivered_signal(sig: dict) -> int:
@@ -138,6 +173,8 @@ async def cb_pair(call: CallbackQuery):
         f"<b>SELECT ▸ TRADING TIME</b>"
     )
     user_id = call.from_user.id
+    if market == "otc" and broker == "qx":
+        _start_pair_warm(user_id, pair)
     _has_access = db.has_binary_access(user_id) or _is_admin(user_id)
     if os.path.exists(_TIME_PHOTO):
         await show_photo_screen(
@@ -292,8 +329,11 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
             pass
 
     analysis_task.add_done_callback(_consume_analysis_result)
+    # Keep the complete engine, but bound the user-facing scan. Pair warming
+    # has already started during the timeframe-selection screen.
+    analysis_timeout = 6.5
     try:
-        sig = await asyncio.wait_for(asyncio.shield(analysis_task), timeout=25.0)
+        sig = await asyncio.wait_for(asyncio.shield(analysis_task), timeout=analysis_timeout)
     except asyncio.TimeoutError:
         # The full engine can spend longer than the callback window waiting on
         # an upstream chart provider. Recover through the established chart-view
@@ -305,7 +345,7 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
                     generate_chart_view_binary_fallback,
                     pair, market_name, tf_label, user_id, broker,
                 ),
-                timeout=10.0,
+                timeout=0.45,
             )
         except asyncio.TimeoutError:
             sig = None

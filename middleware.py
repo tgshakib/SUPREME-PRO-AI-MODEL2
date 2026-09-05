@@ -46,10 +46,36 @@ class FutureSignalRelayMiddleware(BaseMiddleware):
     def __init__(self, endpoint: str = "http://127.0.0.1:3001/api/internal/telegram-update"):
         self.endpoint = endpoint
 
+    @staticmethod
+    def _needs_relay(event) -> bool:
+        """Keep ordinary Python navigation out of the relay's critical path."""
+        callback = getattr(event, "callback_query", None)
+        callback_data = getattr(callback, "data", "") if callback else ""
+        if callback_data:
+            data = callback_data.removeprefix("tgadv:")
+            if data == "m:home":
+                return True
+            return data.startswith((
+                "futuresignal", "market_", "back_to_market", "asset_",
+                "assets_done", "back_to_assets", "setdir_", "sigcount_",
+                "go_home", "settings_", "back_to_settings_hub", "tf_",
+                "tz_", "strategy_", "autodel_", "assess_", "access_buy",
+                "paywall_back", "pkg_", "proceed_", "pay_page",
+                "send_screenshot_", "approve_pay_", "reject_pay_",
+                "grant_", "revoke_",
+            ))
+        # Non-command messages may be a Future Signal payment screenshot or
+        # Assess User input, so the relay must still see them.
+        message = getattr(event, "message", None)
+        text = getattr(message, "text", "") if message else ""
+        return bool(message and not text.startswith("/"))
+
     async def __call__(self, handler, event, data):
         message = getattr(event, "message", None)
         message_text = getattr(message, "text", "") if message else ""
         if message_text and message_text.lower().split("@", 1)[0].split(" ", 1)[0] == "/start":
+            return await handler(event, data)
+        if not self._needs_relay(event):
             return await handler(event, data)
         secret = os.environ.get("SESSION_SECRET", "")
         if secret:
@@ -59,7 +85,9 @@ class FutureSignalRelayMiddleware(BaseMiddleware):
                     exclude_none=True,
                     by_alias=True,
                 )
-                async with httpx.AsyncClient(timeout=90.0) as client:
+                # The relay is local. Never let a stalled add-on hold Home,
+                # Back, or Future navigation for more than a brief moment.
+                async with httpx.AsyncClient(timeout=1.5) as client:
                     response = await client.post(
                         self.endpoint,
                         json=payload,

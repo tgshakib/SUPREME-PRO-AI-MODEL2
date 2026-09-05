@@ -276,7 +276,7 @@ def _members_access_view():
         )],
         [InlineKeyboardButton(
             text="⬅️ BACK TO ADMIN",
-            callback_data="adm:panel",
+            callback_data="adm:open",
         )],
     ])
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
