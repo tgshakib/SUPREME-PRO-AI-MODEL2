@@ -25,12 +25,14 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS access (
-            user_id      INTEGER PRIMARY KEY,
+            user_id      INTEGER NOT NULL,
+            scope        TEXT NOT NULL,
             access_type  TEXT NOT NULL,         -- 'temporary' | 'lifetime'
             package_id   TEXT,
             package_label TEXT,
             granted_at   TEXT DEFAULT (datetime('now')),
-            expires_at   TEXT
+            expires_at   TEXT,
+            PRIMARY KEY (user_id, scope)
         );
 
         CREATE TABLE IF NOT EXISTS payments (
@@ -276,6 +278,54 @@ def init_db():
             broker_confirmed INTEGER DEFAULT 0
         );
         """)
+
+        # Migration: one user may hold Binary and Forex access independently.
+        try:
+            access_cols = [
+                r["name"] for r in
+                conn.execute("PRAGMA table_info(access)").fetchall()
+            ]
+            if "scope" not in access_cols:
+                legacy_rows = conn.execute("SELECT * FROM access").fetchall()
+                conn.execute("ALTER TABLE access RENAME TO access_legacy")
+                conn.execute(
+                    "CREATE TABLE access ("
+                    "user_id INTEGER NOT NULL, scope TEXT NOT NULL, "
+                    "access_type TEXT NOT NULL, package_id TEXT, "
+                    "package_label TEXT, "
+                    "granted_at TEXT DEFAULT (datetime('now')), "
+                    "expires_at TEXT, PRIMARY KEY(user_id, scope))"
+                )
+                for row in legacy_rows:
+                    item = dict(row)
+                    package_id = str(item.get("package_id") or "").lower()
+                    if package_id.startswith(("gz_", "admin_forex_")):
+                        scopes = ("forex",)
+                    elif package_id.startswith(
+                        ("mtg_", "nmg_", "admin_binary_")
+                    ):
+                        scopes = ("binary",)
+                    elif package_id.startswith("admin_"):
+                        scopes = ("binary", "forex")
+                    else:
+                        scopes = ("binary", "forex")
+                    for scope in scopes:
+                        conn.execute(
+                            "INSERT INTO access("
+                            "user_id, scope, access_type, package_id, "
+                            "package_label, granted_at, expires_at"
+                            ") VALUES(?,?,?,?,?,?,?)",
+                            (
+                                item["user_id"], scope, item["access_type"],
+                                item.get("package_id"),
+                                item.get("package_label"),
+                                item.get("granted_at"),
+                                item.get("expires_at"),
+                            ),
+                        )
+                conn.execute("DROP TABLE access_legacy")
+        except Exception as _e:
+            print(f"⚠️  access scope migration skipped: {_e}")
         # Migration: ensure 'tz' column exists on legacy users tables.
         try:
             cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
@@ -705,103 +755,163 @@ def clear_forex_signal_message_ids(signal_ids: list[int]):
 
 
 # ── Access ────────────────────────────────────────────────
+def _scope_for_package(package_id: str) -> str:
+    package_id = str(package_id or "").lower()
+    if package_id.startswith(("gz_", "admin_forex_")):
+        return "forex"
+    return "binary"
+
+
+def _package_supports_scope(package_id: str, scope: str) -> bool:
+    package_id = str(package_id or "").lower()
+    if package_id.startswith(("gz_", "admin_forex_")):
+        return scope == "forex"
+    if package_id.startswith(("mtg_", "nmg_", "admin_binary_")):
+        return scope == "binary"
+    return package_id.startswith("admin_") or not package_id
+
+
 def grant_access(user_id: int, access_type: str, days: int,
-                 package_id: str = "", package_label: str = ""):
+                 package_id: str = "", package_label: str = "",
+                 scope: Optional[str] = None):
     expires_at = None
     if access_type == "temporary" and days > 0:
         expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+    scope = scope or _scope_for_package(package_id)
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO access(user_id, access_type, package_id, package_label, expires_at) "
-            "VALUES(?,?,?,?,?) "
-            "ON CONFLICT(user_id) DO UPDATE SET "
+            "INSERT INTO access(user_id, scope, access_type, package_id, package_label, expires_at) "
+            "VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(user_id, scope) DO UPDATE SET "
             "access_type=excluded.access_type, "
             "package_id=excluded.package_id, "
             "package_label=excluded.package_label, "
             "granted_at=datetime('now'), "
             "expires_at=excluded.expires_at",
-            (user_id, access_type, package_id, package_label, expires_at),
+            (user_id, scope, access_type, package_id, package_label, expires_at),
         )
 
 
 def grant_access_delta(user_id: int, access_type: str,
                        delta: Optional[timedelta],
                        package_id: str = "",
-                       package_label: str = ""):
+                       package_label: str = "",
+                       scope: Optional[str] = None):
     """Grant access by arbitrary timedelta (minutes/hours/days/months).
     For lifetime, pass delta=None and access_type='lifetime'."""
     expires_at = None
     if access_type == "temporary" and delta is not None:
         expires_at = (datetime.utcnow() + delta).isoformat()
+    scope = scope or _scope_for_package(package_id)
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO access(user_id, access_type, package_id, package_label, expires_at) "
-            "VALUES(?,?,?,?,?) "
-            "ON CONFLICT(user_id) DO UPDATE SET "
+            "INSERT INTO access(user_id, scope, access_type, package_id, package_label, expires_at) "
+            "VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(user_id, scope) DO UPDATE SET "
             "access_type=excluded.access_type, "
             "package_id=excluded.package_id, "
             "package_label=excluded.package_label, "
             "granted_at=datetime('now'), "
             "expires_at=excluded.expires_at",
-            (user_id, access_type, package_id, package_label, expires_at),
+            (user_id, scope, access_type, package_id, package_label, expires_at),
         )
 
 
-def revoke_access(user_id: int):
+def revoke_access(user_id: int, scope: Optional[str] = None):
     with get_conn() as conn:
-        conn.execute("DELETE FROM access WHERE user_id=?", (user_id,))
-        conn.execute("DELETE FROM payments WHERE user_id=?", (user_id,))
+        if scope:
+            conn.execute(
+                "DELETE FROM access WHERE user_id=? AND scope=?",
+                (user_id, scope),
+            )
+        else:
+            conn.execute("DELETE FROM access WHERE user_id=?", (user_id,))
 
 
 def get_access(user_id: int) -> Optional[Dict]:
+    rows = get_accesses(user_id)
+    if not rows:
+        return None
+    active = [row for row in rows if _access_row_active(row)]
+    return (active or rows)[0]
+
+
+def get_accesses(user_id: int) -> List[Dict]:
     with get_conn() as conn:
-        row = conn.execute("SELECT * FROM access WHERE user_id=?", (user_id,)).fetchone()
-        return dict(row) if row else None
+        rows = conn.execute(
+            "SELECT * FROM access WHERE user_id=? ORDER BY granted_at DESC",
+            (user_id,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            if "scope" not in item:
+                item["scope"] = _scope_for_package(item.get("package_id") or "")
+            result.append(item)
+        return result
 
 
-def has_active_access(user_id: int) -> bool:
-    a = get_access(user_id)
-    if not a:
-        return False
-    if a["access_type"] == "lifetime":
-        return True
-    if a["expires_at"]:
+def get_product_access(user_id: int, scope: str) -> Optional[Dict]:
+    with get_conn() as conn:
         try:
-            return datetime.fromisoformat(a["expires_at"]) > datetime.utcnow()
+            row = conn.execute(
+                "SELECT * FROM access WHERE user_id=? AND scope=?",
+                (user_id, scope),
+            ).fetchone()
+            return dict(row) if row else None
+        except sqlite3.OperationalError as exc:
+            if "no such column: scope" not in str(exc):
+                raise
+            row = conn.execute(
+                "SELECT * FROM access WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            if not _package_supports_scope(item.get("package_id") or "", scope):
+                return None
+            item["scope"] = scope
+            return item
+
+
+def _access_row_active(access: Dict) -> bool:
+    if access.get("access_type") == "lifetime":
+        return True
+    expires_at = access.get("expires_at")
+    if expires_at:
+        try:
+            return datetime.fromisoformat(expires_at) > datetime.utcnow()
         except Exception:
             return False
     return False
 
 
-def _active_package_id(user_id: int) -> str:
-    if not has_active_access(user_id):
+def has_active_access(user_id: int) -> bool:
+    return any(_access_row_active(row) for row in get_accesses(user_id))
+
+
+def _active_package_id(user_id: int, scope: str) -> str:
+    access = get_product_access(user_id, scope)
+    if not access or not _access_row_active(access):
         return ""
-    return str((get_access(user_id) or {}).get("package_id") or "").lower()
+    return str(access.get("package_id") or "").lower()
 
 
 def has_binary_access(user_id: int) -> bool:
-    package_id = _active_package_id(user_id)
-    if not package_id:
-        return False
-    return package_id.startswith(("mtg_", "nmg_", "admin_binary_")) or (
-        package_id.startswith("admin_") and not package_id.startswith("admin_forex_")
-    )
+    access = get_product_access(user_id, "binary")
+    return bool(access and _access_row_active(access))
 
 
 def has_forex_access(user_id: int) -> bool:
-    package_id = _active_package_id(user_id)
-    if not package_id:
-        return False
-    return package_id.startswith(("gz_", "admin_forex_")) or (
-        package_id.startswith("admin_")
-        and not package_id.startswith(("admin_binary_", "admin_forex_"))
-    )
+    access = get_product_access(user_id, "forex")
+    return bool(access and _access_row_active(access))
 
 
 def get_binary_access_mode(user_id: int) -> Optional[str]:
     if not has_binary_access(user_id):
         return None
-    package_id = _active_package_id(user_id)
+    package_id = _active_package_id(user_id, "binary")
     if package_id.startswith(("nmg_", "admin_binary_nonmtg_")):
         return "nonmtg"
     if package_id.startswith(("mtg_", "admin_binary_mtg_")):
@@ -812,7 +922,7 @@ def get_binary_access_mode(user_id: int) -> Optional[str]:
 def list_access() -> List[Dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT a.*, u.username, u.full_name FROM access a "
+            "SELECT a.*, u.username, u.full_name, u.joined_at FROM access a "
             "LEFT JOIN users u ON u.user_id=a.user_id "
             "ORDER BY a.granted_at DESC"
         ).fetchall()
@@ -824,7 +934,7 @@ def list_active_access() -> List[Dict]:
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT a.*, u.username, u.full_name FROM access a "
+            "SELECT a.*, u.username, u.full_name, u.joined_at FROM access a "
             "LEFT JOIN users u ON u.user_id=a.user_id "
             "WHERE a.access_type='lifetime' "
             "   OR (a.access_type='temporary' AND a.expires_at > ?) "
@@ -1264,11 +1374,11 @@ def stats() -> Dict[str, int]:
     with get_conn() as conn:
         total_users = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
         active_temp = conn.execute(
-            "SELECT COUNT(*) AS c FROM access WHERE access_type='temporary' "
+            "SELECT COUNT(DISTINCT user_id) AS c FROM access WHERE access_type='temporary' "
             "AND expires_at > datetime('now')"
         ).fetchone()["c"]
         lifetime = conn.execute(
-            "SELECT COUNT(*) AS c FROM access WHERE access_type='lifetime'"
+            "SELECT COUNT(DISTINCT user_id) AS c FROM access WHERE access_type='lifetime'"
         ).fetchone()["c"]
         pending = conn.execute(
             "SELECT COUNT(*) AS c FROM payments WHERE status='pending'"

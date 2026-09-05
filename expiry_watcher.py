@@ -39,7 +39,7 @@ async def _cleanup_pinned_card(bot: Bot, user_id: int):
 
 
 async def run_expiry_watcher(bot: Bot, interval_seconds: int = 600):
-    notified: set[int] = set()
+    notified: set[tuple[int, str]] = set()
     while True:
         try:
             now = datetime.utcnow()
@@ -53,17 +53,17 @@ async def run_expiry_watcher(bot: Bot, interval_seconds: int = 600):
                 except Exception:
                     continue
                 uid = row["user_id"]
+                scope = str(row.get("scope") or "binary")
+                access_key = (uid, scope)
                 # If access was renewed (new expires_at in the future),
                 # forget the prior notification so re-expiry fires cleanup
                 # again.
-                if exp > now and uid in notified:
-                    notified.discard(uid)
-                if exp <= now and uid not in notified:
-                    # Unpin & delete the pinned welcome card first so the
-                    # chat doesn't keep showing 'Account active' after expiry.
-                    await _cleanup_pinned_card(bot, uid)
-                    # Remove their access + payment history from admin records
-                    db.revoke_access(uid)
+                if exp > now and access_key in notified:
+                    notified.discard(access_key)
+                if exp <= now and access_key not in notified:
+                    db.revoke_access(uid, scope=scope)
+                    if not db.has_active_access(uid):
+                        await _cleanup_pinned_card(bot, uid)
                     try:
                         await bot.send_message(
                             uid,
@@ -74,7 +74,7 @@ async def run_expiry_watcher(bot: Bot, interval_seconds: int = 600):
                         )
                     except Exception:
                         pass
-                    notified.add(uid)
+                    notified.add(access_key)
         except Exception as e:
             print(f"[expiry_watcher] error: {e}")
         await asyncio.sleep(interval_seconds)

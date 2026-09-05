@@ -299,11 +299,8 @@ def _mtg_label(user_id: Optional[int]) -> str:
     if user_id is None:
         return "<b>1 Step Required</b>"
     try:
-        if db.has_active_access(user_id):
-            access = db.get_access(user_id)
-            pkg_id = (access or {}).get("package_id") or ""
-            if pkg_id.startswith("nmg_"):
-                return "<b>NON MARTINGALE</b>"
+        if db.get_binary_access_mode(user_id) == "nonmtg":
+            return "<b>NON MARTINGALE</b>"
     except Exception:
         pass
     return "<b>1 Step Required</b>"
@@ -543,7 +540,10 @@ def _legacy_binary_card(
 
     grade = _grade_label(user_id)
     mtg = _mtg_label(user_id)
-    is_non_mtg = mtg.strip().endswith("NON MTG</b>")
+    is_non_mtg = (
+        user_id is not None
+        and db.get_binary_access_mode(user_id) == "nonmtg"
+    )
     if user_id is not None:
         now_str = next_candle_time_for_user(user_id)
     else:
@@ -2193,7 +2193,10 @@ def generate_signal(
 
     grade = _grade_label(user_id)
     mtg = _mtg_label(user_id)
-    is_non_mtg = mtg.strip().endswith("NON MTG</b>")
+    is_non_mtg = (
+        user_id is not None
+        and db.get_binary_access_mode(user_id) == "nonmtg"
+    )
 
     # ── Build AI stack + mastermind lines ─────────────────────
     mm_lines = ""

@@ -166,19 +166,60 @@ async def cb_list_access(call: CallbackQuery):
     if not rows:
         text = "📋 <b>MEMBERS WITH ACCESS</b>\n\nNo active members."
     else:
-        lines = ["📋 <b>MEMBERS WITH ACCESS</b>", "━━━━━━━━━━━━━━━━━━━"]
-        for r in rows[:50]:
-            uname = f"@{r['username']}" if r.get("username") else "(no username)"
-            if r["access_type"] == "lifetime":
-                tag = "♾️ LIFETIME"
-            else:
-                tag = f"⏳ until {r['expires_at'][:16].replace('T',' ')} UTC"
-            lines.append(
-                f"• {uname}  <code>{r['user_id']}</code>\n"
-                f"   {r.get('package_label') or '-'}  ·  {tag}"
+        grouped = {}
+        for row in rows:
+            grouped.setdefault(int(row["user_id"]), []).append(row)
+        lines = [
+            "📋 <b>MEMBERS WITH ACCESS</b>",
+            "━━━━━━━━━━━━━━━━━━━",
+            f"👥 Active members: <b>{len(grouped)}</b>",
+            f"🔐 Active subscriptions: <b>{len(rows)}</b>",
+        ]
+        shown = 0
+        for uid, grants in grouped.items():
+            if shown >= 8:
+                break
+            first = grants[0]
+            username = (
+                f"@{first['username']}" if first.get("username")
+                else "(no username)"
             )
-        if len(rows) > 50:
-            lines.append(f"\n…and {len(rows) - 50} more.")
+            full_name = first.get("full_name") or "Name unavailable"
+            joined = (
+                str(first.get("joined_at") or "")[:10] or "Unknown"
+            )
+            lines.extend([
+                "",
+                "━━━━━━━━━━━━━━━━━━━",
+                f"👤 <b>{full_name}</b>",
+                f"🔗 {username}",
+                f"🆔 <code>{uid}</code>",
+                f"📅 Joined: <b>{joined}</b>",
+            ])
+            for grant in sorted(grants, key=lambda r: r.get("scope") or ""):
+                package_id = str(grant.get("package_id") or "").lower()
+                if grant.get("scope") == "forex":
+                    product = "💹 FOREX + FUNDED PASS"
+                elif "nonmtg" in package_id or package_id.startswith("nmg_"):
+                    product = "📊 BINARY · NON-MTG"
+                else:
+                    product = "📊 BINARY · MTG"
+                granted = str(grant.get("granted_at") or "")[:16].replace("T", " ")
+                if grant["access_type"] == "lifetime":
+                    expiry = "♾️ LIFETIME"
+                else:
+                    end = str(grant.get("expires_at") or "")[:16].replace("T", " ")
+                    expiry = f"⏳ Expires: {end} UTC"
+                lines.extend([
+                    "",
+                    f"<b>{product}</b>",
+                    f"   🧾 {grant.get('package_label') or '-'}",
+                    f"   ✅ Granted: {granted} UTC",
+                    f"   {expiry}",
+                ])
+            shown += 1
+        if len(grouped) > shown:
+            lines.append(f"\n…and {len(grouped) - shown} more members.")
         text = "\n".join(lines)
     await call.answer()
     await show_screen(call.bot, call.message.chat.id, text, admin_back_kb())
