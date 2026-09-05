@@ -50,7 +50,11 @@ class FutureSignalRelayMiddleware(BaseMiddleware):
         secret = os.environ.get("SESSION_SECRET", "")
         if secret:
             try:
-                payload = event.model_dump(mode="json", exclude_none=True)
+                payload = event.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                    by_alias=True,
+                )
                 async with httpx.AsyncClient(timeout=90.0) as client:
                     response = await client.post(
                         self.endpoint,

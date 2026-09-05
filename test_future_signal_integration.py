@@ -9,8 +9,10 @@ from middleware import FutureSignalRelayMiddleware
 class _Event:
     def __init__(self, payload):
         self.payload = payload
+        self.dump_kwargs = None
 
-    def model_dump(self, **_kwargs):
+    def model_dump(self, **kwargs):
+        self.dump_kwargs = kwargs
         return self.payload
 
 
@@ -55,6 +57,7 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         handler = AsyncMock(return_value="handled")
         middleware = FutureSignalRelayMiddleware()
 
+        event = _Event(payload)
         with (
             patch.dict(os.environ, {"SESSION_SECRET": "relay-test-secret"}),
             patch(
@@ -62,9 +65,10 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 return_value=_Client(post),
             ),
         ):
-            result = await middleware(handler, _Event(payload), {})
+            result = await middleware(handler, event, {})
 
         self.assertEqual(result, "handled")
+        self.assertTrue(event.dump_kwargs["by_alias"])
         post.assert_awaited_once()
         self.assertEqual(post.await_args.kwargs["json"], payload)
         self.assertEqual(
