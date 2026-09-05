@@ -1,4 +1,4 @@
-modules = ["python-3.12"]
+modules = ["python-3.12", "nodejs-24"]
 [nix]
 channel = "stable-25_05"
 packages = ["cacert", "glibcLocales"]
@@ -18,6 +18,10 @@ author = "agent"
 task = "workflow.run"
 args = "Start application"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Future Signal Relay"
+
 [[workflows.workflow]]
 name = "Start application"
 author = "agent"
@@ -25,6 +29,18 @@ author = "agent"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python bot.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Future Signal Relay"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python future_signal_addon/relay_launcher.py"
+waitForPort = 3001
 
 [workflows.workflow.metadata]
 outputType = "console"
@@ -46,6 +62,10 @@ PO_PASSWORD = "tgshakib012@g"
 PO_SSID = "g.a000-Ai13jQkQYD2vmUfrl1__ykff4-QQiOqs6vH3QY6NCDqJsjyyW5gw61CrJei5KRzT8h1rwACgYKAXESARQSFQHGX2MidDQ1Nyi9mQ0B9CaMyNyTdhoVAUF8yKqW_DYkz9SHvUGWIEH008bP0076"
 QUOTEX_EMAIL = "hosnaranupur@gmail.com"
 QUOTEX_PASSWORD = "hosnaranupur@"
+
+[[ports]]
+localPort = 3001
+externalPort = 3001
 
 [[ports]]
 localPort = 8080

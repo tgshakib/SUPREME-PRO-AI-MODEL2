@@ -34,6 +34,10 @@ def main_menu_kb(is_admin: bool = False,
             callback_data="fx:active_view",
         )])
     rows += [
+        [InlineKeyboardButton(
+            text="🔮 FUTURE SIGNAL • TG",
+            callback_data="tgadv:futuresignal",
+        )],
         [InlineKeyboardButton(text="📊 BINARY TRADING",  callback_data="m:binary"),
          InlineKeyboardButton(text="💹 FOREX TRADING",   callback_data="m:forex")],
         [InlineKeyboardButton(text="🏛 FUNDED PASS",     callback_data="m:fp"),

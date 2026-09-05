@@ -38,7 +38,10 @@ from expiry_watcher import run_expiry_watcher
 from forex_engine import run_signal_loop
 from handlers.funded_pass import run_funded_pass_loop
 from handlers.admin import run_mailing_purge_loop
-from middleware import AntiSpamMiddleware, UpdateDedupMiddleware, start_cleanup
+from middleware import (
+    AntiSpamMiddleware, FutureSignalRelayMiddleware,
+    UpdateDedupMiddleware, start_cleanup,
+)
 try:
     from self_improve import recover_pending_outcomes as _si_recover
     _SI_OK = True
@@ -85,6 +88,7 @@ async def main():
     # AntiSpamMiddleware handles per-user cooldown + per-callback dedup +
     # per-user async lock so only one request runs at a time per user.
     dp.update.outer_middleware(UpdateDedupMiddleware())
+    dp.update.outer_middleware(FutureSignalRelayMiddleware())
     dp.callback_query.middleware(AntiSpamMiddleware())
     start_cleanup()   # schedules background set-flush every 60 s
 
@@ -172,6 +176,7 @@ async def main():
     from aiogram.types import BotCommand
     await bot.set_my_commands([
         BotCommand(command="start",  description="▶️ Start bot & open menu"),
+        BotCommand(command="tgfuturesignal", description="🔮 Open Future Signal TG"),
         BotCommand(command="admin",  description="📩 Contact admin for help"),
         BotCommand(command="checkprice", description="Check authenticated Quotex feed"),
     ])

@@ -24,11 +24,47 @@ message. The "loading" spinner is cleared by the answer() call.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import time
 from collections import defaultdict
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class FutureSignalRelayMiddleware(BaseMiddleware):
+    """Mirror inbound updates to the integrated Telegraf add-on.
+
+    Aiogram remains the sole Telegram poller. The local TypeScript service
+    receives the untouched update and owns only its Future Signal handlers.
+    """
+
+    def __init__(self, endpoint: str = "http://127.0.0.1:3001/api/internal/telegram-update"):
+        self.endpoint = endpoint
+
+    async def __call__(self, handler, event, data):
+        secret = os.environ.get("SESSION_SECRET", "")
+        if secret:
+            try:
+                payload = event.model_dump(mode="json", exclude_none=True)
+                async with httpx.AsyncClient(timeout=90.0) as client:
+                    response = await client.post(
+                        self.endpoint,
+                        json=payload,
+                        headers={"x-future-relay-secret": secret},
+                    )
+                if response.status_code >= 500:
+                    logger.warning(
+                        "Future Signal relay returned HTTP %s",
+                        response.status_code,
+                    )
+            except Exception as exc:
+                logger.warning("Future Signal relay unavailable: %s", exc)
+        return await handler(event, data)
 from aiogram.types import CallbackQuery, Update
 
 
