@@ -38921,6 +38921,8 @@ var STRATEGIES = [
   }
 ];
 var DEFAULT_STRATEGY = STRATEGIES[0];
+var LIVE_DEFAULT_STRATEGY = STRATEGIES.find((s) => s.id === "trendpulse");
+var OTC_DEFAULT_STRATEGY = STRATEGIES.find((s) => s.id === "dualmarket");
 var AUTO_DELETE_OPTIONS = [
   { label: "10s", seconds: 10 },
   { label: "30s", seconds: 30 },
@@ -39225,12 +39227,13 @@ or Join our VIP to get <b>Free Advance Signals</b>.`;
 var PAYWALL_KB = import_telegraf.Markup.inlineKeyboard([
   [import_telegraf.Markup.button.url("\u{1F4AC} CHAT WITH ADMIN", ADMIN_CHAT_URL)],
   [import_telegraf.Markup.button.callback("\u{1F4B3} ACCESS BUY", "access_buy")],
-  [import_telegraf.Markup.button.url("\u2B50 VIP AUTO JOIN", "https://t.me/managementTG_bot")]
+  [import_telegraf.Markup.button.url("\u2B50 VIP AUTO JOIN", "https://t.me/managementTG_bot")],
+  [import_telegraf.Markup.button.callback("\u{1F3E2} BACK TO MAIN HOME", "m:home")]
 ]);
 var EXPIRY_WARNING_KB = import_telegraf.Markup.inlineKeyboard([
   [import_telegraf.Markup.button.callback("\u{1F4B3} Get Access Now", "access_buy")],
   [import_telegraf.Markup.button.url("\u{1F4AC} Chat with Admin", ADMIN_CHAT_URL)],
-  [import_telegraf.Markup.button.callback("\u{1F519} Back", "back_to_menu_reply")]
+  [import_telegraf.Markup.button.callback("\u{1F3E2} Back to Main Home", "m:home")]
 ]);
 function buildPriceListText() {
   return `\u{1F48E} <b>Subscription Plans \u2014 Future Signal</b>
@@ -39357,7 +39360,7 @@ function buildMarketKeyboard(userId) {
       import_telegraf.Markup.button.callback("\u{1F3E6} Olymp Trade OTC", "market_olymp")
     ],
     ...isAdmin(userId) ? [[import_telegraf.Markup.button.callback("\u{1F451} ASSESS USER", "assess_users")]] : [],
-    [import_telegraf.Markup.button.callback("\u{1F519} Back", "back_to_menu")]
+    [import_telegraf.Markup.button.callback("\u{1F3E2} Back to Main Home", "m:home")]
   ];
   return import_telegraf.Markup.inlineKeyboard(rows);
 }
@@ -39617,6 +39620,27 @@ function buildBot() {
     if (INTEGRATED_RELAY && ctx.message && "text" in ctx.message && /^\/start(?:@\w+)?(?:\s|$)/i.test(ctx.message.text)) {
       return;
     }
+    if (query && "data" in query) {
+      const data = query.data;
+      const protectedFutureAction = /^(market_|back_to_market$|asset_|assets_done$|back_to_assets$|setdir_|sigcount_|go_home$|settings_|back_to_settings_hub$|tf_|tz_|strategy_|autodel_|assess_)/.test(data);
+      const uid = ctx.from?.id ?? 0;
+      if (protectedFutureAction && !hasAccess(uid)) {
+        await ctx.answerCbQuery(
+          "\u{1F512} Future Signal access expired. Renew to continue."
+        ).catch(() => {
+        });
+        ctx.session.state = "idle";
+        try {
+          await ctx.editMessageText(
+            PAYWALL_TEXT,
+            { parse_mode: "HTML", ...PAYWALL_KB }
+          );
+        } catch {
+          await ctx.reply(PAYWALL_TEXT, { parse_mode: "HTML", ...PAYWALL_KB });
+        }
+        return;
+      }
+    }
     return next();
   });
   async function sendMainMenu(ctx) {
@@ -39786,6 +39810,10 @@ ${lines.join("\n")}`, { parse_mode: "HTML" });
     const canEditText = Boolean(
       callbackMessage && !("photo" in callbackMessage)
     );
+    if (!canEditText) {
+      await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {
+      });
+    }
     if (!hasAccess(uid)) {
       await showPaywall(ctx, canEditText);
       return;
@@ -39882,6 +39910,7 @@ and send it here as a <b>photo</b>.
       await ctx.answerCbQuery();
       ctx.session.market = m;
       ctx.session.selectedAssets = [];
+      ctx.session.settings.strategy = m === "real" ? LIVE_DEFAULT_STRATEGY : OTC_DEFAULT_STRATEGY;
       await showAssets(ctx, true);
     });
   }
@@ -40200,7 +40229,7 @@ Choose signals per pair:`,
 \u23F1 <i>Auto-deleting in ${delLabel}\u2026</i>`,
       {
         parse_mode: "HTML",
-        ...import_telegraf.Markup.inlineKeyboard([[import_telegraf.Markup.button.callback("\u{1F3E0} Home", "go_home")]])
+        ...import_telegraf.Markup.inlineKeyboard([[import_telegraf.Markup.button.callback("\u{1F3E2} Main Home", "m:home")]])
       }
     );
     ctx.session.pendingDeleteIds = deleteMsgIds;

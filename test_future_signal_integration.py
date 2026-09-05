@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from keyboards import main_menu_kb
@@ -44,6 +45,30 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(match), 1)
         self.assertEqual(match[0].callback_data, "tgadv:futuresignal")
+
+    def test_future_signal_navigation_defaults_and_access_guard(self):
+        source = Path("future_signal_addon/src/bot.ts").read_text()
+        self.assertIn(
+            'LIVE_DEFAULT_STRATEGY = STRATEGIES.find(s => s.id === "trendpulse")',
+            source,
+        )
+        self.assertIn(
+            'OTC_DEFAULT_STRATEGY  = STRATEGIES.find(s => s.id === "dualmarket")',
+            source,
+        )
+        self.assertIn(
+            'm === "real" ? LIVE_DEFAULT_STRATEGY : OTC_DEFAULT_STRATEGY',
+            source,
+        )
+        self.assertIn("protectedFutureAction && !hasAccess(uid)", source)
+        self.assertIn(
+            "editMessageReplyMarkup({ inline_keyboard: [] })",
+            source,
+        )
+        self.assertIn(
+            'Markup.button.callback("🏢 Back to Main Home", "m:home")',
+            source,
+        )
 
     async def test_relay_forwards_the_untouched_update(self):
         payload = {

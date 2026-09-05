@@ -143,6 +143,8 @@ const STRATEGIES: Strategy[] = [
 ];
 
 const DEFAULT_STRATEGY = STRATEGIES[0]!;
+const LIVE_DEFAULT_STRATEGY = STRATEGIES.find(s => s.id === "trendpulse")!;
+const OTC_DEFAULT_STRATEGY  = STRATEGIES.find(s => s.id === "dualmarket")!;
 
 // ─── Auto-Delete Options ───────────────────────────────────────────────────────
 
@@ -682,12 +684,13 @@ const PAYWALL_KB = Markup.inlineKeyboard([
   [Markup.button.url("💬 CHAT WITH ADMIN",      ADMIN_CHAT_URL)],
   [Markup.button.callback("💳 ACCESS BUY",       "access_buy")],
   [Markup.button.url("⭐ VIP AUTO JOIN",         "https://t.me/managementTG_bot")],
+  [Markup.button.callback("🏢 BACK TO MAIN HOME", "m:home")],
 ]);
 
 const EXPIRY_WARNING_KB = Markup.inlineKeyboard([
   [Markup.button.callback("💳 Get Access Now", "access_buy")],
   [Markup.button.url("💬 Chat with Admin",  ADMIN_CHAT_URL)],
-  [Markup.button.callback("🔙 Back",         "back_to_menu_reply")],
+  [Markup.button.callback("🏢 Back to Main Home", "m:home")],
 ]);
 
 // ─── Package keyboards / text ─────────────────────────────────────────────────
@@ -833,7 +836,7 @@ function buildMarketKeyboard(userId: number): ReturnType<typeof Markup.inlineKey
       Markup.button.callback("🏦 Olymp Trade OTC",   "market_olymp"),
     ],
     ...(isAdmin(userId) ? [[Markup.button.callback("👑 ASSESS USER", "assess_users")]] : []),
-    [Markup.button.callback("🔙 Back", "back_to_menu")],
+    [Markup.button.callback("🏢 Back to Main Home", "m:home")],
   ];
   return Markup.inlineKeyboard(rows);
 }
@@ -1138,6 +1141,27 @@ function buildBot(): Telegraf<MyContext> {
     ) {
       return;
     }
+    if (query && "data" in query) {
+      const data = query.data;
+      const protectedFutureAction =
+        /^(market_|back_to_market$|asset_|assets_done$|back_to_assets$|setdir_|sigcount_|go_home$|settings_|back_to_settings_hub$|tf_|tz_|strategy_|autodel_|assess_)/.test(data);
+      const uid = ctx.from?.id ?? 0;
+      if (protectedFutureAction && !hasAccess(uid)) {
+        await ctx.answerCbQuery(
+          "🔒 Future Signal access expired. Renew to continue.",
+        ).catch(() => {});
+        ctx.session.state = "idle";
+        try {
+          await ctx.editMessageText(
+            PAYWALL_TEXT,
+            { parse_mode: "HTML", ...PAYWALL_KB },
+          );
+        } catch {
+          await ctx.reply(PAYWALL_TEXT, { parse_mode: "HTML", ...PAYWALL_KB });
+        }
+        return;
+      }
+    }
     return next();
   });
 
@@ -1316,6 +1340,9 @@ function buildBot(): Telegraf<MyContext> {
     const canEditText = Boolean(
       callbackMessage && !("photo" in callbackMessage),
     );
+    if (!canEditText) {
+      await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+    }
     if (!hasAccess(uid)) {
       await showPaywall(ctx, canEditText);
       return;
@@ -1424,6 +1451,8 @@ function buildBot(): Telegraf<MyContext> {
       await ctx.answerCbQuery();
       ctx.session.market = m;
       ctx.session.selectedAssets = [];
+      ctx.session.settings.strategy =
+        m === "real" ? LIVE_DEFAULT_STRATEGY : OTC_DEFAULT_STRATEGY;
       await showAssets(ctx, true);
     });
   }
@@ -1797,7 +1826,7 @@ function buildBot(): Telegraf<MyContext> {
       `⏱ <i>Auto-deleting in ${delLabel}…</i>`,
       {
         parse_mode: "HTML",
-        ...Markup.inlineKeyboard([[Markup.button.callback("🏠 Home", "go_home")]]),
+        ...Markup.inlineKeyboard([[Markup.button.callback("🏢 Main Home", "m:home")]]),
       },
     );
 
