@@ -1,6 +1,7 @@
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from keyboards import main_menu_kb
@@ -69,6 +70,15 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Input.fromLocalFile(FUTURE_PANEL_IMAGE)",
             source,
         )
+        self.assertNotIn(
+            "{ caption: PAYWALL_TEXT, parse_mode: \"HTML\", ...PAYWALL_KB }",
+            source,
+        )
+        self.assertIn(
+            "await ctx.deleteMessage().catch(() => {});\n"
+            "      await showAssets(ctx, false);",
+            source,
+        )
         self.assertTrue(
             Path("assets/future_signal_panel.png").is_file(),
         )
@@ -128,6 +138,26 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result, "handled")
+        handler.assert_awaited_once()
+
+    async def test_start_command_skips_unneeded_future_relay(self):
+        post = AsyncMock(return_value=_Response())
+        handler = AsyncMock(return_value="handled")
+        middleware = FutureSignalRelayMiddleware()
+        event = _Event({"update_id": 44})
+        event.message = SimpleNamespace(text="/start")
+
+        with (
+            patch.dict(os.environ, {"SESSION_SECRET": "relay-test-secret"}),
+            patch(
+                "middleware.httpx.AsyncClient",
+                return_value=_Client(post),
+            ),
+        ):
+            result = await middleware(handler, event, {})
+
+        self.assertEqual(result, "handled")
+        post.assert_not_awaited()
         handler.assert_awaited_once()
 
 

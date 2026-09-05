@@ -47,6 +47,10 @@ class FutureSignalRelayMiddleware(BaseMiddleware):
         self.endpoint = endpoint
 
     async def __call__(self, handler, event, data):
+        message = getattr(event, "message", None)
+        message_text = getattr(message, "text", "") if message else ""
+        if message_text and message_text.lower().split("@", 1)[0].split(" ", 1)[0] == "/start":
+            return await handler(event, data)
         secret = os.environ.get("SESSION_SECRET", "")
         if secret:
             try:

@@ -39631,13 +39631,18 @@ function buildBot() {
         ).catch(() => {
         });
         ctx.session.state = "idle";
-        try {
+        const callbackMessage = ctx.callbackQuery?.message;
+        if (callbackMessage && "photo" in callbackMessage) {
+          await ctx.deleteMessage().catch(() => {
+          });
+          await ctx.reply(PAYWALL_TEXT, { parse_mode: "HTML", ...PAYWALL_KB });
+        } else {
           await ctx.editMessageText(
             PAYWALL_TEXT,
             { parse_mode: "HTML", ...PAYWALL_KB }
-          );
-        } catch {
-          await ctx.reply(PAYWALL_TEXT, { parse_mode: "HTML", ...PAYWALL_KB });
+          ).catch(async () => {
+            await ctx.reply(PAYWALL_TEXT, { parse_mode: "HTML", ...PAYWALL_KB });
+          });
         }
         return;
       }
@@ -39810,10 +39815,7 @@ ${lines.join("\n")}`, { parse_mode: "HTML" });
     await ctx.deleteMessage().catch(() => {
     });
     if (!hasAccess(uid)) {
-      await ctx.replyWithPhoto(
-        import_telegraf.Input.fromLocalFile(FUTURE_PANEL_IMAGE),
-        { caption: PAYWALL_TEXT, parse_mode: "HTML", ...PAYWALL_KB }
-      );
+      await ctx.reply(PAYWALL_TEXT, { parse_mode: "HTML", ...PAYWALL_KB });
       return;
     }
     const stored = approvalMsgStore.get(uid);
@@ -39845,7 +39847,20 @@ ${lines.join("\n")}`, { parse_mode: "HTML" });
   });
   bot.action("access_buy", async (ctx) => {
     await ctx.answerCbQuery();
-    await ctx.editMessageText(buildPriceListText(), { parse_mode: "HTML", ...buildPriceListKeyboard() });
+    const callbackMessage = ctx.callbackQuery?.message;
+    if (callbackMessage && "photo" in callbackMessage) {
+      await ctx.deleteMessage().catch(() => {
+      });
+      await ctx.reply(
+        buildPriceListText(),
+        { parse_mode: "HTML", ...buildPriceListKeyboard() }
+      );
+    } else {
+      await ctx.editMessageText(
+        buildPriceListText(),
+        { parse_mode: "HTML", ...buildPriceListKeyboard() }
+      );
+    }
   });
   bot.action("paywall_back", async (ctx) => {
     await ctx.answerCbQuery();
@@ -39912,7 +39927,9 @@ and send it here as a <b>photo</b>.
       ctx.session.market = m;
       ctx.session.selectedAssets = [];
       ctx.session.settings.strategy = m === "real" ? LIVE_DEFAULT_STRATEGY : OTC_DEFAULT_STRATEGY;
-      await showAssets(ctx, true);
+      await ctx.deleteMessage().catch(() => {
+      });
+      await showAssets(ctx, false);
     });
   }
   bot.action("back_to_market", async (ctx) => {
