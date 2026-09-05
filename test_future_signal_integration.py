@@ -83,7 +83,16 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
             Path("assets/future_signal_panel.png").is_file(),
         )
         self.assertIn(
-            'Markup.button.callback("🏢 Back to Main Home", "m:home")',
+            'Markup.button.callback("🏢 Home Workplace", "m:home")',
+            source,
+        )
+        self.assertIn('bot.action("m:home"', source)
+        self.assertIn(
+            "userScreenshotMsgId: ctx.message.message_id",
+            source,
+        )
+        self.assertIn(
+            "userPromptMsgId: ctx.session.pendingPaymentPromptMsgId",
             source,
         )
 

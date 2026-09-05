@@ -39229,12 +39229,12 @@ var PAYWALL_KB = import_telegraf.Markup.inlineKeyboard([
   [import_telegraf.Markup.button.url("\u{1F4AC} CHAT WITH ADMIN", ADMIN_CHAT_URL)],
   [import_telegraf.Markup.button.callback("\u{1F4B3} ACCESS BUY", "access_buy")],
   [import_telegraf.Markup.button.url("\u2B50 VIP AUTO JOIN", "https://t.me/managementTG_bot")],
-  [import_telegraf.Markup.button.callback("\u{1F3E2} BACK TO MAIN HOME", "m:home")]
+  [import_telegraf.Markup.button.callback("\u{1F3E2} Home Workplace", "m:home")]
 ]);
 var EXPIRY_WARNING_KB = import_telegraf.Markup.inlineKeyboard([
   [import_telegraf.Markup.button.callback("\u{1F4B3} Get Access Now", "access_buy")],
   [import_telegraf.Markup.button.url("\u{1F4AC} Chat with Admin", ADMIN_CHAT_URL)],
-  [import_telegraf.Markup.button.callback("\u{1F3E2} Back to Main Home", "m:home")]
+  [import_telegraf.Markup.button.callback("\u{1F3E2} Home Workplace", "m:home")]
 ]);
 function buildPriceListText() {
   return `\u{1F48E} <b>Subscription Plans \u2014 Future Signal</b>
@@ -39361,7 +39361,7 @@ function buildMarketKeyboard(userId) {
       import_telegraf.Markup.button.callback("\u{1F3E6} Olymp Trade OTC", "market_olymp")
     ],
     ...isAdmin(userId) ? [[import_telegraf.Markup.button.callback("\u{1F451} ASSESS USER", "assess_users")]] : [],
-    [import_telegraf.Markup.button.callback("\u{1F3E2} Back to Main Home", "m:home")]
+    [import_telegraf.Markup.button.callback("\u{1F3E2} Home Workplace", "m:home")]
   ];
   return import_telegraf.Markup.inlineKeyboard(rows);
 }
@@ -39845,6 +39845,12 @@ ${lines.join("\n")}`, { parse_mode: "HTML" });
     ctx.session.state = "idle";
     await ctx.reply(MAIN_MENU_TEXT, { parse_mode: "HTML", ...MAIN_MENU_KB });
   });
+  bot.action("m:home", async (ctx) => {
+    ctx.session.state = "idle";
+    await clearPendingSignals(ctx);
+    await ctx.deleteMessage().catch(() => {
+    });
+  });
   bot.action("access_buy", async (ctx) => {
     await ctx.answerCbQuery();
     const callbackMessage = ctx.callbackQuery?.message;
@@ -39897,6 +39903,7 @@ ${lines.join("\n")}`, { parse_mode: "HTML" });
     const pkg = getPkg(ctx.match[1]);
     if (!pkg) return;
     ctx.session.pendingPackageId = pkg.id;
+    ctx.session.pendingPaymentPromptMsgId = ctx.callbackQuery?.message?.message_id;
     ctx.session.state = "await_payment_screenshot";
     await ctx.editMessageText(
       `\u{1F4F8} <b>Send Payment Screenshot</b>
@@ -40058,6 +40065,14 @@ you want to grant access to.
       bot.telegram.deleteMessage(payment.chatId, payment.userReviewMsgId).catch(() => {
       });
     }
+    if (payment.userScreenshotMsgId) {
+      bot.telegram.deleteMessage(payment.chatId, payment.userScreenshotMsgId).catch(() => {
+      });
+    }
+    if (payment.userPromptMsgId) {
+      bot.telegram.deleteMessage(payment.chatId, payment.userPromptMsgId).catch(() => {
+      });
+    }
     bot.telegram.sendMessage(payment.userId, buildApprovalWelcomeText(pkg, payment.firstName), { parse_mode: "HTML" }).then((sent) => {
       approvalMsgStore.set(payment.userId, { chatId: payment.chatId, msgId: sent.message_id });
     }).catch(() => {
@@ -40077,6 +40092,14 @@ you want to grant access to.
     pendingPayments.delete(payId);
     if (payment.userReviewMsgId) {
       bot.telegram.deleteMessage(payment.chatId, payment.userReviewMsgId).catch(() => {
+      });
+    }
+    if (payment.userScreenshotMsgId) {
+      bot.telegram.deleteMessage(payment.chatId, payment.userScreenshotMsgId).catch(() => {
+      });
+    }
+    if (payment.userPromptMsgId) {
+      bot.telegram.deleteMessage(payment.chatId, payment.userPromptMsgId).catch(() => {
       });
     }
     bot.telegram.sendMessage(
@@ -40413,8 +40436,11 @@ Choose the access package for this user:`,
         username,
         firstName,
         packageId: pkg.id,
-        chatId: ctx.chat.id
+        chatId: ctx.chat.id,
+        userScreenshotMsgId: ctx.message.message_id,
+        userPromptMsgId: ctx.session.pendingPaymentPromptMsgId
       });
+      ctx.session.pendingPaymentPromptMsgId = void 0;
       const reviewMsg = await ctx.reply(
         `\u23F3 <b>Payment Under Review</b>
 \u2705 Your screenshot has been sent to admin.

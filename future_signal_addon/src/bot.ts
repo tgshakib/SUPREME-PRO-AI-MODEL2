@@ -210,6 +210,8 @@ interface PendingPayment {
   chatId: number;
   adminMsgId?: number;
   userReviewMsgId?: number;  // "⏳ Payment Under Review" message sent to user
+  userScreenshotMsgId?: number;
+  userPromptMsgId?: number;
 }
 
 const pendingPayments = new Map<string, PendingPayment>();
@@ -283,6 +285,7 @@ interface SessionData {
   pendingDeleteIds: number[];
   pendingDeleteChatId?: number;
   pendingPackageId?: string;
+  pendingPaymentPromptMsgId?: number;
   assessTargetId?: number;
   assessTargetUsername?: string;
 }
@@ -685,13 +688,13 @@ const PAYWALL_KB = Markup.inlineKeyboard([
   [Markup.button.url("💬 CHAT WITH ADMIN",      ADMIN_CHAT_URL)],
   [Markup.button.callback("💳 ACCESS BUY",       "access_buy")],
   [Markup.button.url("⭐ VIP AUTO JOIN",         "https://t.me/managementTG_bot")],
-  [Markup.button.callback("🏢 BACK TO MAIN HOME", "m:home")],
+  [Markup.button.callback("🏢 Home Workplace", "m:home")],
 ]);
 
 const EXPIRY_WARNING_KB = Markup.inlineKeyboard([
   [Markup.button.callback("💳 Get Access Now", "access_buy")],
   [Markup.button.url("💬 Chat with Admin",  ADMIN_CHAT_URL)],
-  [Markup.button.callback("🏢 Back to Main Home", "m:home")],
+  [Markup.button.callback("🏢 Home Workplace", "m:home")],
 ]);
 
 // ─── Package keyboards / text ─────────────────────────────────────────────────
@@ -837,7 +840,7 @@ function buildMarketKeyboard(userId: number): ReturnType<typeof Markup.inlineKey
       Markup.button.callback("🏦 Olymp Trade OTC",   "market_olymp"),
     ],
     ...(isAdmin(userId) ? [[Markup.button.callback("👑 ASSESS USER", "assess_users")]] : []),
-    [Markup.button.callback("🏢 Back to Main Home", "m:home")],
+    [Markup.button.callback("🏢 Home Workplace", "m:home")],
   ];
   return Markup.inlineKeyboard(rows);
 }
@@ -1376,6 +1379,14 @@ function buildBot(): Telegraf<MyContext> {
     await ctx.reply(MAIN_MENU_TEXT, { parse_mode: "HTML", ...MAIN_MENU_KB });
   });
 
+  // Python renders the main workplace after relay processing. Remove the
+  // relay-owned Future Signal panel first so it cannot remain above Home.
+  bot.action("m:home", async ctx => {
+    ctx.session.state = "idle";
+    await clearPendingSignals(ctx);
+    await ctx.deleteMessage().catch(() => {});
+  });
+
   bot.action("access_buy", async ctx => {
     await ctx.answerCbQuery();
     const callbackMessage = ctx.callbackQuery?.message;
@@ -1435,6 +1446,8 @@ function buildBot(): Telegraf<MyContext> {
     const pkg = getPkg(ctx.match[1]);
     if (!pkg) return;
     ctx.session.pendingPackageId = pkg.id;
+    ctx.session.pendingPaymentPromptMsgId =
+      ctx.callbackQuery?.message?.message_id;
     ctx.session.state = "await_payment_screenshot";
     await ctx.editMessageText(
       `📸 <b>Send Payment Screenshot</b>\n` +
@@ -1621,6 +1634,14 @@ function buildBot(): Telegraf<MyContext> {
     if (payment.userReviewMsgId) {
       bot.telegram.deleteMessage(payment.chatId, payment.userReviewMsgId).catch(() => {});
     }
+    // Keep the approval message, but remove the user's submitted screenshot
+    // and the earlier "Send Payment Screenshot" prompt for a clean chat.
+    if (payment.userScreenshotMsgId) {
+      bot.telegram.deleteMessage(payment.chatId, payment.userScreenshotMsgId).catch(() => {});
+    }
+    if (payment.userPromptMsgId) {
+      bot.telegram.deleteMessage(payment.chatId, payment.userPromptMsgId).catch(() => {});
+    }
 
     // Send welcome & store its message ID so it can be deleted on next /start or futuresignal tap
     bot.telegram
@@ -1649,6 +1670,12 @@ function buildBot(): Telegraf<MyContext> {
     // Delete user's "Under Review" message
     if (payment.userReviewMsgId) {
       bot.telegram.deleteMessage(payment.chatId, payment.userReviewMsgId).catch(() => {});
+    }
+    if (payment.userScreenshotMsgId) {
+      bot.telegram.deleteMessage(payment.chatId, payment.userScreenshotMsgId).catch(() => {});
+    }
+    if (payment.userPromptMsgId) {
+      bot.telegram.deleteMessage(payment.chatId, payment.userPromptMsgId).catch(() => {});
     }
 
     // Notify user of rejection
@@ -2015,7 +2042,10 @@ function buildBot(): Telegraf<MyContext> {
         firstName,
         packageId: pkg.id,
         chatId: ctx.chat!.id,
+        userScreenshotMsgId: ctx.message.message_id,
+        userPromptMsgId: ctx.session.pendingPaymentPromptMsgId,
       });
+      ctx.session.pendingPaymentPromptMsgId = undefined;
 
       // Confirm to user — store message ID so we can delete it on approve/reject
       const reviewMsg = await ctx.reply(
