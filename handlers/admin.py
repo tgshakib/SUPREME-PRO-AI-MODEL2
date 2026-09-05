@@ -173,11 +173,31 @@ async def cb_list_access(call: CallbackQuery):
 def _members_access_view():
     rows = db.list_active_access()
     admin_id = db.get_admin_id()
-    keyboard_rows = []
+    admin_user = db.get_user(admin_id) or {}
+    admin_name = (
+        admin_user.get("full_name")
+        or admin_user.get("username")
+        or str(admin_id)
+    )
+    admin_button_name = str(admin_name)
+    if len(admin_button_name) > 32:
+        admin_button_name = admin_button_name[:29] + "..."
+    keyboard_rows = [[
+        InlineKeyboardButton(
+            text=admin_button_name,
+            callback_data="adm:member_noop",
+        ),
+        InlineKeyboardButton(
+            text="Admin 👑",
+            callback_data="adm:admin_locked",
+        ),
+    ]]
+    rows = [row for row in rows if int(row["user_id"]) != admin_id]
     if not rows:
         text = (
             "📋 <b>MEMBERS WITH ACCESS</b>\n"
-            f"🔒 <code>{admin_id}</code> — <b>Admin</b> <i>(LOCKED)</i>\n\n"
+            f"👑 <b>{html.escape(str(admin_name))}</b>  "
+            f"<code>{admin_id}</code> — <b>Admin</b>\n\n"
             "<i>No active members.</i>"
         )
     else:
@@ -186,7 +206,8 @@ def _members_access_view():
             grouped.setdefault(int(row["user_id"]), []).append(row)
         lines = [
             "📋 <b>MEMBERS WITH ACCESS</b>",
-            f"🔒 <code>{admin_id}</code> — <b>Admin</b> <i>(LOCKED)</i>",
+            f"👑 <b>{html.escape(str(admin_name))}</b>  "
+            f"<code>{admin_id}</code> — <b>Admin</b>",
             "",
         ]
         shown = 0
@@ -266,6 +287,13 @@ async def cb_member_noop(call: CallbackQuery):
     if not _is_admin(call.from_user.id):
         await call.answer(); return
     await call.answer("User access information")
+
+
+@router.callback_query(F.data == "adm:admin_locked")
+async def cb_admin_locked(call: CallbackQuery):
+    if not _is_admin(call.from_user.id):
+        await call.answer(); return
+    await call.answer("👑 Admin access is permanent and cannot be removed.")
 
 
 @router.callback_query(F.data.startswith("adm:remove_direct:"))

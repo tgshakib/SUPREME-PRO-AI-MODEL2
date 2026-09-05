@@ -1,10 +1,11 @@
-import { Telegraf, Markup, session } from "telegraf";
+import { Telegraf, Markup, session, Input } from "telegraf";
 import { logger } from "./lib/logger";
 import { adapters, initAdapters, analyseWithDualTF, analyseWithTripleTF } from "./lib/broker-adapter";
 
 const BOT_TOKEN     = process.env["TELEGRAM_BOT_TOKEN"];
 const ADMIN_CHAT_ID = process.env["BOT_ADMIN_ID"] ?? process.env["TELEGRAM_ADMIN_CHAT_ID"];
 const INTEGRATED_RELAY = process.env["INTEGRATED_UPDATE_RELAY"] === "1";
+const FUTURE_PANEL_IMAGE = "assets/future_signal_panel.png";
 
 // ─── Asset Lists ───────────────────────────────────────────────────────────────
 
@@ -1336,15 +1337,12 @@ function buildBot(): Telegraf<MyContext> {
   bot.action("futuresignal", async ctx => {
     await ctx.answerCbQuery();
     const uid = ctx.from?.id ?? 0;
-    const callbackMessage = ctx.callbackQuery?.message;
-    const canEditText = Boolean(
-      callbackMessage && !("photo" in callbackMessage),
-    );
-    if (!canEditText) {
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
-    }
+    await ctx.deleteMessage().catch(() => {});
     if (!hasAccess(uid)) {
-      await showPaywall(ctx, canEditText);
+      await ctx.replyWithPhoto(
+        Input.fromLocalFile(FUTURE_PANEL_IMAGE),
+        { caption: PAYWALL_TEXT, parse_mode: "HTML", ...PAYWALL_KB },
+      );
       return;
     }
     // Delete any lingering approval welcome message
@@ -1354,11 +1352,14 @@ function buildBot(): Telegraf<MyContext> {
       approvalMsgStore.delete(uid);
     }
     ctx.session.state = "await_market";
-    if (canEditText) {
-      await ctx.editMessageText("📊 <b>Select Market Type:</b>", { parse_mode: "HTML", ...buildMarketKeyboard(uid) });
-    } else {
-      await ctx.reply("📊 <b>Select Market Type:</b>", { parse_mode: "HTML", ...buildMarketKeyboard(uid) });
-    }
+    await ctx.replyWithPhoto(
+      Input.fromLocalFile(FUTURE_PANEL_IMAGE),
+      {
+        caption: "📊 <b>Select Market Type:</b>",
+        parse_mode: "HTML",
+        ...buildMarketKeyboard(uid),
+      },
+    );
   });
 
   bot.action("back_to_menu", async ctx => {

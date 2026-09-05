@@ -38688,6 +38688,7 @@ function analyseWithTripleTF(candles, tfMinutes, opts = {}) {
 var BOT_TOKEN = process.env["TELEGRAM_BOT_TOKEN"];
 var ADMIN_CHAT_ID = process.env["BOT_ADMIN_ID"] ?? process.env["TELEGRAM_ADMIN_CHAT_ID"];
 var INTEGRATED_RELAY = process.env["INTEGRATED_UPDATE_RELAY"] === "1";
+var FUTURE_PANEL_IMAGE = "assets/future_signal_panel.png";
 var realAssets = [
   "AUD/CAD",
   "AUD/CHF",
@@ -39806,16 +39807,13 @@ ${lines.join("\n")}`, { parse_mode: "HTML" });
   bot.action("futuresignal", async (ctx) => {
     await ctx.answerCbQuery();
     const uid = ctx.from?.id ?? 0;
-    const callbackMessage = ctx.callbackQuery?.message;
-    const canEditText = Boolean(
-      callbackMessage && !("photo" in callbackMessage)
-    );
-    if (!canEditText) {
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {
-      });
-    }
+    await ctx.deleteMessage().catch(() => {
+    });
     if (!hasAccess(uid)) {
-      await showPaywall(ctx, canEditText);
+      await ctx.replyWithPhoto(
+        import_telegraf.Input.fromLocalFile(FUTURE_PANEL_IMAGE),
+        { caption: PAYWALL_TEXT, parse_mode: "HTML", ...PAYWALL_KB }
+      );
       return;
     }
     const stored = approvalMsgStore.get(uid);
@@ -39825,11 +39823,14 @@ ${lines.join("\n")}`, { parse_mode: "HTML" });
       approvalMsgStore.delete(uid);
     }
     ctx.session.state = "await_market";
-    if (canEditText) {
-      await ctx.editMessageText("\u{1F4CA} <b>Select Market Type:</b>", { parse_mode: "HTML", ...buildMarketKeyboard(uid) });
-    } else {
-      await ctx.reply("\u{1F4CA} <b>Select Market Type:</b>", { parse_mode: "HTML", ...buildMarketKeyboard(uid) });
-    }
+    await ctx.replyWithPhoto(
+      import_telegraf.Input.fromLocalFile(FUTURE_PANEL_IMAGE),
+      {
+        caption: "\u{1F4CA} <b>Select Market Type:</b>",
+        parse_mode: "HTML",
+        ...buildMarketKeyboard(uid)
+      }
+    );
   });
   bot.action("back_to_menu", async (ctx) => {
     await ctx.answerCbQuery();

@@ -62,8 +62,15 @@ class FutureSignalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("protectedFutureAction && !hasAccess(uid)", source)
         self.assertIn(
-            "editMessageReplyMarkup({ inline_keyboard: [] })",
+            "await ctx.deleteMessage().catch(() => {})",
             source,
+        )
+        self.assertIn(
+            "Input.fromLocalFile(FUTURE_PANEL_IMAGE)",
+            source,
+        )
+        self.assertTrue(
+            Path("assets/future_signal_panel.png").is_file(),
         )
         self.assertIn(
             'Markup.button.callback("🏢 Back to Main Home", "m:home")',
