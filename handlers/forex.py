@@ -58,7 +58,7 @@ def _is_admin(uid: int) -> bool:
 
 def _is_premium(uid: int) -> bool:
     """Paid (temporary or lifetime) OR admin — bypass free-trial caps."""
-    return db.has_active_access(uid) or _is_admin(uid)
+    return db.has_forex_access(uid) or _is_admin(uid)
 
 
 def is_pair_open_now(pair: str) -> bool:
@@ -214,7 +214,7 @@ async def cb_fx_tf(call: CallbackQuery, state: FSMContext):
         )
     # Free users get a stricter call-out in the header (1 pair / 1 signal /
     # TP 1 max). Paid + admin keep the standard 'max 10' guidance.
-    is_premium = (db.has_active_access(call.from_user.id)
+    is_premium = (db.has_forex_access(call.from_user.id)
                   or _is_admin(call.from_user.id))
     if is_premium:
         pick_line = (

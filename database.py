@@ -773,6 +773,42 @@ def has_active_access(user_id: int) -> bool:
     return False
 
 
+def _active_package_id(user_id: int) -> str:
+    if not has_active_access(user_id):
+        return ""
+    return str((get_access(user_id) or {}).get("package_id") or "").lower()
+
+
+def has_binary_access(user_id: int) -> bool:
+    package_id = _active_package_id(user_id)
+    if not package_id:
+        return False
+    return package_id.startswith(("mtg_", "nmg_", "admin_binary_")) or (
+        package_id.startswith("admin_") and not package_id.startswith("admin_forex_")
+    )
+
+
+def has_forex_access(user_id: int) -> bool:
+    package_id = _active_package_id(user_id)
+    if not package_id:
+        return False
+    return package_id.startswith(("gz_", "admin_forex_")) or (
+        package_id.startswith("admin_")
+        and not package_id.startswith(("admin_binary_", "admin_forex_"))
+    )
+
+
+def get_binary_access_mode(user_id: int) -> Optional[str]:
+    if not has_binary_access(user_id):
+        return None
+    package_id = _active_package_id(user_id)
+    if package_id.startswith(("nmg_", "admin_binary_nonmtg_")):
+        return "nonmtg"
+    if package_id.startswith(("mtg_", "admin_binary_mtg_")):
+        return "mtg"
+    return "both"
+
+
 def list_access() -> List[Dict]:
     with get_conn() as conn:
         rows = conn.execute(

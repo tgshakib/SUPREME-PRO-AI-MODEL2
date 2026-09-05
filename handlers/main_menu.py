@@ -8,6 +8,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 import math
+import asyncio
 
 import database as db
 import os
@@ -23,6 +24,20 @@ from config import (
 from tz_utils import detect_tz, get_user_tz, format_for_user
 
 router = Router()
+_home_command_users: set[int] = set()
+_home_command_guard = asyncio.Lock()
+
+
+async def _render_home_from_command(bot, chat_id: int, user) -> None:
+    async with _home_command_guard:
+        if chat_id in _home_command_users:
+            return
+        _home_command_users.add(chat_id)
+    try:
+        await render_home(bot, chat_id, user, fast=True)
+    finally:
+        async with _home_command_guard:
+            _home_command_users.discard(chat_id)
 
 
 def _is_admin(user_id: int) -> bool:
@@ -69,7 +84,7 @@ def _has_active_fx(chat_id: int) -> bool:
     the 24/7 forex bot OR an active FUNDED PASS challenge. Both stream
     forex-style signals into the same `forex_signal` table, so the
     🟢 YOUR ACTIVE Fx-SIGNALS button correctly views either source."""
-    if not (db.has_active_access(chat_id) or _is_admin(chat_id)):
+    if not (db.has_forex_access(chat_id) or _is_admin(chat_id)):
         return False
     setup = db.get_forex_setup(chat_id)
     if setup and setup.get("status") == "active":
@@ -198,7 +213,7 @@ async def cmd_start(message: Message):
                 except Exception:
                     pass
 
-    await render_home(message.bot, message.chat.id, user, fast=True)
+    await _render_home_from_command(message.bot, message.chat.id, user)
     try:
         await message.delete()
     except Exception:
@@ -332,7 +347,7 @@ async def cmd_home(message: Message):
         await message.delete()
     except Exception:
         pass
-    await render_home(message.bot, message.chat.id, message.from_user, fast=True)
+    await _render_home_from_command(message.bot, message.chat.id, message.from_user)
 
 
 @router.callback_query(F.data == "verify_join")

@@ -18,6 +18,7 @@ except Exception:
     _si_report = None  # type: ignore
 from keyboards import (
     admin_panel_kb, admin_back_kb, admin_cancel_input_kb,
+    add_user_product_kb, add_user_binary_mode_kb,
     add_user_duration_kb, ADD_USER_DURATIONS, payment_received_kb,
     mailing_audience_kb, mailing_confirm_kb, winrate_dashboard_kb,
 )
@@ -30,6 +31,7 @@ class AdmState(StatesGroup):
     awaiting_remove_id = State()
     awaiting_transfer = State()
     awaiting_add_username = State()
+    awaiting_add_duration = State()
     awaiting_mailing_text = State()
 
 
@@ -331,8 +333,6 @@ async def msg_transfer(message: Message, state: FSMContext, bot: Bot):
 
 # ─────────────────────────────────────────────────────────
 # ADD USER FLOW
-# Step 1: pick duration (admin presses ADD USER)
-# Step 2: send @username (or numeric chat_id) to grant access
 # ─────────────────────────────────────────────────────────
 @router.callback_query(F.data == "adm:add_user")
 async def cb_add_user(call: CallbackQuery, state: FSMContext):
@@ -344,11 +344,59 @@ async def cb_add_user(call: CallbackQuery, state: FSMContext):
         call.bot, call.message.chat.id,
         "➕ <b>ADD USER — Grant Bot Access</b>\n"
         "━━━━━━━━━━━━━━━━━━━\n"
-        "Pick the access <b>duration</b> for the new user 👇\n\n"
-        "Choose from a quick option (1/2 minute, hour, day, month) "
-        "or grant <b>LIFETIME</b> access.",
-        add_user_duration_kb(),
+        "Choose which access to grant 👇",
+        add_user_product_kb(),
     )
+
+
+async def _ask_add_user_identity(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    product = str(data.get("product", "")).upper()
+    mode = str(data.get("binary_mode", "")).upper()
+    access_label = f"{product} · {mode}" if mode else product
+    await state.set_state(AdmState.awaiting_add_username)
+    await call.answer()
+    await show_screen(
+        call.bot, call.message.chat.id,
+        f"➕ <b>ADD USER — {access_label}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Send the member's <b>@username</b> or numeric chat ID.\n\n"
+        f"Example: <code>@johndoe</code> or <code>123456789</code>",
+        admin_cancel_input_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("adm:add:type:"))
+async def cb_add_user_type(call: CallbackQuery, state: FSMContext):
+    if not _is_admin(call.from_user.id):
+        await call.answer("Not authorized", show_alert=True); return
+    product = call.data.rsplit(":", 1)[-1]
+    if product not in ("binary", "forex"):
+        await call.answer("Unknown access type", show_alert=True); return
+    await state.clear()
+    await state.update_data(product=product)
+    if product == "binary":
+        await call.answer()
+        await show_screen(
+            call.bot, call.message.chat.id,
+            "➕ <b>ADD USER — BINARY</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Choose the Binary signal access type 👇",
+            add_user_binary_mode_kb(),
+        )
+        return
+    await _ask_add_user_identity(call, state)
+
+
+@router.callback_query(F.data.startswith("adm:add:mode:"))
+async def cb_add_user_binary_mode(call: CallbackQuery, state: FSMContext):
+    if not _is_admin(call.from_user.id):
+        await call.answer("Not authorized", show_alert=True); return
+    mode = call.data.rsplit(":", 1)[-1]
+    if mode not in ("mtg", "nonmtg"):
+        await call.answer("Unknown Binary access type", show_alert=True); return
+    await state.update_data(product="binary", binary_mode=mode)
+    await _ask_add_user_identity(call, state)
 
 
 @router.callback_query(F.data.startswith("adm:dur:"))
@@ -356,23 +404,28 @@ async def cb_add_user_duration(call: CallbackQuery, state: FSMContext):
     if not _is_admin(call.from_user.id):
         await call.answer("Not authorized", show_alert=True); return
     code = call.data.split(":")[2]
+    data = await state.get_data()
+    if not data.get("target_id"):
+        await call.answer("Choose a user first", show_alert=True); return
+    if code == "custom":
+        await state.set_state(AdmState.awaiting_add_duration)
+        await call.answer()
+        await show_screen(
+            call.bot, call.message.chat.id,
+            "⏳ <b>CUSTOM DURATION</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Send a duration such as <code>90d</code> or <code>3m</code>.\n"
+            "You can also send <code>lifetime</code>.",
+            admin_cancel_input_kb(),
+        )
+        return
     meta = _duration_meta(code)
     if not meta:
         await call.answer("Unknown duration", show_alert=True); return
     label, unit, amount = meta
-    await state.set_state(AdmState.awaiting_add_username)
-    await state.update_data(dur_code=code, dur_label=label,
-                            dur_unit=unit, dur_amount=amount)
     await call.answer()
-    await show_screen(
-        call.bot, call.message.chat.id,
-        f"➕ <b>ADD USER — {label}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"Now send the member's <b>@username</b> (or numeric chat ID).\n\n"
-        f"Example: <code>@johndoe</code>  or  <code>123456789</code>\n\n"
-        f"⚠️ The user must have started this bot at least once "
-        f"(so we have their chat ID on file).",
-        admin_cancel_input_kb(),
+    await _complete_admin_grant(
+        call.bot, call.message.chat.id, state, code, label, unit, amount
     )
 
 
@@ -389,12 +442,6 @@ async def msg_add_username(message: Message, state: FSMContext, bot: Bot):
             admin_cancel_input_kb(),
         )
         return
-
-    data = await state.get_data()
-    code = data.get("dur_code")
-    label = data.get("dur_label", "")
-    unit = data.get("dur_unit")
-    amount = int(data.get("dur_amount", 0))
 
     # Resolve target user
     target = None
@@ -418,8 +465,31 @@ async def msg_add_username(message: Message, state: FSMContext, bot: Bot):
 
     target_id = int(target["user_id"])
     uname = target.get("username") or ""
+    await state.update_data(target_id=target_id, target_username=uname)
+    await state.set_state(AdmState.awaiting_add_duration)
+    data = await state.get_data()
+    product = str(data.get("product", "")).upper()
+    mode = str(data.get("binary_mode", "")).upper()
+    access_label = f"{product} · {mode}" if mode else product
+    await show_screen(
+        bot, message.chat.id,
+        f"➕ <b>ADD USER — {access_label}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 User: {'@' + uname if uname else '(no username)'}\n"
+        f"🆔 Chat ID: <code>{target_id}</code>\n\n"
+        f"Choose a duration, or use <b>CUSTOM DURATION</b>.",
+        add_user_duration_kb(),
+    )
 
-    # Grant access
+
+async def _complete_admin_grant(bot: Bot, admin_chat_id: int, state: FSMContext,
+                                code: str, label: str, unit: str,
+                                amount: int) -> None:
+    data = await state.get_data()
+    target_id = int(data["target_id"])
+    uname = str(data.get("target_username") or "")
+    product = str(data.get("product") or "")
+    binary_mode = str(data.get("binary_mode") or "")
     if code == "life":
         access_type = "lifetime"
         delta = None
@@ -429,11 +499,15 @@ async def msg_add_username(message: Message, state: FSMContext, bot: Bot):
         delta = _delta_for(unit, amount)
         pkg_label = f"ADMIN GRANT — {label.replace('⏱️','').replace('⏰','').replace('📅','').replace('🗓️','').strip()}"
 
+    package_prefix = (
+        f"admin_binary_{binary_mode}" if product == "binary"
+        else "admin_forex"
+    )
     db.grant_access_delta(
         user_id=target_id,
         access_type=access_type,
         delta=delta,
-        package_id=f"admin_{code}",
+        package_id=f"{package_prefix}_{code}",
         package_label=pkg_label,
     )
     await state.clear()
@@ -448,21 +522,61 @@ async def msg_add_username(message: Message, state: FSMContext, bot: Bot):
             duration_text=("Lifetime" if access_type == "lifetime"
                            else label.replace("⏱️", "").replace("⏰", "")
                                      .replace("📅", "").replace("🗓️", "").strip()),
-            trade_type="Binary / Forex",
+            trade_type=(
+                f"Binary · {'NON-MTG' if binary_mode == 'nonmtg' else 'MTG'}"
+                if product == "binary" else "Forex"
+            ),
         )
     except Exception as e:
         print(f"[admin add_user] notify error: {e}")
 
     uname_disp = f"@{uname}" if uname else "(no username)"
+    product_label = (
+        f"BINARY · {'NON-MTG' if binary_mode == 'nonmtg' else 'MTG'}"
+        if product == "binary" else "FOREX + FUNDED PASS"
+    )
     await show_screen(
-        bot, message.chat.id,
+        bot, admin_chat_id,
         f"✅ <b>Access granted</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"👤 User: {uname_disp}\n"
         f"🆔 Chat ID: <code>{target_id}</code>\n"
         f"⏳ Duration: <b>{label}</b>\n"
-        f"📦 Type: <b>{access_type.upper()}</b>",
+        f"📦 Access: <b>{product_label}</b>\n"
+        f"🔐 Subscription: <b>{access_type.upper()}</b>",
         admin_back_kb(),
+    )
+
+
+@router.message(AdmState.awaiting_add_duration)
+async def msg_add_custom_duration(message: Message, state: FSMContext, bot: Bot):
+    if not _is_admin(message.from_user.id):
+        return
+    raw = (message.text or "").strip().lower()
+    await safe_delete(bot, message.chat.id, message.message_id)
+    if raw in ("life", "lifetime"):
+        await _complete_admin_grant(
+            bot, message.chat.id, state, "life", "♾️ LIFETIME", "lifetime", 0
+        )
+        return
+    import re
+    match = re.fullmatch(r"([1-9]\d*)\s*([dm])", raw)
+    if not match:
+        await show_screen(
+            bot, message.chat.id,
+            "❌ Send a valid duration such as <code>90d</code>, "
+            "<code>3m</code>, or <code>lifetime</code>.",
+            admin_cancel_input_kb(),
+        )
+        return
+    amount = int(match.group(1))
+    suffix = match.group(2)
+    unit = "days" if suffix == "d" else "months"
+    label = f"{amount} {'DAY' if suffix == 'd' else 'MONTH'}"
+    if amount != 1:
+        label += "S"
+    await _complete_admin_grant(
+        bot, message.chat.id, state, f"{amount}{suffix}", label, unit, amount
     )
 
 

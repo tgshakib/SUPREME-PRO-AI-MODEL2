@@ -84,7 +84,7 @@ def _tf_label(code: str) -> str:
 
 def _can_analyze(user_id: int) -> tuple[bool, int, int]:
     # Admin and paid users bypass the daily limit
-    if db.has_active_access(user_id) or _is_admin(user_id):
+    if db.has_binary_access(user_id) or _is_admin(user_id):
         return True, 0, 0
     used = db.signals_today(user_id)
     bonus = db.get_referral_bonus(user_id)
@@ -138,7 +138,7 @@ async def cb_pair(call: CallbackQuery):
         f"<b>SELECT ▸ TRADING TIME</b>"
     )
     user_id = call.from_user.id
-    _has_access = db.has_active_access(user_id) or _is_admin(user_id)
+    _has_access = db.has_binary_access(user_id) or _is_admin(user_id)
     if os.path.exists(_TIME_PHOTO):
         await show_photo_screen(
             call.bot, call.message.chat.id,
@@ -261,7 +261,7 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
 
     # Single-line loading text — admin/paid see clean line, free trial
     # users see the daily count appended.
-    is_premium = db.has_active_access(user_id) or _is_admin(user_id)
+    is_premium = db.has_binary_access(user_id) or _is_admin(user_id)
     loading = (f"🤖 <b>SUPREME PRO AI Analyzing {pair} ...</b>"
                if is_premium
                else f"🤖 <b>SUPREME PRO AI Analyzing {pair} ... "

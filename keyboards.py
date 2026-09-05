@@ -340,16 +340,31 @@ def mailing_confirm_kb(audience: str) -> InlineKeyboardMarkup:
 
 # ── ADD USER: duration picker ─────────────────────────────
 ADD_USER_DURATIONS = [
-    ("⏱️ 1 MIN",   "1m",   "minutes",  1),
-    ("⏱️ 2 MIN",   "2m",   "minutes",  2),
-    ("⏰ 1 HOUR",  "1h",   "hours",    1),
-    ("⏰ 2 HOURS", "2h",   "hours",    2),
     ("📅 1 DAY",   "1d",   "days",     1),
     ("📅 2 DAYS",  "2d",   "days",     2),
+    ("📅 5 DAYS",  "5d",   "days",     5),
     ("🗓️ 1 MONTH", "1mo",  "months",   1),
     ("🗓️ 2 MONTHS","2mo",  "months",   2),
+    ("🗓️ 3 MONTHS","3mo",  "months",   3),
     ("♾️ LIFETIME","life", "lifetime", 0),
 ]
+
+
+def add_user_product_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💹 FOREX", callback_data="adm:add:type:forex"),
+         InlineKeyboardButton(text="📊 BINARY", callback_data="adm:add:type:binary")],
+        [InlineKeyboardButton(text="❌ CANCEL", callback_data="adm:open")],
+    ])
+
+
+def add_user_binary_mode_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="NON-MTG", callback_data="adm:add:mode:nonmtg"),
+         InlineKeyboardButton(text="MTG", callback_data="adm:add:mode:mtg")],
+        [InlineKeyboardButton(text="⬅️ BACK", callback_data="adm:add_user"),
+         InlineKeyboardButton(text="❌ CANCEL", callback_data="adm:open")],
+    ])
 
 
 def add_user_duration_kb() -> InlineKeyboardMarkup:
@@ -359,6 +374,8 @@ def add_user_duration_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=label, callback_data=f"adm:dur:{code}")
             for label, code, _, _ in chunk
         ])
+    rows.append([InlineKeyboardButton(text="✍️ CUSTOM DURATION",
+                                      callback_data="adm:dur:custom")])
     rows.append([InlineKeyboardButton(text="❌ CANCEL", callback_data="adm:open")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

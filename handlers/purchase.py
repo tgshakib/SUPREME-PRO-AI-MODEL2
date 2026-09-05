@@ -60,14 +60,14 @@ def _payment_received_text(trade_type: str, duration_text: str) -> str:
     )
 
 
-def _lifetime_welcome_text() -> str:
+def _lifetime_welcome_text(trade_type: str) -> str:
     """Special pinned welcome card shown ONLY to LIFETIME members.
     Triggered when admin grants Lifetime via Add User, OR when a member
     buys a Lifetime package (Binary MTG / NON-MTG / GOLDZILA Unlimited)."""
     return (
         "🟢 <b>Your account is now active.</b>\n"
         "━━━━━━━━━━━━━━━━━━━\n"
-        "🔮 <b>Type:</b> ( FOREX &amp; BINARY )\n"
+        f"🔮 <b>Type:</b> {trade_type}\n"
         "⏳ <b>Duration:</b> LIFETIME\n"
         "━━━━━━━━━━━━━━━━━━━\n"
         "💬 <b>Remember:</b>\n"
@@ -102,7 +102,7 @@ async def send_payment_received_screen(
     # header, fixed 'FOREX & BINARY' label). Everyone else (temporary
     # access) gets the standard payment-received card.
     if access_type == "lifetime":
-        text = _lifetime_welcome_text()
+        text = _lifetime_welcome_text(trade_type)
     else:
         text = _payment_received_text(trade_type, duration_text)
     try:

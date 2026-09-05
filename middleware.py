@@ -45,6 +45,7 @@ _click_lock = asyncio.Lock()
 
 # {user_id: asyncio.Lock()} — one active request per user
 _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+_admission_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 # How long (seconds) to block repeated clicks on the same button.
 # Screens are edited in-place and retain the same Telegram message id, so this
@@ -121,16 +122,18 @@ class AntiSpamMiddleware(BaseMiddleware):
 
         # ── 3. Per-user async lock (one request at a time) ────────────
         lock = _user_locks[user_id]
-        if lock.locked():
-            # Another request still running for this user — drop silently
-            try:
-                await event.answer()
-            except Exception:
-                pass
-            return
-
-        async with lock:
+        async with _admission_locks[user_id]:
+            if lock.locked():
+                try:
+                    await event.answer()
+                except Exception:
+                    pass
+                return
+            await lock.acquire()
+        try:
             return await handler(event, data)
+        finally:
+            lock.release()
 
 
 # ── Update-level middleware (dedup at the Update level too) ────────────────

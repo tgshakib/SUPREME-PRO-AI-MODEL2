@@ -90,14 +90,7 @@ async def cb_fp_open(call: CallbackQuery, state: FSMContext):
     if not db.is_verified(call.from_user.id):
         await call.answer("Verify first via /start", show_alert=True); return
     if not _is_admin(call.from_user.id):
-        acc = db.get_access(call.from_user.id) if db.has_active_access(call.from_user.id) else None
-        allowed = False
-        if acc:
-            if acc.get("access_type") == "lifetime":
-                allowed = True
-            elif acc.get("access_type") == "temporary" and str(acc.get("package_id", "")).startswith("gz_"):
-                allowed = True
-        if not allowed:
+        if not db.has_forex_access(call.from_user.id):
             await call.answer()
             await show_screen(
                 call.bot, call.message.chat.id,
