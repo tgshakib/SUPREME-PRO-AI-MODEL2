@@ -1,11 +1,14 @@
 """Admin panel: stats, members, pending payments, remove, transfer, add user."""
 import asyncio
+import html
 import logging
 from datetime import timedelta
 from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
+)
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 
 import database as db
@@ -162,18 +165,29 @@ async def cb_stats(call: CallbackQuery):
 async def cb_list_access(call: CallbackQuery):
     if not _is_admin(call.from_user.id):
         await call.answer(); return
+    text, keyboard = _members_access_view()
+    await call.answer()
+    await show_screen(call.bot, call.message.chat.id, text, keyboard)
+
+
+def _members_access_view():
     rows = db.list_active_access()
+    admin_id = db.get_admin_id()
+    keyboard_rows = []
     if not rows:
-        text = "📋 <b>MEMBERS WITH ACCESS</b>\n\nNo active members."
+        text = (
+            "📋 <b>MEMBERS WITH ACCESS</b>\n"
+            f"🔒 <code>{admin_id}</code> — <b>Admin</b> <i>(LOCKED)</i>\n\n"
+            "<i>No active members.</i>"
+        )
     else:
         grouped = {}
         for row in rows:
             grouped.setdefault(int(row["user_id"]), []).append(row)
         lines = [
             "📋 <b>MEMBERS WITH ACCESS</b>",
-            "━━━━━━━━━━━━━━━━━━━",
-            f"👥 Active members: <b>{len(grouped)}</b>",
-            f"🔐 Active subscriptions: <b>{len(rows)}</b>",
+            f"🔒 <code>{admin_id}</code> — <b>Admin</b> <i>(LOCKED)</i>",
+            "",
         ]
         shown = 0
         for uid, grants in grouped.items():
@@ -181,20 +195,17 @@ async def cb_list_access(call: CallbackQuery):
                 break
             first = grants[0]
             username = (
-                f"@{first['username']}" if first.get("username")
+                f"@{html.escape(first['username'])}" if first.get("username")
                 else "(no username)"
             )
-            full_name = first.get("full_name") or "Name unavailable"
+            raw_name = first.get("full_name") or first.get("username") or str(uid)
+            full_name = html.escape(raw_name)
             joined = (
                 str(first.get("joined_at") or "")[:10] or "Unknown"
             )
             lines.extend([
-                "",
-                "━━━━━━━━━━━━━━━━━━━",
-                f"👤 <b>{full_name}</b>",
-                f"🔗 {username}",
-                f"🆔 <code>{uid}</code>",
-                f"📅 Joined: <b>{joined}</b>",
+                f"👤 <b>{full_name}</b>  <code>{uid}</code>",
+                f"🔗 {username}  ·  📅 {joined}",
             ])
             for grant in sorted(grants, key=lambda r: r.get("scope") or ""):
                 package_id = str(grant.get("package_id") or "").lower()
@@ -211,18 +222,85 @@ async def cb_list_access(call: CallbackQuery):
                     end = str(grant.get("expires_at") or "")[:16].replace("T", " ")
                     expiry = f"⏳ Expires: {end} UTC"
                 lines.extend([
-                    "",
-                    f"<b>{product}</b>",
-                    f"   🧾 {grant.get('package_label') or '-'}",
-                    f"   ✅ Granted: {granted} UTC",
-                    f"   {expiry}",
+                    f"  {product}",
+                    f"  🧾 {html.escape(str(grant.get('package_label') or '-'))}",
+                    f"  ✅ {granted} UTC  ·  {expiry}",
                 ])
+            lines.append("")
+            button_name = f"👤 {raw_name}"
+            if len(button_name) > 32:
+                button_name = button_name[:29] + "..."
+            keyboard_rows.append([
+                InlineKeyboardButton(
+                    text=button_name,
+                    callback_data="adm:member_noop",
+                ),
+                InlineKeyboardButton(
+                    text="🗑 REMOVE",
+                    callback_data=f"adm:remove_direct:{uid}",
+                ),
+            ])
             shown += 1
         if len(grouped) > shown:
-            lines.append(f"\n…and {len(grouped) - shown} more members.")
+            lines.append(f"<i>…and {len(grouped) - shown} more members.</i>\n")
+        lines.append(
+            f"<b>Total active:</b> {len(grouped)} users · "
+            f"{len(rows)} subscriptions"
+        )
         text = "\n".join(lines)
-    await call.answer()
-    await show_screen(call.bot, call.message.chat.id, text, admin_back_kb())
+    keyboard_rows.extend([
+        [InlineKeyboardButton(
+            text="🔄 REFRESH",
+            callback_data="adm:list_access",
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ BACK TO ADMIN",
+            callback_data="adm:panel",
+        )],
+    ])
+    return text, InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+
+@router.callback_query(F.data == "adm:member_noop")
+async def cb_member_noop(call: CallbackQuery):
+    if not _is_admin(call.from_user.id):
+        await call.answer(); return
+    await call.answer("User access information")
+
+
+@router.callback_query(F.data.startswith("adm:remove_direct:"))
+async def cb_remove_direct(call: CallbackQuery):
+    if not _is_admin(call.from_user.id):
+        await call.answer(); return
+    raw_target = (call.data or "").rsplit(":", 1)[-1]
+    if not raw_target.lstrip("-").isdigit():
+        await call.answer("Invalid user ID", show_alert=True)
+        return
+    target = int(raw_target)
+    if _is_admin(target):
+        await call.answer("🔒 Admin access cannot be removed.", show_alert=True)
+        return
+    if not db.has_active_access(target):
+        await call.answer("This user has no active access.", show_alert=True)
+    else:
+        db.revoke_access(target)
+        try:
+            from expiry_watcher import _cleanup_pinned_card
+            await _cleanup_pinned_card(call.bot, target)
+        except Exception:
+            pass
+        try:
+            await call.bot.send_message(
+                target,
+                "⚠️ <b>Your access has been removed by admin.</b>\n"
+                "Tap /start to renew access.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        await call.answer(f"🗑 Access removed for {target}")
+    text, keyboard = _members_access_view()
+    await show_screen(call.bot, call.message.chat.id, text, keyboard)
 
 
 @router.callback_query(F.data == "adm:pending")
