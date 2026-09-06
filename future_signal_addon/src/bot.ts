@@ -6,6 +6,31 @@ const BOT_TOKEN     = process.env["TELEGRAM_BOT_TOKEN"];
 const ADMIN_CHAT_ID = process.env["BOT_ADMIN_ID"] ?? process.env["TELEGRAM_ADMIN_CHAT_ID"];
 const INTEGRATED_RELAY = process.env["INTEGRATED_UPDATE_RELAY"] === "1";
 const FUTURE_PANEL_IMAGE = "assets/future_signal_panel.png";
+const INTERNAL_FEED_URL = "http://127.0.0.1:8080/internal/broker-feed-readiness";
+
+async function requireAuthenticatedBrokerFeed(market: MarketType): Promise<void> {
+  const broker = market === "quotex" ? "qx" : market === "po" ? "po" : null;
+  if (!broker) return;
+
+  const secret = process.env["SESSION_SECRET"] ?? "";
+  if (!secret) throw new Error("Internal feed readiness authentication is unavailable");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_200);
+  try {
+    const response = await fetch(INTERNAL_FEED_URL, {
+      headers: { "X-Internal-Secret": secret },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`Feed readiness endpoint returned ${response.status}`);
+    const status = await response.json() as { qx?: boolean; po?: boolean };
+    if (status[broker] !== true) {
+      throw new Error(`${broker.toUpperCase()} authenticated tick feed is not ready`);
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 // ─── Asset Lists ───────────────────────────────────────────────────────────────
 
@@ -1765,6 +1790,7 @@ function buildBot(): Telegraf<MyContext> {
 
       let msg: string;
       try {
+        await requireAuthenticatedBrokerFeed(market ?? "real");
         msg = await buildSignalMessage(selectedAssets, direction, market ?? "real", count, settings);
       } catch (err) {
         logger.error({ err }, "Signal generation error");
@@ -1834,6 +1860,7 @@ function buildBot(): Telegraf<MyContext> {
 
     let msg: string;
     try {
+      await requireAuthenticatedBrokerFeed(market ?? "real");
       msg = await buildHourBlockMessage(selectedAssets, direction, market ?? "real", settings);
     } catch (err) {
       logger.error({ err }, "1Hr block generation error");

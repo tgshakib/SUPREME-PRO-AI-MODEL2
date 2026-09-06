@@ -1,0 +1,37 @@
+**Task: Fix Quotex OTC price streaming permanently**
+
+**Context:**
+Our Supreme Pro AI bot currently supports binary trading on Pocket Option and Quotex, including OTC and live markets. The bot uses Replit as the development environment. Pocket Option OTC streaming works fine, but Quotex OTC is not delivering fresh authenticated prices after a restart. The bot shows: "Quotex price stream is not yet available." The root cause is the upstream authentication/feed connection for Quotex, not the signal analysis logic. We need a permanent fix so that Quotex OTC ticks are streamed reliably for the lifetime of the bot.
+
+**Credentials available:**
+- Quotex email and password (demo and real) are already stored in Replit Secrets (or available to you). Use these to obtain a fresh SSID via login. Do not rely on any previously stored SSID token, as it may expire or be invalid.
+- Pocket Option credentials are also available.
+
+**Requirements:**
+1. Implement a robust Quotex WebSocket connection that:
+   - Logs in using the email/password to obtain a valid session token (SSID) via Quotex REST API.
+   - Establishes a WebSocket connection to Quotex's real-time feed.
+   - Authenticates using the token and subscribes to the required OTC assets (e.g., EURUSD-OTC, GBPUSD-OTC, etc.).
+   - Handles reconnection automatically (with exponential backoff) if the connection drops.
+   - Refreshes the token periodically or on connection failure (re-login).
+   - Emits tick data in a format compatible with our existing analysis engine (same structure as Pocket Option ticks).
+
+2. If the official Quotex API proves too unstable or changes frequently, implement a fallback:
+   - Use Pocket Option's OTC feed as a proxy for Quotex OTC. Map the equivalent assets (e.g., Pocket Option's EURUSD-OTC to Quotex's EURUSD-OTC).
+   - This ensures the bot continues to operate with a 99% matching price feed, even if Quotex authentication fails.
+
+3. Integrate the solution into the existing bot code without breaking Pocket Option support.
+
+4. Test thoroughly:
+   - Use the Quotex demo account to verify that OTC ticks are streaming after a bot restart.
+   - Simulate a network drop to ensure reconnection works.
+   - Log any authentication errors or WebSocket disconnections for debugging.
+
+**Suggested approach:**
+- First, try using a maintained open-source Node.js library like `quotex-api` (npm) to handle the Quotex connection. If that is not feasible, implement the WebSocket manually following the current protocol (inspect Quotex web platform's network traffic if needed).
+- If after reasonable effort the Quotex feed still cannot be made reliable, implement the Pocket Option proxy fallback and clearly document it.
+
+**Deliverable:**
+A fully functional Quotex OTC price stream that works after bot restart, with automatic reconnection and token refresh. The bot should no longer show the "price stream not available" error. Include a brief explanation of the solution implemented (official API vs. proxy) and any configuration changes needed.
+
+Please proceed with the implementation and test it in Replit.

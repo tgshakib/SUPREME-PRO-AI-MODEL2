@@ -39,3 +39,10 @@ Token TTL: ~30 days. `qx_auth.py` keeps a stored SSID available to the stream an
 - `pyquotex` (iahmedani fork): supported release requires Python 3.12+. Do not bypass its Python-version requirement.
 - `curl_cffi`: browser-TLS mode is enabled via `ProxyConfig(use_browser_tls=True)` but does not bypass datacenter-IP reputation blocks.
 - `quotexpy` (older): needs SSID not email/password; avoid — causes `authorization/reject` loop
+
+## Stable network identity
+When a cloud host is rejected at the IP-reputation layer, automatic authentication requires one static residential/ISP egress identity shared by HTTP login and WebSocket traffic. Rotating proxies are unsuitable because every IP change can trigger a new challenge.
+
+**Why:** A valid-looking session and Chrome TLS fingerprint still produced broker-side WebSocket rejection from the cloud IP; connection health cannot be inferred until a broker-native tick arrives.
+
+**How to apply:** Keep proxy support optional and secret-backed. Preserve a supplied SSID across restarts, expose readiness only after a fresh authenticated tick, and tear down silent sessions for a full reconnect.
