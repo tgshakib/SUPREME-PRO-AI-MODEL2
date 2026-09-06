@@ -442,6 +442,10 @@ class BrokerFeed:
         logger.info(f"[{self.name}] History {asset_label} {tf_label}: {len(candles)} candles")
 
     async def _parse(self, raw: str):
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+        elif not isinstance(raw, str):
+            raw = str(raw)
         if raw == "2":
             await self._send("3")
             return
