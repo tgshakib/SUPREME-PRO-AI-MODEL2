@@ -14,3 +14,9 @@ Safety vetoes must count one vote per independent engine source. Internal grade,
 **Why:** Repeating elite engine directions in a flat vote list allowed one source to manufacture a decisive majority.
 
 **How to apply:** Keep source provenance when constructing final direction gates. Prefer WAIT/no trade over random direction, minute parity, default SELL, or fabricated order-flow evidence.
+
+Explicit broker secrets must override local session caches. Pocket Option's current Socket.IO authentication requires the complete browser `42["auth", {...}]` frame, including `uid`; a token/cookie alone is not sufficient.
+
+**Why:** Old local cache files silently displaced newly configured sessions, and PO accepted the WebSocket upgrade but closed the namespace when sent a token-only auth object. Email/password automation is gated by interactive reCAPTCHA.
+
+**How to apply:** Preserve complete PO auth frames unchanged when sending them. Use the working broker region discovered by a live handshake, require an explicit auth-success event, and never mark a namespace-close response as authenticated.

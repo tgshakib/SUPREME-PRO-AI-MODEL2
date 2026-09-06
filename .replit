@@ -1,7 +1,7 @@
 modules = ["python-3.12", "nodejs-24"]
 [nix]
 channel = "stable-25_05"
-packages = ["cacert", "glibcLocales"]
+packages = ["cacert", "geckodriver", "glibcLocales"]
 
 [agent]
 expertMode = true
