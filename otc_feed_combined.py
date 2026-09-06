@@ -29,6 +29,7 @@ import asyncio
 import json
 import time
 import logging
+import os
 import random
 from collections import deque
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ except ImportError:
     raise ImportError("Run: pip install websockets>=12.0")
 
 logger = logging.getLogger(__name__)
+STATIC_PROXY_URL = os.environ.get("STATIC_PROXY_URL", "").strip()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # QUOTEX CONFIG
@@ -504,6 +506,7 @@ class BrokerFeed:
                 async with websockets.connect(
                     ep,
                     additional_headers = self._headers,
+                    proxy             = STATIC_PROXY_URL or True,
                     ping_interval      = 25,
                     ping_timeout       = 15,
                     close_timeout      = 5,

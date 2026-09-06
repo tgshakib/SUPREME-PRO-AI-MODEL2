@@ -25,7 +25,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from threading import Lock
+from threading import Event, Lock
 from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ QX_SSID     = os.environ.get("QUOTEX_SSID", "").strip()
 # The Pocket Option auth manager supplies PO_SSID at runtime. Do not embed a
 # token here; an absent value simply lets po_auth.py recover it.
 PO_SSID = os.environ.get("PO_SSID", "").strip()
+STATIC_PROXY_URL = os.environ.get("STATIC_PROXY_URL", "").strip()
 
 # ── Stream settings ───────────────────────────────────────────────────────────
 _CANDLE_PERIOD   = 60      # seconds (1-minute candles match pocket_option_ws)
@@ -65,6 +66,8 @@ _BROKER_PRICES: Dict[str, Dict[str, Dict]] = defaultdict(dict)
 # completed-candle stream is reconnecting.
 _BROKER_TICKS: Dict[Tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=40))
 _LOCK   = Lock()
+_FEED_READY = {"qx": Event(), "po": Event()}
+_LAST_BROKER_TICK_AT = {"qx": 0.0, "po": 0.0}
 # QX analysis candles are built only from the currently authenticated QX tape.
 # They deliberately do not reuse the generic QX socket cache in
 # otc_feed_combined.py, because synthetic pricing is session-bound.
@@ -368,11 +371,24 @@ def _write_price(asset_key: str, price: float, source: str):
                 )
             _BROKER_PRICES[key][source] = broker_entry
             _BROKER_TICKS[(key, source)].append(broker_entry)
+            _LAST_BROKER_TICK_AT[source] = now
+            _FEED_READY[source].set()
             if qx_meta:
                 _append_authenticated_qx_candle(
                     key, float(price), now, qx_meta["session_id"],
                     float(qx_meta["session_started_at"]),
                 )
+
+
+def is_broker_feed_ready(broker: str, *, stale_after: float = 20.0) -> bool:
+    """True only after a recent broker-native tick proves the feed is live."""
+    if broker not in _FEED_READY or not _FEED_READY[broker].is_set():
+        return False
+    age = time.time() - _LAST_BROKER_TICK_AT[broker]
+    if age > stale_after:
+        _FEED_READY[broker].clear()
+        return False
+    return True
 
 
 def get_selected_broker_ticks(
@@ -385,6 +401,8 @@ def get_selected_broker_ticks(
     excluded so reconnecting feeds cannot create signals from old prices.
     """
     if broker not in ("po", "qx"):
+        return []
+    if not is_broker_feed_ready(broker):
         return []
     global _LAST_QX_QUERY_PAIR
     now = time.time()
@@ -590,9 +608,11 @@ async def _po_stream_once(ssid: str):
         "Cache-Control": "no-cache",
     }
     logger.info("[otc_svc:po] Connecting to Pocket Option …")
+    _FEED_READY["po"].clear()
     async with _ws.connect(
         _PO_WS_URL,
         additional_headers=headers,
+        proxy=STATIC_PROXY_URL or True,
         ping_interval=20,
         ping_timeout=15,
         close_timeout=10,
@@ -708,6 +728,7 @@ async def _run_po_loop():
             ssid = _get_active_po_ssid()
             await _po_stream_once(ssid)
         except ConnectionError as exc:
+            _FEED_READY["po"].clear()
             logger.error(f"[otc_svc:po] Auth/connection error: {exc}")
             # Immediately request a fresh SSID on any auth failure
             try:
@@ -720,6 +741,7 @@ async def _run_po_loop():
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60)   # cap at 60s — reconnect fast
         except Exception as exc:
+            _FEED_READY["po"].clear()
             logger.warning(f"[otc_svc:po] Stream error: {exc} — reconnecting in {delay}s")
             await asyncio.sleep(delay)
             delay = min(delay * 2, 60)   # cap at 60s
@@ -842,14 +864,24 @@ async def _qx_stream_once():
         await asyncio.sleep(60)
         return
 
+    _FEED_READY["qx"].clear()
     _seed_pyquotex_session(token)
     logger.info("[otc_svc:qx] SSID seeded → skipping Cloudflare HTTP auth")
-    _proxy_cfg = None   # WS does not need a browser-TLS HTTP client
+    _proxy_cfg = ProxyConfig(
+        url=STATIC_PROXY_URL or None,
+        use_browser_tls=True,
+        impersonate="chrome124",
+    )
+    _proxies = (
+        {"http": STATIC_PROXY_URL, "https": STATIC_PROXY_URL}
+        if STATIC_PROXY_URL else None
+    )
 
     client = Quotex(
         email=QX_EMAIL,
         password=QX_PASSWORD,
         lang="en",
+        proxies=_proxies,
         proxy_config=_proxy_cfg,
     )
     logger.info("[otc_svc:qx] Connecting via pyquotex …")
@@ -945,17 +977,21 @@ async def _qx_stream_once():
                 except Exception:
                     pass
 
-            # Stale detection: 60s of no ticks → connection is silently dead
+            # Tick-proven readiness: a connected socket is not healthy until a
+            # real broker price arrives. Twenty silent seconds forces a full
+            # teardown and fresh authentication cycle.
             if got_any:
                 _no_data_streak = 0
             else:
                 _no_data_streak += 1
-                if _no_data_streak > 120:   # 60s × 2 polls/s = 120 cycles
-                    logger.warning("[otc_svc:qx] No ticks for 60s — reconnecting")
+                if _no_data_streak > 40:   # 20s × 2 polls/s = 40 cycles
+                    _FEED_READY["qx"].clear()
+                    logger.warning("[otc_svc:qx] No ticks for 20s — forcing full reconnect")
                     end_session(session_id, "no_qx_ticks")
                     break
 
     finally:
+        _FEED_READY["qx"].clear()
         end_session(session_id, "qx_stream_closed")
         try:
             await client.close()

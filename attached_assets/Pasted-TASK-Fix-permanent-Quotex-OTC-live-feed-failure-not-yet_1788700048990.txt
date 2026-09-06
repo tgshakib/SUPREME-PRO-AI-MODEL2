@@ -1,0 +1,148 @@
+TASK: Fix permanent Quotex OTC/live feed failure ("not yet delivered authenticated 
+prices after restart"). Root cause is TWO layered issues: (1) the bot reuses/relies 
+on session state that doesn't survive a restart cleanly, (2) Replit's outbound IP 
+gets flagged by Quotex's Cloudflare protection so even successful logins don't get 
+a live tick stream.
+
+HARD RULE: do not touch signal text formatting/output anywhere in this change — 
+only the feed connection/auth layer.
+
+Implement this supervisor pattern around the existing Quotex client 
+(pyquotex or equivalent) instead of calling connect() directly from the bot:
+
+--- feed_supervisor.py ---
+import asyncio
+import logging
+import os
+from datetime import datetime, timedelta
+
+from pyquotex.stable_api import Quotex  # swap for your actual client import
+
+logger = logging.getLogger("quotex_feed_supervisor")
+logging.basicConfig(level=logging.INFO)
+
+
+class QuotexFeedSupervisor:
+    """
+    Owns the full lifecycle of the OTC/live feed so nothing downstream ever
+    runs analysis against a half-dead connection.
+      1. Forces a clean login every boot/reconnect - never trusts state left
+         over from before a restart.
+      2. Watches the tick stream itself (not just the socket) - if no price
+         update lands within STALE_AFTER seconds, tears down and does a full
+         re-login, not just a WS re-open.
+      3. Exposes feed_ready so the analysis engine refuses to run until the
+         feed is PROVEN live.
+    """
+
+    STALE_AFTER = 20       # seconds with no price update = feed considered dead
+    CHECK_EVERY = 5
+    MAX_BACKOFF = 60
+
+    def __init__(self, email: str, password: str, proxy: dict | None = None):
+        self.email = email
+        self.password = password
+        self.proxy = proxy          # route through a STATIC residential/ISP proxy here
+        self.client: Quotex | None = None
+        self.last_tick_at: datetime | None = None
+        self.feed_ready = asyncio.Event()
+        self._running = False
+
+    async def _fresh_login(self):
+        if self.client:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+
+        self.client = Quotex(
+            email=self.email,
+            password=self.password,
+            proxy=self.proxy,       # check your installed client's exact proxy kwarg name
+        )
+
+        ok, reason = await self.client.connect()
+        if not ok:
+            raise RuntimeError(f"quotex login rejected upstream: {reason}")
+
+        if not self.client.check_connect():
+            raise RuntimeError("connect() returned ok but check_connect() says session is dead")
+
+        logger.info("fresh Quotex session confirmed live")
+        self.last_tick_at = datetime.utcnow()
+
+    async def _watchdog(self):
+        while self._running:
+            await asyncio.sleep(self.CHECK_EVERY)
+            dead_session = not self.client or not self.client.check_connect()
+            stale = (
+                self.last_tick_at
+                and datetime.utcnow() - self.last_tick_at > timedelta(seconds=self.STALE_AFTER)
+            )
+            if dead_session or stale:
+                logger.warning(
+                    "feed unhealthy (dead_session=%s stale=%s) - forcing full re-auth",
+                    dead_session, stale,
+                )
+                self.feed_ready.clear()
+                return
+
+    async def poll_prices(self, assets: list[str]):
+        """Call this from the analysis loop instead of hitting the client
+        directly - it stamps last_tick_at so the watchdog can tell a live
+        feed from a stuck one."""
+        prices = {}
+        for asset in assets:
+            candles = await self.client.get_candles(asset, 60, 60)
+            if candles:
+                prices[asset] = candles[-1]
+                self.last_tick_at = datetime.utcnow()
+        return prices
+
+    async def run(self):
+        self._running = True
+        backoff = 2
+        while self._running:
+            try:
+                await self._fresh_login()
+                self.feed_ready.set()
+                backoff = 2
+                await self._watchdog()
+            except Exception as e:
+                logger.error("feed cycle failed: %s - retrying in %ss", e, backoff)
+            finally:
+                self.feed_ready.clear()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self.MAX_BACKOFF)
+
+    def stop(self):
+        self._running = False
+        if self.client:
+            self.client.close()
+
+# Wiring:
+# supervisor = QuotexFeedSupervisor(
+#     email=os.environ["QUOTEX_EMAIL"],
+#     password=os.environ["QUOTEX_PASSWORD"],
+#     proxy={"http": os.environ["STATIC_PROXY_URL"]} if os.environ.get("STATIC_PROXY_URL") else None,
+# )
+# asyncio.create_task(supervisor.run())
+#
+# Before every FINORIX/analysis run:
+# if not supervisor.feed_ready.is_set():
+#     return "feed not ready - waiting on fresh Quotex authentication"
+
+ADDITIONAL REQUIRED CHANGES:
+1. Wipe any persisted session/cookie file on startup - never let old state 
+   survive a restart.
+2. Add a STATIC_PROXY_URL env var. Route ALL Quotex/Pocket Option traffic 
+   (both the HTTP login call and the WebSocket) through it. Use a STATIC 
+   residential or ISP proxy, not a rotating one - rotating proxies make 
+   Cloudflare re-challenge on every reconnect, which is worse than staying 
+   on one flagged IP.
+3. If using Python, replace the plain requests/aiohttp login call with 
+   curl_cffi (impersonate="chrome124") so the TLS handshake matches a real 
+   Chrome browser, not the default Python fingerprint.
+4. Do not let the analysis engine, Future Signal, or Instance Signal 
+   features fire while feed_ready is unset - return a clear "feed not 
+   ready" state instead of stale/guessed prices.

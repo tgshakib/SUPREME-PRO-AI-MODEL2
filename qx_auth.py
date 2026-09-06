@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 QX_EMAIL    = os.environ.get("QUOTEX_EMAIL", "").strip()
 QX_PASSWORD = os.environ.get("QUOTEX_PASSWORD", "").strip()
+STATIC_PROXY_URL = os.environ.get("STATIC_PROXY_URL", "").strip()
 
 _SSID_FILE         = os.path.join(os.path.dirname(__file__), ".qx_ssid_cache")
 _LOGIN_RETRY_DELAY = 60   # seconds between retries
@@ -171,13 +172,21 @@ def _do_pyquotex_login() -> Optional[str]:
         from pathlib import Path as _Pt
 
         try:
-            proxy_config = ProxyConfig(use_browser_tls=True)
+            proxy_config = ProxyConfig(
+                url=STATIC_PROXY_URL or None,
+                use_browser_tls=True,
+                impersonate="chrome124",
+            )
         except Exception:
             proxy_config = None
         client = _Quotex(
             email=QX_EMAIL,
             password=QX_PASSWORD,
             lang="en",
+            proxies=(
+                {"http": STATIC_PROXY_URL, "https": STATIC_PROXY_URL}
+                if STATIC_PROXY_URL else None
+            ),
             proxy_config=proxy_config,
         )
         try:
