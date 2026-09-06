@@ -34,10 +34,6 @@ def main_menu_kb(is_admin: bool = False,
             callback_data="fx:active_view",
         )])
     rows += [
-        [InlineKeyboardButton(
-            text="🔮 FUTURE SIGNAL • TG",
-            callback_data="tgadv:futuresignal",
-        )],
         [InlineKeyboardButton(text="📊 BINARY TRADING",  callback_data="m:binary"),
          InlineKeyboardButton(text="💹 FOREX TRADING",   callback_data="m:forex")],
         [InlineKeyboardButton(text="🏛 FUNDED PASS",     callback_data="m:fp"),
@@ -53,12 +49,31 @@ def main_menu_kb(is_admin: bool = False,
             callback_data="m:referral",
         )])
     if is_admin:
-        rows.append([InlineKeyboardButton(text="🛡️ ADMINISTRATION ACCESS",
-                                          callback_data="adm:open")])
+        rows.append([
+            InlineKeyboardButton(
+                text="🔮 FUTURE SIGNAL • TG",
+                callback_data="tgadv:futuresignal",
+            ),
+            InlineKeyboardButton(
+                text="🛡️ ADMINISTRATION ACCESS",
+                callback_data="adm:open",
+            ),
+        ])
     elif show_admin_recovery:
+        rows.append([
+            InlineKeyboardButton(
+                text="🔮 FUTURE SIGNAL • TG",
+                callback_data="tgadv:futuresignal",
+            ),
+            InlineKeyboardButton(
+                text="⚠️ RESTORE ADMINISTRATION ACCESS",
+                callback_data="adm:recover",
+            ),
+        ])
+    else:
         rows.append([InlineKeyboardButton(
-            text="⚠️ RESTORE ADMINISTRATION ACCESS",
-            callback_data="adm:recover",
+            text="🔮 FUTURE SIGNAL • TG",
+            callback_data="tgadv:futuresignal",
         )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
