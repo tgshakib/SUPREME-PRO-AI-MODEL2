@@ -424,11 +424,6 @@ class BotStateManager:
         }
 
     async def fire_instance_signal(self) -> ForexSignal:
-        from otc_price_service import is_broker_feed_ready
-        if not is_broker_feed_ready("qx"):
-            raise RuntimeError(
-                "Authenticated Quotex tick feed is not ready; instance signal withheld"
-            )
         engine = InstanceSignalEngine(self.to_engine_dict())
         signal = await engine.generate()
         self._last_signal = signal

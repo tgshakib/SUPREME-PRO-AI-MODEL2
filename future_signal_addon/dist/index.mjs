@@ -31629,7 +31629,7 @@ var require_abort_controller = __commonJS({
         value: "AbortSignal"
       });
     }
-    var AbortController2 = class {
+    var AbortController = class {
       /**
        * Initialize this controller.
        */
@@ -31657,21 +31657,21 @@ var require_abort_controller = __commonJS({
       }
       return signal;
     }
-    Object.defineProperties(AbortController2.prototype, {
+    Object.defineProperties(AbortController.prototype, {
       signal: { enumerable: true },
       abort: { enumerable: true }
     });
     if (typeof Symbol === "function" && typeof Symbol.toStringTag === "symbol") {
-      Object.defineProperty(AbortController2.prototype, Symbol.toStringTag, {
+      Object.defineProperty(AbortController.prototype, Symbol.toStringTag, {
         configurable: true,
         value: "AbortController"
       });
     }
-    exports.AbortController = AbortController2;
+    exports.AbortController = AbortController;
     exports.AbortSignal = AbortSignal;
-    exports.default = AbortController2;
-    module.exports = AbortController2;
-    module.exports.AbortController = module.exports["default"] = AbortController2;
+    exports.default = AbortController;
+    module.exports = AbortController;
+    module.exports.AbortController = module.exports["default"] = AbortController;
     module.exports.AbortSignal = AbortSignal;
   }
 });
@@ -34615,12 +34615,12 @@ var require_lib5 = __commonJS({
       const dest = new URL$1(destination).protocol;
       return orig === dest;
     };
-    function fetch2(url, opts) {
-      if (!fetch2.Promise) {
+    function fetch(url, opts) {
+      if (!fetch.Promise) {
         throw new Error("native promise missing, set fetch.Promise to your favorite alternative");
       }
-      Body.Promise = fetch2.Promise;
-      return new fetch2.Promise(function(resolve, reject) {
+      Body.Promise = fetch.Promise;
+      return new fetch.Promise(function(resolve, reject) {
         const request = new Request(url, opts);
         const options = getNodeRequestOptions(request);
         const send = (options.protocol === "https:" ? https : http).request;
@@ -34691,7 +34691,7 @@ var require_lib5 = __commonJS({
         req.on("response", function(res) {
           clearTimeout(reqTimeout);
           const headers = createHeadersLenient(res.headers);
-          if (fetch2.isRedirect(res.statusCode)) {
+          if (fetch.isRedirect(res.statusCode)) {
             const location = headers.get("Location");
             let locationURL = null;
             try {
@@ -34753,7 +34753,7 @@ var require_lib5 = __commonJS({
                   requestOpts.body = void 0;
                   requestOpts.headers.delete("content-length");
                 }
-                resolve(fetch2(new Request(locationURL, requestOpts)));
+                resolve(fetch(new Request(locationURL, requestOpts)));
                 finalize();
                 return;
             }
@@ -34845,11 +34845,11 @@ var require_lib5 = __commonJS({
         stream.end();
       }
     }
-    fetch2.isRedirect = function(code) {
+    fetch.isRedirect = function(code) {
       return code === 301 || code === 302 || code === 303 || code === 307 || code === 308;
     };
-    fetch2.Promise = global.Promise;
-    module.exports = exports = fetch2;
+    fetch.Promise = global.Promise;
+    module.exports = exports = fetch;
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.default = exports;
     exports.Headers = Headers;
@@ -38689,28 +38689,6 @@ var BOT_TOKEN = process.env["TELEGRAM_BOT_TOKEN"];
 var ADMIN_CHAT_ID = process.env["BOT_ADMIN_ID"] ?? process.env["TELEGRAM_ADMIN_CHAT_ID"];
 var INTEGRATED_RELAY = process.env["INTEGRATED_UPDATE_RELAY"] === "1";
 var FUTURE_PANEL_IMAGE = "assets/future_signal_panel.png";
-var INTERNAL_FEED_URL = "http://127.0.0.1:8080/internal/broker-feed-readiness";
-async function requireAuthenticatedBrokerFeed(market) {
-  const broker = market === "quotex" ? "qx" : market === "po" ? "po" : null;
-  if (!broker) return;
-  const secret = process.env["SESSION_SECRET"] ?? "";
-  if (!secret) throw new Error("Internal feed readiness authentication is unavailable");
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1200);
-  try {
-    const response = await fetch(INTERNAL_FEED_URL, {
-      headers: { "X-Internal-Secret": secret },
-      signal: controller.signal
-    });
-    if (!response.ok) throw new Error(`Feed readiness endpoint returned ${response.status}`);
-    const status = await response.json();
-    if (status[broker] !== true) {
-      throw new Error(`${broker.toUpperCase()} authenticated tick feed is not ready`);
-    }
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 var realAssets = [
   "AUD/CAD",
   "AUD/CHF",
@@ -40198,7 +40176,6 @@ Choose signals per pair:`,
       ctx.session.state = "idle";
       let msg;
       try {
-        await requireAuthenticatedBrokerFeed(market ?? "real");
         msg = await buildSignalMessage(selectedAssets, direction, market ?? "real", count, settings);
       } catch (err) {
         logger.error({ err }, "Signal generation error");
@@ -40260,7 +40237,6 @@ Choose signals per pair:`,
     ctx.session.state = "idle";
     let msg;
     try {
-      await requireAuthenticatedBrokerFeed(market ?? "real");
       msg = await buildHourBlockMessage(selectedAssets, direction, market ?? "real", settings);
     } catch (err) {
       logger.error({ err }, "1Hr block generation error");
