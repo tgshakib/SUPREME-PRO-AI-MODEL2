@@ -1,6 +1,6 @@
 """Focused regression tests for forex signal safety gates."""
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import forex_engine
 import forex_quick_engine as quick
@@ -62,6 +62,24 @@ class ForexSafetyTests(unittest.TestCase):
         self.assertFalse(zones._near_measured_zone(1.10, None, None))
         self.assertFalse(zones._near_measured_zone(1.10, 1.10, None))
         self.assertTrue(zones._near_measured_zone(1.10, 1.105, 0.01))
+
+
+class ForexBackgroundScannerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_immediate_scan_uses_full_depth_engine(self):
+        setup = {"user_id": 7, "status": "active"}
+        send_signal = AsyncMock(return_value=True)
+        with (
+            patch.object(forex_engine.db, "get_forex_setup", return_value=setup),
+            patch.object(
+                forex_engine.db, "list_open_forex_signals", return_value=[]
+            ),
+            patch.object(forex_engine, "_send_signal", send_signal),
+        ):
+            sent = await forex_engine.trigger_immediate_scan(object(), 7)
+
+        self.assertTrue(sent)
+        send_signal.assert_awaited_once()
+        self.assertFalse(send_signal.await_args.kwargs["force_signal"])
 
 
 if __name__ == "__main__":

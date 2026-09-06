@@ -2209,7 +2209,7 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
 
 
 async def run_signal_loop(bot: Bot):
-    """Main scan loop — picks setups eligible for a new signal."""
+    """Continuously scan every active Forex setup until its owner stops it."""
     while True:
         try:
             setups = db.list_active_forex_setups()
@@ -2218,12 +2218,9 @@ async def run_signal_loop(bot: Bot):
                 user_id = s["user_id"]
                 forced = int(user_id) in _FORCE_IMMEDIATE
 
-                # ONE-AT-A-TIME GATE — paid users see one signal at a time.
-                # The next one only fires after they tap NEW SIGNAL once
-                # the current signal has closed (TP / SL).
-                if int(s.get("more_signal_requested") or 0) == 0 and not forced:
-                    continue
-                # Also skip if they still have any open signal in flight.
+                # Keep one live trade at a time, then automatically search for
+                # the next qualified setup after it closes. No NEW SIGNAL tap
+                # is required while the persisted Forex switch remains active.
                 try:
                     if db.list_open_forex_signals(user_id):
                         continue
@@ -2270,10 +2267,7 @@ async def run_signal_loop(bot: Bot):
 
 
 async def trigger_immediate_scan(bot: Bot, user_id: int):
-    """Called from the NEW SIGNAL handler. Marks the user for an instant
-    scan and runs one cycle right now so the next sniper signal lands in
-    seconds instead of minutes."""
-    _FORCE_IMMEDIATE.add(int(user_id))
+    """Run one immediate full-depth qualification cycle for an active user."""
     try:
         setup = db.get_forex_setup(user_id)
         if not setup or setup.get("status") != "active":
@@ -2284,12 +2278,10 @@ async def trigger_immediate_scan(bot: Bot, user_id: int):
                 return False
         except Exception:
             pass
-        return await _send_signal(bot, setup, force_signal=True)
+        return await _send_signal(bot, setup, force_signal=False)
     except Exception as e:
         print(f"[forex_engine] immediate scan error: {e}")
         return False
-    finally:
-        _FORCE_IMMEDIATE.discard(int(user_id))
 
 
 # ── I'M IN: REAL-PRICE TP/SL tracker ──────────────────────

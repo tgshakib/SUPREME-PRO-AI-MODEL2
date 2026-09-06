@@ -7,3 +7,4 @@
 - [Finorix Elite Engine](finorix-elite-engine.md) — finorix_elite_engine.py; 5-module: H1→M15→M5→M1 cascade + elite S&R zones + hidden reversal detector + ADX/EMA trend strength + zone confluence; HIDDEN grade = triple vote; signal text NEVER touched
 - [Binary & Forex Strength Upgrade](binary-forex-upgrade.md) — binary: OTC 0 gates=BLOCKED/1=WEAK/2+=standard+; LIVE <2 gates=BLOCKED; doji 0.22→0.28; oppose 0.60→0.45; _otc_min 4→6; forex: min TP1=100 pips; SL max 30→20 pips; forex_quick_engine.py consensus gate
 - [OTC direction and fallback integrity](broker-native-direction-integrity.md) — PO/QX use legacy shared fallback when native feeds fail; never blanket-invert PO or inflate one engine into many votes
+- [Persistent Forex background scanning](forex-background-scanning.md) — active Forex scans silently until stopped, auto-resumes after closure, and stays independent from Funded Pass

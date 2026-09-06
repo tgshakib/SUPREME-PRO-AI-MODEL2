@@ -77,11 +77,10 @@ class ForexState(StatesGroup):
 async def _fx_quick_analyze_and_signal(
     bot: Bot, chat_id: int, user_id: int, *, wipe_first: bool = False
 ):
-    """Show an 8-10 second 'Quick AI Scan' screen then fire a forex signal.
+    """Run a silent deep Forex scan for up to one minute.
 
-    Called on first activation AND every time the user taps NEW SIGNAL.
-    Signal text, buttons, and all downstream formatting are UNCHANGED.
-    Supports all pairs — Forex, XAU/USD (Gold), BTC, all crypto/indices.
+    Analysis stays in the background. A Telegram message is sent only when
+    the full engine qualifies and reserves a real setup.
 
     Parameters
     ----------
@@ -89,8 +88,6 @@ async def _fx_quick_analyze_and_signal(
         When True, closes open signals and wipes old signal cards from the
         chat before showing the analysis screen (used by the NEW SIGNAL button).
     """
-    import random as _rnd
-
     # ── Optional: close stale signals + wipe old cards ────────────────────
     if wipe_first:
         try:
@@ -105,62 +102,20 @@ async def _fx_quick_analyze_and_signal(
             await wipe_user_signals(bot, user_id)
         except Exception:
             pass
-        # NOTE: do NOT set more_signal_requested here — the background loop
-        # would pick it up during our sleep and fire a duplicate, blocking us.
-
-    # ── Show bounded analysis screen (under ten seconds end-to-end) ─────────
-    _dots_frames = ["⏳", "⌛", "⏳", "⌛"]
-    _base_text   = "<b>FX SUPREME PRO AI ANALYSING CHARTS</b>"
-    loading_id   = await show_screen(
-        bot, chat_id,
-        f"{_dots_frames[0]}  {_base_text}",
-        reply_markup=None,
-    )
-
-    for _frame in _dots_frames[1:]:
-        await asyncio.sleep(_rnd.uniform(0.7, 0.9))
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id, message_id=loading_id,
-                text=f"{_frame}  {_base_text}",
-                parse_mode="HTML",
-            )
-            db.set_active_msg(chat_id, loading_id)
-        except Exception:
-            pass
-
-    await asyncio.sleep(_rnd.uniform(0.5, 0.7))
-
-    # ── Delete the analysis screen ────────────────────────────────────────
-    try:
-        await bot.delete_message(chat_id, loading_id)
-    except Exception:
-        pass
-    db.clear_active_msg(chat_id)
-
-    # ── Fire the signal immediately ───────────────────────────────────────
+    # Deep analysis gets the same bounded waiting window as Funded Pass-style
+    # activation. No timeout/no-setup status is posted into the user's chat.
     try:
         from forex_engine import trigger_immediate_scan
-        sent = await asyncio.wait_for(
-            trigger_immediate_scan(bot, user_id),
-            timeout=5.0,
-        )
-        if not sent:
-            await show_screen(
-                bot, chat_id,
-                "🛑 <b>NO QUALIFIED FOREX SETUP</b>\n"
-                "━━━━━━━━━━━━━━━━━━━\n"
-                "The current price, source, or confirmation checks did not "
-                "qualify for an entry. No trade was created.",
-                reply_markup=None,
-            )
-    except asyncio.TimeoutError:
-        await show_screen(
-            bot, chat_id,
-            "⏱️ <b>FOREX ANALYSIS TIMED OUT</b>\n"
-            "No qualified setup was created. Try again after market data recovers.",
-            reply_markup=None,
-        )
+        deadline = asyncio.get_running_loop().time() + 60.0
+        while asyncio.get_running_loop().time() < deadline:
+            setup = db.get_forex_setup(user_id)
+            if not setup or setup.get("status") != "active":
+                return
+            if db.list_open_forex_signals(user_id):
+                return
+            if await trigger_immediate_scan(bot, user_id):
+                return
+            await asyncio.sleep(5)
     except Exception as _qe:
         print(f"[forex] _fx_quick_analyze_and_signal error: {_qe}")
 
@@ -397,9 +352,7 @@ async def cb_fx_tp(call: CallbackQuery, state: FSMContext):
                       forex_active_kb(gold_king=gold_on,
                                       floating_limit=floating_on))
 
-    # ── Immediate first signal — fire within 7-10 s ───────────────────────
-    # After the user completes TF → Pairs → Pips setup, launch the animated
-    # analysis scan immediately. Signal (text + photo) fires at the end.
+    # Start a silent deep scan now; the persistent engine continues afterward.
     asyncio.create_task(
         _fx_quick_analyze_and_signal(
             call.bot, call.message.chat.id, call.from_user.id,
@@ -416,13 +369,6 @@ async def cb_fx_stop(call: CallbackQuery, bot: Bot):
     is left on a clean home screen, exactly as requested."""
     user_id = call.from_user.id
     db.set_forex_status(user_id, "stopped")
-    # Also stop any active Funded Pass challenge so both streams halt together
-    try:
-        fp = db.get_funded_pass(user_id)
-        if fp and fp.get("status") == "active":
-            db.set_funded_pass_status(user_id, "stopped")
-    except Exception:
-        pass
     # Reset the per-session I'M IN counter — next active session restarts at #01.
     reset_session_seq(user_id)
     # Close out every still-open signal so they stop being tracked
@@ -591,10 +537,7 @@ async def cb_fx_new(call: CallbackQuery, bot: Bot):
                 show_alert=True,
             )
             return
-    await call.answer("⚡ Quick AI Scan starting…", show_alert=False)
-    # Show 6-7 second Quick Analysis animation, wipe old cards, then fire
-    # signal immediately — `wipe_first=True` handles closing open signals,
-    # wiping old cards, and re-arming the one-at-a-time gate internally.
+    await call.answer("Deep AI scan running in background…", show_alert=False)
     asyncio.create_task(
         _fx_quick_analyze_and_signal(
             bot, call.message.chat.id, user_id, wipe_first=True
