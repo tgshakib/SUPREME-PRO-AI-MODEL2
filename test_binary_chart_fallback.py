@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import pandas as pd
 from handlers import signal as signal_handler
 import otc_price_service as price_service
+import po_otc_engine
 import session_drift_monitor as qx_monitor
 import self_improve
 import signals
@@ -18,6 +20,7 @@ class BinaryChartFallbackTests(unittest.TestCase):
     def setUp(self) -> None:
         qx_monitor._reset_for_tests()
         qx_monitor.mark_authenticated("test-qx-session")
+        po_otc_engine._CACHE.clear()
         with price_service._LOCK:
             price_service._PRICES.clear()
             price_service._BROKER_PRICES.clear()
@@ -66,6 +69,133 @@ class BinaryChartFallbackTests(unittest.TestCase):
 
         self.assertIsNotNone(payload)
         self.assertEqual(payload["direction"], "BUY")
+
+    def test_rising_streak_without_a_bearish_turn_does_not_sell(self) -> None:
+        """A bullish streak alone is not evidence of an exhaustion reversal."""
+        closes = pd.Series([1.0 + index * 0.001 for index in range(30)])
+        opens = closes - 0.0005
+        highs = closes + 0.0002
+        lows = opens - 0.0002
+        neutral = pd.Series([50.0] * len(closes))
+        distant_upper = closes + 10
+        distant_lower = closes - 10
+
+        with patch.object(po_otc_engine, "_rsi", return_value=neutral), patch.object(
+            po_otc_engine, "_stoch", return_value=(neutral, neutral)
+        ), patch.object(
+            po_otc_engine, "_cci", return_value=neutral
+        ), patch.object(
+            po_otc_engine, "_bb", return_value=(distant_upper, distant_lower)
+        ):
+            result = po_otc_engine._analyze_arrays(
+                opens, highs, lows, closes, pd.Series([0.0] * len(closes)),
+            )
+
+        self.assertIsNone(result)
+
+    def test_card_retains_established_visible_confidence_floor(self) -> None:
+        with patch.object(signals, "next_candle_time_for_user", return_value="15:30 +06"):
+            text, _photo = signals._legacy_binary_card(
+                "AUD/CHF", "LIVE", "1 MIN", 1, "BUY", "📈 BULLISH", 71,
+            )
+        self.assertIn("🎯 Confidence: <b>93%</b>", text)
+
+    def test_po_engine_requests_only_po_side_of_combined_bridge(self) -> None:
+        """A simultaneous QX tape cannot enter Pocket Option analysis."""
+        def bridge_frame(value: float) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "open": [value] * 30,
+                    "high": [value + 0.01] * 30,
+                    "low": [value - 0.01] * 30,
+                    "close": [value] * 30,
+                    "volume": [1.0] * 30,
+                }
+            )
+
+        po_frame = bridge_frame(1.0)
+        qx_frame = bridge_frame(9.0)
+
+        def selected_bridge(*_args, **kwargs):
+            return po_frame if kwargs.get("broker") == "po" else qx_frame
+
+        analysis = {
+            "direction": "BUY",
+            "score": 20,
+            "signals": 5,
+            "grade": 80,
+            "reasons": [],
+            "streak": 0,
+        }
+        with patch.object(
+            po_otc_engine, "_get_candles_po", return_value=[]
+        ), patch(
+            "otc_realtime_bridge.get_otc_df", side_effect=selected_bridge
+        ) as bridge, patch.object(
+            po_otc_engine, "_get_candles_yf",
+            side_effect=AssertionError("public data must not create a PO trade"),
+        ), patch.object(
+            po_otc_engine, "_analyze_arrays", return_value=analysis
+        ) as analyze:
+            result = po_otc_engine.po_otc_analyze("AUD/CHF 〔OTC〕")
+
+        self.assertEqual(bridge.call_args.kwargs["broker"], "po")
+        self.assertEqual(float(analyze.call_args.args[0].iloc[0]), 1.0)
+        self.assertTrue(result["using_po_data"])
+
+    def test_po_otc_without_native_data_cannot_use_public_chart_fallback(self) -> None:
+        with patch.object(
+            signals, "_chart_view_direction",
+            side_effect=AssertionError("public chart must not drive PO OTC"),
+        ):
+            payload = signals.generate_chart_view_binary_fallback(
+                "AUD/CHF 〔OTC〕", "PO OTC", "1 MIN", 1, "po",
+            )
+        self.assertIsNone(payload)
+
+    def test_single_elite_engine_is_one_safety_vote_not_a_veto(self) -> None:
+        self.assertFalse(
+            signals._strong_consensus_veto(
+                "BUY", {"finorix_elite": "SELL"},
+            )
+        )
+        self.assertTrue(
+            signals._strong_consensus_veto(
+                "BUY",
+                {
+                    "finorix_elite": "SELL",
+                    "finorix_mtf": "SELL",
+                    "candle_master": "SELL",
+                },
+            )
+        )
+
+    def test_no_evidence_returns_refresh_payload_not_sell_ninety_nine(self) -> None:
+        """Absent directional evidence must not create a persistable trade."""
+        disabled = {
+            "price_action_sniper": None,
+            "_otc_god_analyze": None,
+            "otc_reversal_sniper": None,
+            "binary_sniper_analyze": None,
+            "quick_momentum_sniper": None,
+            "_qx_analyze": None,
+            "multi_tf_bias": None,
+            "_detect_reversal": None,
+            "_cm_analyze": None,
+        }
+        with patch.multiple(signals, **disabled), patch.object(
+            po_otc_engine, "po_otc_analyze", return_value=None
+        ), patch.object(
+            signals, "get_market_bias", return_value=None
+        ):
+            payload = signals.generate_signal(
+                "AUD/CHF 〔OTC〕", "PO OTC", "5 MIN", 1, "po",
+            )
+
+        self.assertFalse(payload["is_trade"])
+        self.assertIsNone(payload["direction"])
+        self.assertIsNone(payload["entry_price"])
+        self.assertIn("REFRESHING SELECTED BROKER DATA", payload["text"])
 
     def test_selected_quotex_tape_never_uses_pocket_option_ticks(self) -> None:
         for price in (1.10000, 1.10010, 1.10020):

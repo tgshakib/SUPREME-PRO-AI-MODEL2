@@ -319,7 +319,7 @@ def _chart_view_direction(
     is_otc = "〔OTC〕" in pair or "(OTC)" in pair.upper()
     # Quotex synthetic candles are independent from public charts. A QX
     # request must be decided by the selected-broker feed or withheld.
-    if is_otc and broker == "qx":
+    if is_otc and broker in {"po", "qx"}:
         return None, None, "", 0.0, 0
 
     chart_pair = (pair.replace("〔OTC〕", "").replace("(OTC)", "").strip())
@@ -375,6 +375,29 @@ def _candle_timestamp(value) -> float:
         except ValueError:
             return 0.0
     return 0.0
+
+
+def _strong_consensus_veto(
+    direction: Optional[str],
+    source_votes: Dict[str, Optional[str]],
+) -> bool:
+    """Return whether independent current engine sources decisively oppose.
+
+    Source names are dictionary keys so an elite grade or an engine's internal
+    sub-model weighting can never count the same named engine more than once.
+    """
+    votes = [
+        vote for vote in source_votes.values()
+        if vote in {"BUY", "SELL"}
+    ]
+    agree = sum(vote == direction for vote in votes)
+    oppose = sum(vote != direction for vote in votes)
+    return bool(
+        direction in {"BUY", "SELL"}
+        and oppose >= 3
+        and oppose >= 2 * max(1, agree)
+        and oppose / len(votes) >= 0.75
+    )
 
 
 def _generate_quotex_otc_signal(
@@ -557,7 +580,7 @@ def _legacy_binary_card(
     sep3 = "━━━━━━━━━━━━━━━━━━━━━"
     sep4 = "━━━━━━━━━━━━━━━━━━━━━━━"
     note = "<i>⚠️ Enter on the NEW candle · Use proper risk management.</i>"
-    conf_display = f"<b>{max(93, confidence or 93)}%</b>"
+    conf_display = f"<b>{max(93, int(confidence or 93))}%</b>"
 
     if is_non_mtg:
         text = (
@@ -643,19 +666,13 @@ def generate_chart_view_binary_fallback(
     # The original real-time chart-view engine remains the fallback for both
     # OTC and LIVE when the selected stream has not yet formed a direction.
     if direction is None:
-        if is_otc and broker == "qx":
+        if is_otc and broker in {"po", "qx"}:
             return None
         direction, chart_entry, _source, _source_ts, chart_confidence = (
             _chart_view_direction(pair, broker)
         )
     if direction not in {"BUY", "SELL"}:
         return None
-
-    # The historic PO mirror applies only to a public chart reference. A
-    # direction built from Pocket Option's own live tape is already in PO
-    # market terms and must never be inverted.
-    if is_otc and broker == "po" and not selected_broker_tape:
-        direction = "SELL" if direction == "BUY" else "BUY"
 
     trend = "📈 BULLISH" if direction == "BUY" else "📉 BEARISH"
     text, photo = _legacy_binary_card(
@@ -676,7 +693,7 @@ def generate_chart_view_binary_fallback(
         "is_trade": True,
         "direction": direction,
         "trend": trend,
-        "confidence": max(93, chart_confidence or 93),
+        "confidence": chart_confidence,
         "text": text,
         "photo": photo,
         "entry_price": entry_price,
@@ -821,7 +838,7 @@ def generate_fast_binary_signal(
     # It only uses a real chart direction, never a time-based/random fallback.
     # OTC keeps the selected broker as the preferred source above; this is
     # used only when that source has not started delivering data.
-    if direction is None and not (is_otc and broker == "qx"):
+    if direction is None and not (is_otc and broker in {"po", "qx"}):
         (
             chart_direction,
             chart_entry,
@@ -1142,9 +1159,8 @@ def generate_signal(
             pass
 
     # ── PO OTC ENGINE — Pocket Option exclusive, highest priority ────────
-    # Analyzes real PO WebSocket candles when PO_SSID is set (using_po_data=True
-    # → no mirror needed). Falls back to yfinance with PO-tuned algorithms
-    # (using_po_data=False → PO mirror applies in the mirror block below).
+    # Analyzes real PO WebSocket candles when PO_SSID is set.  Any fallback is
+    # still evaluated as its own reference feed; directions are never mirrored.
     _po_otc_result      = None
     _po_engine_mode     = False
     _po_using_real_data = False
@@ -1154,6 +1170,22 @@ def generate_signal(
             _po_otc_result = _po_analyze(pair)
         except Exception:
             _po_otc_result = None
+        if _po_otc_result is None:
+            return {
+                "is_trade": False,
+                "direction": None,
+                "entry_price": None,
+                "source": None,
+                "source_ts": None,
+                "text": (
+                    "🔄 <b>REFRESHING SELECTED BROKER DATA</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💱 <b>{pair}</b>\n"
+                    "📊 Market: <b>OTC</b>\n"
+                    "<i>Tap Again Analyze once the selected broker price stream "
+                    "has refreshed.</i>"
+                ),
+            }
 
     direction = None
     confidence = None
@@ -1171,7 +1203,7 @@ def generate_signal(
     # consecutive exhaustion, RSI(3/5/7), BB(2.5σ/2.0σ), Stoch(2,1,1),
     # HA flip, engulfing, pin bar, CCI, Williams %R, MFI, divergence.
     # Requires score ≥14 + 5 signals + ZERO opposing votes.
-    # When real PO socket data → no mirror. yfinance → mirror applies.
+    # All returned directions remain in the source feed's own terms.
     # ════════════════════════════════════════════════════════════════
     if _po_otc_result is not None:
         direction           = _po_otc_result["direction"]
@@ -1299,7 +1331,7 @@ def generate_signal(
             elite_confirmed = True
         elif vol_sniper.get("ultra_vol"):
             elite_confirmed = True
-            confidence = min(100, (confidence or 99) + 1)
+            confidence = min(100, (confidence if confidence is not None else 0) + 1)
 
     # ════════════════════════════════════════════════════════════════
     # PRIORITY 2.5 — QX EXPERT SUPREME ELITE V10
@@ -1323,13 +1355,13 @@ def generate_signal(
         elif direction == qx_dir:
             # QX agrees — boost confidence and mark mode
             qx_mode = True
-            confidence = min(100, (confidence or 99) + int(qx_grade / 25))
+            confidence = min(100, (confidence if confidence is not None else 0) + int(qx_grade / 25))
             if qx_elite:
                 elite_confirmed = True
         elif is_otc and direction is not None and direction != qx_dir:
             # OTC CONVICTION GATE: QX disagrees with current direction → downgrade
             # The new QX requires 14+ votes — if it points opposite, something is wrong
-            confidence = max(95, (confidence or 99) - 4)
+            confidence = max(0, (confidence if confidence is not None else 0) - 4)
             elite_confirmed = False
 
     # ════════════════════════════════════════════════════════════════
@@ -1786,10 +1818,25 @@ def generate_signal(
             direction  = bias[0]
             confidence = int(round(90 + 8 * bias[1]))
         else:
-            # OTC: no reversal engine + no market bias → set weak direction
-            # from minor oscillator tilt; mark as low-conviction below
-            direction  = "BUY" if (datetime.utcnow().minute % 2 == 0) else "SELL"
-            confidence = 93
+            # Never invent an entry when every directional source is absent.
+            # Reuse the established unavailable-data payload rather than a
+            # time-parity BUY/SELL fallback.
+            market_label = "OTC" if is_otc else "LIVE"
+            return {
+                "is_trade": False,
+                "direction": None,
+                "entry_price": None,
+                "source": None,
+                "source_ts": None,
+                "text": (
+                    "🔄 <b>REFRESHING SELECTED BROKER DATA</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💱 <b>{pair}</b>\n"
+                    f"📊 Market: <b>{market_label}</b>\n"
+                    "<i>Tap Again Analyze once the selected broker price stream "
+                    "has refreshed.</i>"
+                ),
+            }
         # For OTC: if we hit this fallback it means NO reversal engine fired.
         # Mark as consolidating so the signal card reflects low conviction.
         if is_otc:
@@ -1807,11 +1854,11 @@ def generate_signal(
             if mm["verdict"] == "CONFIRM":
                 # Mastermind confirmed — boost confidence
                 mm_boost = int(mm["score"] / 20)   # 0-5 pt boost
-                confidence = min(100, (confidence or 99) + mm_boost)
+                confidence = min(100, (confidence if confidence is not None else 0) + mm_boost)
                 elite_confirmed = True
             elif mm["verdict"] == "REJECT":
                 # Mastermind says no — pull confidence back slightly
-                confidence = max(97, (confidence or 99) - 3)
+                confidence = max(0, (confidence if confidence is not None else 0) - 3)
         except Exception:
             mm = None
 
@@ -1828,7 +1875,7 @@ def generate_signal(
             if pi is not None:
                 if pi["direction"] == direction:
                     pi_boost = int(pi["engines"] / 5)
-                    confidence = min(100, (confidence or 99) + pi_boost)
+                    confidence = min(100, (confidence if confidence is not None else 0) + pi_boost)
                     pi_mode = True
                     if pi["elite"]:
                         elite_confirmed = True
@@ -1841,7 +1888,7 @@ def generate_signal(
         try:
             adv = _adv_analyze(pair, is_otc=is_otc)
             if adv is not None and adv["direction"] == direction:
-                confidence = min(100, (confidence or 99) + int(adv["engines"] / 6))
+                confidence = min(100, (confidence if confidence is not None else 0) + int(adv["engines"] / 6))
                 if adv.get("elite"):
                     elite_confirmed = True
         except Exception:
@@ -1854,7 +1901,7 @@ def generate_signal(
         try:
             otcm = _otcm_analyze(pair)
             if otcm is not None and otcm["direction"] == direction:
-                confidence = min(100, (confidence or 99) + int(otcm["engines"] / 2))
+                confidence = min(100, (confidence if confidence is not None else 0) + int(otcm["engines"] / 2))
         except Exception:
             pass
 
@@ -1866,7 +1913,7 @@ def generate_signal(
         try:
             pt = _pt_analyze(pair, is_otc=is_otc)
             if pt is not None and pt["direction"] == direction:
-                confidence = min(100, (confidence or 99) + int(pt["engines"] / 4))
+                confidence = min(100, (confidence if confidence is not None else 0) + int(pt["engines"] / 4))
                 if pt.get("elite"):
                     elite_confirmed = True
         except Exception:
@@ -1919,6 +1966,101 @@ def generate_signal(
                     elite_confirmed = True
         except Exception as _liqe:
             print(f"[signals] mtf_liquidity error: {_liqe}")
+
+    # Safety veto provenance is deliberately separate from weighted confidence
+    # votes. Each named engine contributes at most one current directional
+    # vote, regardless of elite grade or internal sub-model count.
+    _safety_votes: Dict[str, Optional[str]] = {
+        "po_otc": (
+            (_po_otc_result or {}).get("direction") if _po_engine_mode else None
+        ),
+        "otc_god": (otc_god or {}).get("direction"),
+        "one_minute": (one_min or {}).get("direction"),
+        "price_action": (
+            (pa_sniper or {}).get("direction")
+            if (pa_sniper or {}).get("weighted", 0) >= _pa_thr else None
+        ),
+        "otc_reversal": (
+            (otc_sniper or {}).get("direction")
+            if (otc_sniper or {}).get("agree", 0) >= _otc_min else None
+        ),
+        "binary_sniper": (bin_sniper or {}).get("direction"),
+        "momentum": (vol_sniper or {}).get("direction"),
+        "qx_expert": (qx_sniper or {}).get("direction"),
+        "multi_timeframe": (mtf or {}).get("direction"),
+        "sniper": (sniper or {}).get("direction"),
+        "candle_master": _cm_dir,
+        "institutional_flow": _inst_dir,
+        "finorix": (
+            (locals().get("_ae") or {}).get("direction")
+            if (
+                (locals().get("_ae") or {}).get("signal_valid")
+                and (locals().get("_ae") or {}).get("confidence", 0) >= 70
+            )
+            else (
+                (locals().get("_fx_res") or {}).get("direction")
+                if (locals().get("_fx_res") or {}).get("confidence", 0) >= 75
+                else None
+            )
+        ),
+        "finorix_mtf": (
+            (locals().get("_fmtf") or {}).get("direction")
+            if (locals().get("_fmtf") or {}).get("confidence", 0) >= 68
+            else None
+        ),
+        "finorix_elite": (
+            (locals().get("_fe") or {}).get("direction")
+            if (locals().get("_fe") or {}).get("confidence", 0) >= 70
+            else None
+        ),
+        "finorix_multi": (
+            (locals().get("_fm") or {}).get("direction")
+            if (locals().get("_fm") or {}).get("confidence", 0) >= 74
+            else None
+        ),
+        "reversal_zone": (
+            (locals().get("_rv") or {}).get("reversal_dir")
+            if (locals().get("_rv") or {}).get("zone_quality", 0) >= 70 else None
+        ),
+        "finorix_sharp": (
+            (locals().get("_fs") or {}).get("direction")
+            if (locals().get("_fs") or {}).get("ok") else None
+        ),
+        "stockley": (
+            (locals().get("_st") or {}).get("direction")
+            if (locals().get("_st") or {}).get("ok") else None
+        ),
+        "offx": (
+            (locals().get("_ox") or {}).get("direction")
+            if (locals().get("_ox") or {}).get("ok") else None
+        ),
+        "katcher": (
+            (locals().get("_ka") or {}).get("direction")
+            if (locals().get("_ka") or {}).get("ok") else None
+        ),
+        "day_structure": (
+            (locals().get("_ds") or {}).get("signal")
+            if (locals().get("_ds") or {}).get("confidence", 0) >= 74
+            else None
+        ),
+    }
+    if _strong_consensus_veto(direction, _safety_votes):
+        market_label = "OTC" if is_otc else "LIVE"
+        return {
+            "is_trade": False,
+            "direction": None,
+            "entry_price": None,
+            "source": None,
+            "source_ts": None,
+            "text": (
+                "🔄 <b>REFRESHING SELECTED BROKER DATA</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💱 <b>{pair}</b>\n"
+                f"📊 Market: <b>{market_label}</b>\n"
+                "<i>Tap Again Analyze once the selected broker price stream "
+                "has refreshed.</i>"
+            ),
+        }
 
     if direction == "BUY":
         header = "🟢 <b>CALL  |  BUY</b>「 <b>SUPREME PRO AI</b> 」"
@@ -2059,40 +2201,6 @@ def generate_signal(
             elite_confirmed = True
     except Exception:
         pass
-
-    # ── POCKET OPTION OTC MIRROR — Direction inversion ───────────────────
-    # KEY INSIGHT: PO OTC and Quotex OTC for the same pair move in OPPOSITE
-    # directions at the same moment. yfinance data mirrors the Quotex OTC
-    # candle direction. All engines above analysed yfinance → Quotex OTC
-    # direction. For PO OTC we simply invert the final direction so the
-    # signal matches PO's synthetic feed reality.
-    # This logic runs ONLY for Pocket Option OTC — Quotex and live pairs
-    # are unaffected.
-    _po_mirror_active = False
-    if broker == "po" and is_otc and direction is not None and not _po_using_real_data:
-        direction = "SELL" if direction == "BUY" else "BUY"
-        _po_mirror_active = True
-        print(f"[signals] 🔄 PO MIRROR: {pair} → inverted to {direction} "
-              f"(QX direction was {'BUY' if direction == 'SELL' else 'SELL'})")
-        # Reassign header / arrow / photo for the flipped direction
-        if direction == "BUY":
-            header       = "🟢 <b>CALL  |  BUY</b>「 <b>SUPREME PRO AI</b> 」"
-            signal_arrow = "🟢 <b>CALL / UP</b>"
-            photo        = SIGNAL_PHOTO_BUY
-        else:
-            header       = "🔴 <b>PUT  |  SELL</b>「 <b>SUPREME PRO AI</b> 」"
-            signal_arrow = "🔴 <b>PUT / SELL</b>"
-            photo        = SIGNAL_PHOTO_SELL
-        # Flip the trend label to match PO's inverted candle reality
-        _trend_mirror = {
-            "⬆️ STRONG UP":    "⬇️ STRONG DOWN",
-            "⬇️ STRONG DOWN":  "⬆️ STRONG UP",
-            "📈 BULLISH":      "📉 BEARISH",
-            "📉 BEARISH":      "📈 BULLISH",
-            "↔️ RANGING":      "↔️ RANGING",
-            "⚖️ CONSOLIDATION":"⚖️ CONSOLIDATION",
-        }
-        trend = _trend_mirror.get(trend, trend)
 
     # Roll a hidden outcome for THIS signal so the NEXT call can decide
     # whether to flip into recovery mode. With the PRO V5 filter stack the
@@ -2494,11 +2602,10 @@ def generate_signal(
         except Exception:
             pass
 
-    # Confidence display — number only
-    # Floor at 93 so free users and assessed users always see the same
-    # high win-rate (no visible difference between user types).
-    confidence = max(93, confidence or 93)
-    conf_display = f"<b>{confidence}%</b>"
+    # Keep internal confidence real for gating and persistence; only the
+    # established visible card format applies its historical display floor.
+    confidence = int(confidence) if confidence is not None else 0
+    conf_display = f"<b>{max(93, confidence or 93)}%</b>"
 
     # ── GOLD V8: Signal strategy tag — scaled to REAL confidence ─────────
     if elite_confirmed and confidence >= 93:
@@ -2635,10 +2742,10 @@ def generate_signal(
             "user_id": user_id,
             "pair": pair,
             "market": market,
-            "direction": direction or "SELL",
+            "direction": direction,
             "timeframe": tf_label,
             "engine": _driven_by,
-            "confidence": confidence or 99,
+            "confidence": confidence,
             "weighted_score": _pa_weighted,
             "entry_price": _entry_price,
             "expiry_minutes": _expiry_min,

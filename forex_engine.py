@@ -161,6 +161,18 @@ def _confidence_grade(score: int) -> str:
     return "A · 85-89% ✅"
 
 
+def _can_override_finorix_opposition(
+    sniper: dict | None, finorix_confidence: float, institutional_confirmed: bool,
+) -> bool:
+    """Allow an opposing Finorix read only on stronger independent evidence."""
+    return (
+        sniper is not None
+        # A one-point difference is measurement noise, not stronger evidence.
+        and float(sniper.get("score", 0)) >= float(finorix_confidence) + 5
+        and institutional_confirmed
+    )
+
+
 def _is_metal_pair(pair: str) -> bool:
     p = (pair or "").upper().replace(" ", "")
     return any(k in p for k in ("XAU", "XAG", "GOLD", "SILVER"))
@@ -1836,6 +1848,9 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
         print(f"[forex_engine] no bias/sniper for {pair} — skipping signal")
         return   # no direction available, do not send random signal
     direction, entry, tps, sl, dec, pattern = _levels
+    # `_generate_levels` records a SMART packet only when it actually drove
+    # this candidate; use that record for later safety classification.
+    _smart_for_signal = last_smart(pair)
     pip = live_pip_size(pair)
     floating_limit = bool(int(setup.get("floating_limit") or 0))
 
@@ -1894,6 +1909,9 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
     # If it AGREES (or no data) → signal passes. Trap detection = instant pass.
     _inst_flow = None
     _inst_agrees = True   # default = allow when no data
+    # Unlike the permissive default above, an override of a strong opposing
+    # Finorix read needs positive, observed institutional confirmation.
+    _inst_confirmed = False
     if not _fast_manual and _INST_FLOW_OK and _inst_flow_analyze is not None:
         try:
             _inst_flow = _inst_flow_analyze(pair, is_otc=False)
@@ -1910,7 +1928,10 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
                     else:
                         # Trap agrees — elite institutional entry
                         _has_liq_anchor = True
+                        _inst_confirmed = True
                         print(f"[forex_engine] 🪤 TRAP CONFIRMED {pair} {direction} — entering with institution")
+                elif _if_dir == direction:
+                    _inst_confirmed = True
                 elif _if_dir not in ("NEUTRAL", direction) and _inst_flow.get("confidence", 0) >= 0.70:
                     print(f"[forex_engine] 🚫 INST FLOW opposing {pair}: "
                           f"flow={_if_dir} signal={direction} conf={_inst_flow['confidence']:.2f}")
@@ -1920,6 +1941,23 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
 
     if not _fast_manual and not _inst_agrees and not _has_sniper:
         return   # institutional flow opposes AND we have no sniper — skip
+
+    # A plain trend-following sniper is a continuation candidate.  When the
+    # available institutional read explicitly shows no volume/ATR expansion,
+    # it cannot be promoted on trend alone: it needs a real liquidity/pattern
+    # anchor and directional institutional confirmation.
+    _low_vol_continuation = (
+        _smart_for_signal is None
+        and pattern is None
+        and _inst_flow is not None
+        and _inst_flow.get("ok")
+        and not _inst_flow.get("volume_expansion", False)
+    )
+    if (_low_vol_continuation
+            and (not _has_liq_anchor or not _inst_confirmed)):
+        print(f"[forex_engine] ⏳ low-vol continuation waiting {pair}: "
+              f"liq_anchor={_has_liq_anchor} inst_confirmed={_inst_confirmed}")
+        return
 
     # After a confirmed SL, do not immediately “chase” the market with a new
     # setup.  Wait for the next candidate to have a sniper trigger plus a
@@ -1956,8 +1994,10 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
 
     # ── FINORIX SUPREME ANALYSIS ENGINE — silent confirmation layer ──────
     # Runs the 12-model weighted AI (SMC, Indicators, Wyckoff, Divergence,
-    # Market Structure). When Finorix has a hard VETO (split consensus) AND
-    # no sniper backed us → skip. When it agrees → log elite confirmation.
+    # Market Structure). A high-confidence opposing read is a block, unless
+    # a *stronger* independent sniper and observed institutional flow both
+    # confirm this candidate.  Mere presence of a sniper/pattern is not an
+    # override.
     if not force_signal and _FINORIX_FX_OK and _finorix_analyse is not None:
         try:
             _fx = _finorix_analyse(pair, "FOREX")
@@ -1969,10 +2009,20 @@ async def _send_signal(bot: Bot, setup: dict, *, force_signal: bool = False):
                 print(f"[forex_engine] ✅ FINORIX CONFIRMED {pair} {direction} "
                       f"grade={_fx['grade']} conf={_fx['confidence']} "
                       f"agree={_fx['agree']}%")
-            elif _fx["direction"] not in ("WAIT", direction) and _fx["confidence"] >= 75:
+            elif _fx["direction"] not in ("WAIT", direction) and _fx.get("confidence", 0) >= 75:
+                _fin_conf = float(_fx.get("confidence", 0))
+                _override = _can_override_finorix_opposition(
+                    sniper, _fin_conf, _inst_confirmed
+                )
+                if not _override:
+                    print(f"[forex_engine] 🚫 FINORIX OPPOSES {pair}: "
+                          f"finorix={_fx['direction']} signal={direction} "
+                          f"conf={_fin_conf:.0f} — blocking")
+                    return
                 print(f"[forex_engine] ⚠️ FINORIX OPPOSES {pair}: "
                       f"finorix={_fx['direction']} signal={direction} "
-                      f"conf={_fx['confidence']} — proceeding (sniper/pattern backed)")
+                      f"conf={_fin_conf:.0f} — overridden by stronger "
+                      f"sniper + institutional confirmation")
         except Exception:
             pass
 

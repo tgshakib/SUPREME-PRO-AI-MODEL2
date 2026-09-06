@@ -146,6 +146,10 @@ def forex_quick_sniper(pair: str) -> Optional[dict]:
 
     votes: dict[str, int] = {"BUY": 0, "SELL": 0}
     total_w = 0
+    # Keep source identity separate from weighted conviction.  SMART's
+    # internal confluence is valuable, but it is still one engine and cannot
+    # manufacture a multi-engine consensus by itself.
+    source_votes: dict[str, str] = {}
     setup_types: list[str] = []
     smart_dir: Optional[str] = None
 
@@ -159,6 +163,7 @@ def forex_quick_sniper(pair: str) -> Optional[dict]:
                 if d in votes:
                     votes[d] += 4
                     total_w  += 4
+                    source_votes["smart"] = d
                     smart_dir = d
                     # Classify the sub-type based on SMART AI internals
                     if sm.get("ms_shift"):
@@ -182,6 +187,7 @@ def forex_quick_sniper(pair: str) -> Optional[dict]:
                     w = 3 if bias_str >= 0.80 else 2
                     votes[bias_dir] += w
                     total_w        += w
+                    source_votes["market_bias"] = bias_dir
     except Exception:
         pass
 
@@ -195,6 +201,7 @@ def forex_quick_sniper(pair: str) -> Optional[dict]:
                     w = 3 if fx.get("confidence", 0) >= 80 else 2
                     votes[d] += w
                     total_w  += w
+                    source_votes["fx_expert"] = d
     except Exception:
         pass
 
@@ -205,6 +212,7 @@ def forex_quick_sniper(pair: str) -> Optional[dict]:
             if snp and snp.get("direction") in votes:
                 votes[snp["direction"]] += 1
                 total_w += 1
+                source_votes["sniper"] = snp["direction"]
     except Exception:
         pass
 
@@ -217,6 +225,7 @@ def forex_quick_sniper(pair: str) -> Optional[dict]:
                 w = 3 if fe.get("grade") == "HIDDEN" else 2
                 votes[fe_dir] += w
                 total_w      += w
+                source_votes["finorix_elite"] = fe_dir
                 if fe.get("trend_phase") == "REVERSAL":
                     setup_types.append("FAKEOUT")
     except Exception:
@@ -232,9 +241,16 @@ def forex_quick_sniper(pair: str) -> Optional[dict]:
     opp_dir   = "SELL" if win_dir == "BUY" else "BUY"
     opp_w     = votes.get(opp_dir, 0)
     opp_ratio = opp_w / max(total_w, 1)
+    winning_sources = sum(1 for voted in source_votes.values()
+                          if voted == win_dir)
+    total_sources = len(source_votes)
+    vote_margin = win_w - opp_w
 
-    # Require: winning side has ≥ 4 weight points AND is a clear majority
-    if win_w < 4 or opp_ratio >= 0.35:
+    # A weighted score measures conviction, not independence.  A qualifying
+    # consensus needs two distinct engines, a non-trivial lead, and no split
+    # decision.  This deliberately rejects a lone SMART vote even at weight 4.
+    if (winning_sources < 2 or total_sources < 2 or win_w < 4
+            or vote_margin < 2 or opp_ratio >= 0.35):
         _cache[pair] = (now, None)
         return None
 
@@ -269,8 +285,8 @@ def forex_quick_sniper(pair: str) -> Optional[dict]:
         "sl_pips":       _sl_pips_for(grade),
         "min_tp":        _min_tp_for(pair),
         "signal_type":   signal_type,
-        "engines_agree": win_w,
-        "engines_total": total_w,
+        "engines_agree": winning_sources,
+        "engines_total": total_sources,
         "oppose_ratio":  round(opp_ratio, 3),
     }
 

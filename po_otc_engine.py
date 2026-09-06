@@ -4,9 +4,10 @@ Purpose-built for Pocket Option OTC synthetic candles.
 
 DATA PRIORITY:
   1. Real PO candles from pocket_option_ws (when PO_SSID is set)
-     → direction is the ACTUAL PO direction, no mirror inversion needed
-  2. yfinance fallback (when no SSID / socket not connected)
-     → direction mirrors Quotex OTC, PO mirror inversion applied in signals.py
+      → direction is the ACTUAL PO direction
+  2. Pocket Option candles from otc_realtime_bridge
+
+Public/yfinance candles are never used to create an executable PO OTC signal.
 
 PO OTC CHARACTERISTICS:
   • Synthetic broker candles — mean-revert at extremes more reliably than live forex
@@ -148,23 +149,39 @@ def _analyze_arrays(op, hi, lo, cl, vol) -> Optional[dict]:
             sell_reasons.append(reason)
 
     # ── S01 — Consecutive candle exhaustion (STRONGEST signal on PO OTC) ──
-    consec_dir = "BUY" if cl.iloc[-2] > op.iloc[-2] else "SELL"
+    # A completed streak is context, not a reversal by itself.  The newest
+    # candle must actually turn against it before this counter-trend vote is
+    # allowed.  In particular, a doji is neutral; it is never silently SELL.
+    previous_body = float(cl.iloc[-2]) - float(op.iloc[-2])
+    latest_body = float(cl.iloc[-1]) - float(op.iloc[-1])
+    if previous_body > 0:
+        consec_dir = "BUY"
+    elif previous_body < 0:
+        consec_dir = "SELL"
+    else:
+        consec_dir = None
     streak = 0
-    for i in range(n - 2, max(n - 12, 0), -1):
-        bar_dir = "BUY" if cl.iloc[i] > op.iloc[i] else "SELL"
-        if bar_dir == consec_dir:
-            streak += 1
-        else:
-            break
-    reversal_dir = "SELL" if consec_dir == "BUY" else "BUY"
-    if streak >= 6:
-        vote(reversal_dir, 5, f"6+ CONSECUTIVE {consec_dir} CANDLES — EXHAUSTION PEAK")
-    elif streak >= 5:
-        vote(reversal_dir, 4, f"5 CONSECUTIVE {consec_dir} CANDLES — REVERSAL IMMINENT")
-    elif streak >= 4:
-        vote(reversal_dir, 3, f"4 CONSECUTIVE {consec_dir} CANDLES — STREAK EXHAUSTION")
-    elif streak >= 3:
-        vote(reversal_dir, 2, f"3 CONSECUTIVE {consec_dir} CANDLES — MOMENTUM FADING")
+    if consec_dir is not None:
+        for i in range(n - 2, max(n - 12, 0), -1):
+            body = float(cl.iloc[i]) - float(op.iloc[i])
+            bar_dir = "BUY" if body > 0 else "SELL" if body < 0 else None
+            if bar_dir == consec_dir:
+                streak += 1
+            else:
+                break
+        reversal_dir = "SELL" if consec_dir == "BUY" else "BUY"
+        reversal_confirmed = (
+            (consec_dir == "BUY" and latest_body < 0 and cl.iloc[-1] < cl.iloc[-2])
+            or (consec_dir == "SELL" and latest_body > 0 and cl.iloc[-1] > cl.iloc[-2])
+        )
+        if reversal_confirmed and streak >= 6:
+            vote(reversal_dir, 5, f"6+ CONSECUTIVE {consec_dir} CANDLES — EXHAUSTION PEAK")
+        elif reversal_confirmed and streak >= 5:
+            vote(reversal_dir, 4, f"5 CONSECUTIVE {consec_dir} CANDLES — REVERSAL IMMINENT")
+        elif reversal_confirmed and streak >= 4:
+            vote(reversal_dir, 3, f"4 CONSECUTIVE {consec_dir} CANDLES — STREAK EXHAUSTION")
+        elif reversal_confirmed and streak >= 3:
+            vote(reversal_dir, 2, f"3 CONSECUTIVE {consec_dir} CANDLES — MOMENTUM FADING")
 
     # ── S02 — RSI(3) ultra-fast extreme ──────────────────────────────────
     try:
@@ -356,17 +373,22 @@ def _analyze_arrays(op, hi, lo, cl, vol) -> Optional[dict]:
         avg_vol = float(vol_f.rolling(20).mean().iloc[-2])
         last_vol = float(vol_f.iloc[-2])
         if avg_vol > 0 and last_vol > 3 * avg_vol:
-            dir_climax = "SELL" if float(cl.iloc[-2]) > float(op.iloc[-2]) else "BUY"
-            vote(dir_climax, 2, f"VOLUME CLIMAX {last_vol / avg_vol:.1f}× — EXHAUSTION")
+            candle_body = float(cl.iloc[-2]) - float(op.iloc[-2])
+            if candle_body:
+                dir_climax = "SELL" if candle_body > 0 else "BUY"
+                vote(dir_climax, 2, f"VOLUME CLIMAX {last_vol / avg_vol:.1f}× — EXHAUSTION")
     except Exception:
         pass
 
     # ── S16 — 3-candle reversal sequence (streak + wick + body) ──────────
     try:
-        c3_dir = "BUY" if float(cl.iloc[-4]) > float(op.iloc[-4]) else "SELL"
-        c2_dir = "BUY" if float(cl.iloc[-3]) > float(op.iloc[-3]) else "SELL"
-        c1_dir = "BUY" if float(cl.iloc[-2]) > float(op.iloc[-2]) else "SELL"
-        if c3_dir == c2_dir and c2_dir != c1_dir:
+        c3_body = float(cl.iloc[-4]) - float(op.iloc[-4])
+        c2_body = float(cl.iloc[-3]) - float(op.iloc[-3])
+        c1_body = float(cl.iloc[-2]) - float(op.iloc[-2])
+        c3_dir = "BUY" if c3_body > 0 else "SELL" if c3_body < 0 else None
+        c2_dir = "BUY" if c2_body > 0 else "SELL" if c2_body < 0 else None
+        c1_dir = "BUY" if c1_body > 0 else "SELL" if c1_body < 0 else None
+        if c3_dir is not None and c1_dir is not None and c3_dir == c2_dir and c2_dir != c1_dir:
             opp = "SELL" if c3_dir == "BUY" else "BUY"
             vote(opp, 2, f"3-CANDLE REVERSAL SEQUENCE — {c3_dir.upper()} STREAK BROKEN")
     except Exception:
@@ -439,6 +461,8 @@ def _analyze_arrays(op, hi, lo, cl, vol) -> Optional[dict]:
     if total_score < 14:
         return None
 
+    if buy_score == sell_score:
+        return None
     if buy_score > sell_score:
         direction = "BUY"
         reasons = buy_reasons
@@ -478,7 +502,7 @@ def po_otc_analyze(pair: str) -> Optional[dict]:
         # ── DATA SOURCE PRIORITY ──────────────────────────────────────────
         # 1. Real PO WebSocket candles (pocket_option_ws — actual broker feed)
         # 2. Live broker WS candles (otc_realtime_bridge — PO+QX combined)
-        # 3. yfinance fallback
+        # Public/yfinance data is not eligible for PO OTC execution.
         po_candles = _get_candles_po(pair, 60)
         if len(po_candles) >= 30:
             df = pd.DataFrame(po_candles).sort_values("time").tail(200)
@@ -497,7 +521,7 @@ def po_otc_analyze(pair: str) -> Optional[dict]:
             rt_df = None
             try:
                 from otc_realtime_bridge import get_otc_df as _rt_get
-                rt_df = _rt_get(pair, "1m", count=200)
+                rt_df = _rt_get(pair, "1m", count=200, broker="po")
             except Exception:
                 rt_df = None
 
@@ -508,29 +532,10 @@ def po_otc_analyze(pair: str) -> Optional[dict]:
                 cl  = rt_df["close"].astype(float)
                 vol = rt_df["volume"].astype(float) if "volume" in rt_df.columns else pd.Series([0.0] * len(cl))
                 result = _analyze_arrays(op, hi, lo, cl, vol)
-                using_po_data = True  # real broker candles — no mirror needed
+                using_po_data = True  # broker-filtered Pocket Option candles
                 if result:
                     print(f"[po_otc] ✅ REALTIME BRIDGE: {pair} → {result['direction']} "
                           f"score={result['score']} signals={result['signals']}")
-            else:
-                # Priority 3 — yfinance fallback
-                df_yf = _get_candles_yf(pair, "1m", "2d")
-                if df_yf is not None and len(df_yf) >= 30:
-                    op  = _df_col(df_yf, "open").squeeze().astype(float)
-                    hi  = _df_col(df_yf, "high").squeeze().astype(float)
-                    lo  = _df_col(df_yf, "low").squeeze().astype(float)
-                    cl  = _df_col(df_yf, "close").squeeze().astype(float)
-                    vol_raw = None
-                    try:
-                        vol_raw = _df_col(df_yf, "volume").squeeze().astype(float)
-                    except Exception:
-                        vol_raw = pd.Series([0.0] * len(cl), index=cl.index)
-                    result = _analyze_arrays(op, hi, lo, cl, vol_raw)
-                    using_po_data = False
-                    if result:
-                        print(f"[po_otc] 📊 yfinance: {pair} → {result['direction']} "
-                              f"score={result['score']} signals={result['signals']} "
-                              f"(mirror will apply)")
     except Exception as exc:
         logger.warning(f"[po_otc] Analysis error for {pair}: {exc}")
         result = None

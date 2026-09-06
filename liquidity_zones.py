@@ -41,6 +41,20 @@ def _tv(pair: str, tf: str) -> dict:
         return {}
 
 
+def _near_measured_zone(close: float, zone_price: object, atr: object) -> bool:
+    """Return proximity only when both an actual zone and ATR are supplied.
+
+    RSI classifications identify context, not a price level.  Treating their
+    quality score as proximity would falsely claim that price is at a zone.
+    """
+    try:
+        level = float(zone_price)
+        atr_value = float(atr)
+        return close > 0 and level > 0 and atr_value > 0 and abs(close - level) <= atr_value
+    except (TypeError, ValueError):
+        return False
+
+
 def analyze_liquidity_zones(pair: str, direction: str | None = None) -> dict:
     """Identify liquidity zones and zone quality.
 
@@ -129,12 +143,29 @@ def analyze_liquidity_zones(pair: str, direction: str | None = None) -> dict:
         zone_dir  = "SELL"
         quality   = min(0.8, 0.4 + abs(vote_ratio) * 0.5)
 
-    # Fakeout check: EMA squeeze + opposing RSI
+    # A squeeze is only compression, not proof that a breakout failed.  Call
+    # fakeout only when the available lower-TF momentum or close contradicts
+    # the breakout; without that evidence retain neither a fakeout nor a
+    # confirmed breakout classification.
     if zone_type == "breakout" and ema20 and ema50 and close15:
         ema_spread = abs(ema20 - ema50) / close15
-        if ema_spread < 0.0003 and abs(rsi15 - 50) < 8:
-            zone_type = "fakeout"
-            quality  *= 0.4
+        if ema_spread < 0.0003:
+            is_buy_breakout = zone_dir == "BUY"
+            momentum_opposes = (
+                (is_buy_breakout and rsi5m < rsi15) or
+                (not is_buy_breakout and rsi5m > rsi15)
+            )
+            close_opposes = (
+                (is_buy_breakout and close15 < ema20) or
+                (not is_buy_breakout and close15 > ema20)
+            )
+            if momentum_opposes or close_opposes:
+                zone_type = "fakeout"
+                quality *= 0.4
+            else:
+                zone_type = "neutral"
+                zone_dir = None
+                quality = min(quality, 0.2)
 
     # EMA convergence near zone = quality boost
     if zone_dir and ema20 and ema50 and close15:
@@ -143,7 +174,11 @@ def analyze_liquidity_zones(pair: str, direction: str | None = None) -> dict:
             quality = min(1.0, quality + 0.1)
 
     # Direction alignment bonus
-    near_zone = quality >= 0.50
+    # candle_feed currently supplies no exact support/resistance price or ATR.
+    # Do not substitute a quality threshold for actual price proximity.
+    near_zone = _near_measured_zone(
+        close15, d15m.get("zone_price"), d15m.get("atr")
+    )
     if direction and zone_dir == direction:
         quality = min(1.0, quality + 0.08)
 
