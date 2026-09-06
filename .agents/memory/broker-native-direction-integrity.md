@@ -7,7 +7,7 @@ Pocket Option OTC directions must never be blanket-inverted from public, Quotex,
 
 **Why:** Blanket inversion and tie defaults produced a high-confidence SELL while the observed market was still rising. Synthetic OTC relationships are broker- and moment-specific, not a universal inverse mapping.
 
-**How to apply:** Only executable PO OTC analysis may use fresh PO-filtered ticks/candles. Public data can inform diagnostics but must not be promoted as PO-native execution evidence. Quotex remains authenticated-native-only.
+**How to apply:** Prefer fresh selected-broker ticks when available, but keep the original shared OTC/chart feed as the user-requested fallback for both PO and Quotex. Never claim fallback candles are broker-native.
 
 Safety vetoes must count one vote per independent engine source. Internal grade, zone, or strategy weights may affect confidence, but must not turn one correlated analysis into several independent veto votes.
 
@@ -20,3 +20,9 @@ Explicit broker secrets must override local session caches. Pocket Option's curr
 **Why:** Old local cache files silently displaced newly configured sessions, and PO accepted the WebSocket upgrade but closed the namespace when sent a token-only auth object. Email/password automation is gated by interactive reCAPTCHA.
 
 **How to apply:** Preserve complete PO auth frames unchanged when sending them. Use the working broker region discovered by a live handshake, require an explicit auth-success event, and never mark a namespace-close response as authenticated.
+
+The user explicitly chose uninterrupted legacy OTC feed fallback for both Pocket Option and Quotex instead of authenticated-only blocking.
+
+**Why:** Authenticated broker sessions can be rejected or unavailable, and the user does not want the bot replaced by selected-broker refresh screens in that state.
+
+**How to apply:** Both broker buttons should continue through the shared first-bot OTC engines and legacy chart recovery when native ticks are missing. Keep card text/layout unchanged and retain no inversion, no tie-to-SELL, and no random direction.

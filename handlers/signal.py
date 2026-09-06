@@ -352,13 +352,9 @@ async def _analyze_and_send(call: CallbackQuery, market: str, broker: str,
         except Exception:
             sig = None
 
-        # Pocket Option OTC and LIVE scans must not discard the full multi-engine
-        # result merely because an upstream chart read exceeded the fast UI
-        # budget.  The original task is still running (it was shielded above),
-        # so wait for that strongest completed analysis instead of replacing it
-        # with the temporary "chart refreshing" screen.  Quotex remains excluded:
-        # QX OTC is allowed to signal only from its authenticated native tape.
-        if sig is None and broker != "qx":
+        # Both legacy OTC broker paths use the completed shared analysis when
+        # the bounded chart-view recovery has no immediate result.
+        if sig is None:
             try:
                 sig = await analysis_task
             except asyncio.CancelledError:

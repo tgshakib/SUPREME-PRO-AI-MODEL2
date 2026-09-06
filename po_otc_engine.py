@@ -499,10 +499,12 @@ def po_otc_analyze(pair: str) -> Optional[dict]:
     try:
         import pandas as pd
 
-        # ── DATA SOURCE PRIORITY ──────────────────────────────────────────
-        # 1. Real PO WebSocket candles (pocket_option_ws — actual broker feed)
-        # 2. Live broker WS candles (otc_realtime_bridge — PO+QX combined)
-        # Public/yfinance data is not eligible for PO OTC execution.
+        # ── LEGACY DATA SOURCE PRIORITY ───────────────────────────────────
+        # 1. Real PO WebSocket candles
+        # 2. Broker-filtered PO bridge candles
+        # 3. Original public chart candle fallback when the old broker feed
+        #    is unavailable. This restores the first bot's uninterrupted OTC
+        #    analysis path without reintroducing direction mirroring.
         po_candles = _get_candles_po(pair, 60)
         if len(po_candles) >= 30:
             df = pd.DataFrame(po_candles).sort_values("time").tail(200)
@@ -536,6 +538,25 @@ def po_otc_analyze(pair: str) -> Optional[dict]:
                 if result:
                     print(f"[po_otc] ✅ REALTIME BRIDGE: {pair} → {result['direction']} "
                           f"score={result['score']} signals={result['signals']}")
+            else:
+                df_yf = _get_candles_yf(pair, "1m", "2d")
+                if df_yf is not None and len(df_yf) >= 30:
+                    op = _df_col(df_yf, "open").squeeze().astype(float)
+                    hi = _df_col(df_yf, "high").squeeze().astype(float)
+                    lo = _df_col(df_yf, "low").squeeze().astype(float)
+                    cl = _df_col(df_yf, "close").squeeze().astype(float)
+                    try:
+                        vol = _df_col(df_yf, "volume").squeeze().astype(float)
+                    except Exception:
+                        vol = pd.Series([0.0] * len(cl), index=cl.index)
+                    result = _analyze_arrays(op, hi, lo, cl, vol)
+                    using_po_data = False
+                    if result:
+                        print(
+                            f"[po_otc] 📊 LEGACY CHART FEED: {pair} → "
+                            f"{result['direction']} score={result['score']} "
+                            f"signals={result['signals']}"
+                        )
     except Exception as exc:
         logger.warning(f"[po_otc] Analysis error for {pair}: {exc}")
         result = None

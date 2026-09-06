@@ -143,15 +143,16 @@ class BinaryChartFallbackTests(unittest.TestCase):
         self.assertEqual(float(analyze.call_args.args[0].iloc[0]), 1.0)
         self.assertTrue(result["using_po_data"])
 
-    def test_po_otc_without_native_data_cannot_use_public_chart_fallback(self) -> None:
+    def test_po_otc_without_native_data_uses_legacy_chart_fallback(self) -> None:
         with patch.object(
             signals, "_chart_view_direction",
-            side_effect=AssertionError("public chart must not drive PO OTC"),
+            return_value=("BUY", 1.2345, "legacy chart", 100.0, 72),
         ):
             payload = signals.generate_chart_view_binary_fallback(
                 "AUD/CHF 〔OTC〕", "PO OTC", "1 MIN", 1, "po",
             )
-        self.assertIsNone(payload)
+        self.assertTrue(payload["is_trade"])
+        self.assertEqual(payload["direction"], "BUY")
 
     def test_single_elite_engine_is_one_safety_vote_not_a_veto(self) -> None:
         self.assertFalse(
@@ -170,8 +171,7 @@ class BinaryChartFallbackTests(unittest.TestCase):
             )
         )
 
-    def test_no_evidence_returns_refresh_payload_not_sell_ninety_nine(self) -> None:
-        """Absent directional evidence must not create a persistable trade."""
+    def test_legacy_chart_conditions_prevent_refresh_payload(self) -> None:
         disabled = {
             "price_action_sniper": None,
             "_otc_god_analyze": None,
@@ -187,15 +187,17 @@ class BinaryChartFallbackTests(unittest.TestCase):
             po_otc_engine, "po_otc_analyze", return_value=None
         ), patch.object(
             signals, "get_market_bias", return_value=None
+        ), patch.object(
+            signals, "_cc_analyze",
+            return_value={"direction": "BUY", "confidence": 0.8},
         ):
             payload = signals.generate_signal(
                 "AUD/CHF 〔OTC〕", "PO OTC", "5 MIN", 1, "po",
             )
 
-        self.assertFalse(payload["is_trade"])
-        self.assertIsNone(payload["direction"])
-        self.assertIsNone(payload["entry_price"])
-        self.assertIn("REFRESHING SELECTED BROKER DATA", payload["text"])
+        self.assertTrue(payload["is_trade"])
+        self.assertEqual(payload["direction"], "BUY")
+        self.assertNotIn("REFRESHING SELECTED BROKER DATA", payload["text"])
 
     def test_selected_quotex_tape_never_uses_pocket_option_ticks(self) -> None:
         for price in (1.10000, 1.10010, 1.10020):
@@ -299,51 +301,30 @@ class BinaryChartFallbackTests(unittest.TestCase):
         )
         self.assertTrue(qx_monitor.needs_reauthentication())
 
-    def test_quotex_signal_uses_its_own_candles_and_ticks(self) -> None:
-        for price in (2.2, 2.2001, 2.2002, 2.2003, 2.2004, 2.2005):
-            price_service._write_price("audchf_otc", price, "qx")
-        for price in (9.0, 8.9, 8.8, 8.7, 8.6, 8.5):
-            price_service._write_price("audchf_otc", price, "po")
+    def test_quotex_without_native_ticks_uses_legacy_chart_feed(self) -> None:
+        with patch.object(
+            signals, "_chart_view_direction",
+            return_value=("BUY", 2.2005, "legacy chart", 100.0, 72),
+        ):
+            payload = signals.generate_chart_view_binary_fallback(
+                "AUD/CHF 〔OTC〕", "QX OTC", "1 MIN", 1, "qx"
+            )
+        self.assertTrue(payload["is_trade"])
+        self.assertEqual(payload["direction"], "BUY")
+        self.assertNotIn("REFRESHING SELECTED BROKER DATA", payload["text"])
 
-        with patch(
-            "otc_feed_combined.otc_feed.get_candles",
-            return_value=self._candles((2.1, 2.11, 2.12, 2.13, 2.14, 2.15)),
-        ) as get_candles, patch.object(
-            signals, "next_candle_time_for_user", return_value="20:31 UTC+6"
-        ), patch.object(
+    def test_stale_quotex_data_uses_legacy_chart_fallback(self) -> None:
+        with patch.object(
             signals,
             "_chart_view_direction",
-            side_effect=AssertionError("QX must not use public chart direction"),
+            return_value=("SELL", 2.1, "legacy chart", 100.0, 70),
         ):
-            payload = signals.generate_signal(
+            payload = signals.generate_chart_view_binary_fallback(
                 "AUD/CHF 〔OTC〕", "QX OTC", "1 MIN", 1, "qx"
             )
 
         self.assertTrue(payload["is_trade"])
-        self.assertEqual(payload["direction"], "BUY")
-        self.assertEqual(payload["entry_price"], 2.2005)
-        self.assertIn("20:31 UTC+6", payload["text"])
-        self.assertEqual(get_candles.call_args.kwargs["broker"], "qx")
-
-    def test_stale_quotex_data_defers_without_public_or_po_fallback(self) -> None:
-        for price in (9.0, 8.9, 8.8, 8.7, 8.6, 8.5):
-            price_service._write_price("audchf_otc", price, "po")
-
-        with patch(
-            "otc_feed_combined.otc_feed.get_candles",
-            return_value=self._candles((2.1, 2.11, 2.12, 2.13, 2.14), age_sec=180),
-        ), patch.object(
-            signals,
-            "_chart_view_direction",
-            side_effect=AssertionError("QX must not fall back to public chart data"),
-        ):
-            payload = signals.generate_signal(
-                "AUD/CHF 〔OTC〕", "QX OTC", "1 MIN", 1, "qx"
-            )
-
-        self.assertFalse(payload["is_trade"])
-        self.assertIsNone(payload["direction"])
-        self.assertIn("Quotex", payload["text"])
+        self.assertEqual(payload["direction"], "SELL")
 
     def test_quotex_outcome_check_uses_quotex_quote_only(self) -> None:
         async def run_check() -> None:

@@ -627,20 +627,12 @@ def generate_chart_view_binary_fallback(
     user_id: Optional[int] = None,
     broker: str = "",
 ) -> Optional[Dict]:
-    """Return the existing Binary card from the legacy chart-view engine.
-
-    This is the bounded recovery route used when the full analysis stack is
-    delayed. OTC keeps the selected broker isolated: a PO price can never be
-    used for QX (or the reverse), and an OTC card never displays a public price.
-    """
+    """Return the existing Binary card from the legacy chart-view engine."""
     is_otc = (
         "otc" in (market or "").lower()
         or "(OTC)" in (pair or "").upper()
         or "〔OTC〕" in (pair or "")
     )
-    if is_otc and broker == "qx":
-        return _generate_quotex_otc_signal(pair, market, tf_label, user_id)
-
     direction: Optional[str] = None
     chart_entry: Optional[float] = None
     chart_confidence = 0
@@ -666,8 +658,6 @@ def generate_chart_view_binary_fallback(
     # The original real-time chart-view engine remains the fallback for both
     # OTC and LIVE when the selected stream has not yet formed a direction.
     if direction is None:
-        if is_otc and broker in {"po", "qx"}:
-            return None
         direction, chart_entry, _source, _source_ts, chart_confidence = (
             _chart_view_direction(pair, broker)
         )
@@ -838,7 +828,7 @@ def generate_fast_binary_signal(
     # It only uses a real chart direction, never a time-based/random fallback.
     # OTC keeps the selected broker as the preferred source above; this is
     # used only when that source has not started delivering data.
-    if direction is None and not (is_otc and broker in {"po", "qx"}):
+    if direction is None:
         (
             chart_direction,
             chart_entry,
@@ -946,9 +936,6 @@ def generate_signal(
     # OTC pairs (Pocket Option / Quotex) use SYNTHETIC broker-generated
     # candles that do NOT track the live market trend reliably.
     is_otc = "otc" in (market or "").lower() or "(OTC)" in (pair or "").upper() or "〔OTC〕" in (pair or "")
-    if is_otc and broker == "qx":
-        return _generate_quotex_otc_signal(pair, market, tf_label, user_id)
-
     # ── VOLATILITY GUARD — pre-flight check ──────────────────────────────
     # Detect Friday close / news windows / ATR spike BEFORE running any
     # engine. On hard-block conditions the signal card still appears (UX
@@ -1170,22 +1157,6 @@ def generate_signal(
             _po_otc_result = _po_analyze(pair)
         except Exception:
             _po_otc_result = None
-        if _po_otc_result is None:
-            return {
-                "is_trade": False,
-                "direction": None,
-                "entry_price": None,
-                "source": None,
-                "source_ts": None,
-                "text": (
-                    "🔄 <b>REFRESHING SELECTED BROKER DATA</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💱 <b>{pair}</b>\n"
-                    "📊 Market: <b>OTC</b>\n"
-                    "<i>Tap Again Analyze once the selected broker price stream "
-                    "has refreshed.</i>"
-                ),
-            }
 
     direction = None
     confidence = None
@@ -1795,11 +1766,8 @@ def generate_signal(
         pa_mode or otc_mode or qx_mode
     )
 
-    # ── CHART CONDITIONS ENGINE — ALWAYS-FIRES FALLBACK (LIVE only) ──────
-    # OTC pairs: skip chart conditions entirely when no reversal engine fired.
-    # Chart conditions can produce trend-following signals — lethal for OTC.
-    # For LIVE: chart conditions are fine as a fallback structural analysis.
-    if direction is None and _cc_analyze is not None and not is_otc:
+    # ── CHART CONDITIONS ENGINE — legacy always-fires fallback ────────────
+    if direction is None and _cc_analyze is not None:
         try:
             _cc_result = _cc_analyze(pair, is_otc=is_otc)
             direction   = _cc_result["direction"]
@@ -2761,6 +2729,7 @@ def generate_signal(
         pass
 
     return {
+        "is_trade":     True,
         "direction":    direction,
         "trend":        trend,
         "text":         text,

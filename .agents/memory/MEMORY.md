@@ -6,4 +6,4 @@
 - [QX authenticated-session analysis](qx-authenticated-session-analysis.md) — QX OTC analysis must use only the active authenticated tick tape; stale, generic, or drift-flagged QX data is withheld rather than substituted
 - [Finorix Elite Engine](finorix-elite-engine.md) — finorix_elite_engine.py; 5-module: H1→M15→M5→M1 cascade + elite S&R zones + hidden reversal detector + ADX/EMA trend strength + zone confluence; HIDDEN grade = triple vote; signal text NEVER touched
 - [Binary & Forex Strength Upgrade](binary-forex-upgrade.md) — binary: OTC 0 gates=BLOCKED/1=WEAK/2+=standard+; LIVE <2 gates=BLOCKED; doji 0.22→0.28; oppose 0.60→0.45; _otc_min 4→6; forex: min TP1=100 pips; SL max 30→20 pips; forex_quick_engine.py consensus gate
-- [Broker-native direction integrity](broker-native-direction-integrity.md) — never blanket-invert PO OTC or multiply one engine into many safety votes; executable OTC direction must use native broker evidence
+- [OTC direction and fallback integrity](broker-native-direction-integrity.md) — PO/QX use legacy shared fallback when native feeds fail; never blanket-invert PO or inflate one engine into many votes
