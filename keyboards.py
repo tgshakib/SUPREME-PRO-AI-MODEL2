@@ -43,38 +43,44 @@ def main_menu_kb(is_admin: bool = False,
         [InlineKeyboardButton(text="💬 SUPPORT CHAT",    url=_ulink(SUPPORT_USERNAME)),
          InlineKeyboardButton(text="YouTube",              url="https://youtube.com/@fx_shakibsheikh?si=vLEpHnw5vjmzyNM5")],
     ]
-    if show_referral:
-        rows.append([InlineKeyboardButton(
-            text="🎁 FREE SIGNALS — REFER FRIENDS",
-            callback_data="m:referral",
-        )])
     if is_admin:
-        rows.append([
-            InlineKeyboardButton(
-                text="🔮 FUTURE SIGNAL • TG",
-                callback_data="tgadv:futuresignal",
-            ),
-            InlineKeyboardButton(
-                text="🛡️ ADMINISTRATION ACCESS",
-                callback_data="adm:open",
-            ),
-        ])
+        if show_referral:
+            rows.append([InlineKeyboardButton(
+                text="🎁 FREE SIGNALS — REFER FRIENDS",
+                callback_data="m:referral",
+            )])
+        rows.append([InlineKeyboardButton(
+            text="🔮 FUTURE SIGNAL • TG",
+            callback_data="tgadv:futuresignal",
+        )])
+        rows.append([InlineKeyboardButton(
+            text="🛡️ ADMINISTRATION ACCESS",
+            callback_data="adm:open",
+        )])
     elif show_admin_recovery:
-        rows.append([
-            InlineKeyboardButton(
-                text="🔮 FUTURE SIGNAL • TG",
-                callback_data="tgadv:futuresignal",
-            ),
-            InlineKeyboardButton(
-                text="⚠️ RESTORE ADMINISTRATION ACCESS",
-                callback_data="adm:recover",
-            ),
-        ])
+        rows.append([InlineKeyboardButton(
+            text="🔮 FUTURE SIGNAL • TG",
+            callback_data="tgadv:futuresignal",
+        )])
+        if show_referral:
+            rows.append([InlineKeyboardButton(
+                text="🎁 FREE SIGNALS — REFER FRIENDS",
+                callback_data="m:referral",
+            )])
+        rows.append([InlineKeyboardButton(
+            text="⚠️ RESTORE ADMINISTRATION ACCESS",
+            callback_data="adm:recover",
+        )])
     else:
         rows.append([InlineKeyboardButton(
             text="🔮 FUTURE SIGNAL • TG",
             callback_data="tgadv:futuresignal",
         )])
+        if show_referral:
+            rows.append([InlineKeyboardButton(
+                text="🎁 FREE SIGNALS — REFER FRIENDS",
+                callback_data="m:referral",
+            )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
