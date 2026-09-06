@@ -153,10 +153,6 @@ def _extract_from_cookies(session) -> Optional[str]:
             v = jar.get(name)
             if v and len(str(v)) > 8:
                 return str(v)
-        # Check all cookies for long-value tokens
-        for cookie in jar:
-            if len(cookie.value or "") > 30:
-                return cookie.value
     except Exception:
         pass
     return None
@@ -278,7 +274,17 @@ def _load_cached_ssid() -> Optional[str]:
     Reads fetched_at AND ttl so the TTL-aware age check in
     run_po_auth_manager() works correctly across restarts.
     """
-    # Try cache file first — most reliable source of age + TTL information
+    # An explicitly configured secret is authoritative. Never let an older
+    # workspace cache silently replace a newly supplied broker session.
+    env_ssid = os.environ.get("PO_SSID", "").strip()
+    if env_ssid:
+        if _SSID_STAMP.get("ssid") != env_ssid:
+            _SSID_STAMP["ssid"] = env_ssid
+            _SSID_STAMP["fetched_at"] = time.time()
+            _SSID_STAMP["ttl"] = _detect_ssid_ttl(env_ssid)
+        return env_ssid
+
+    # No configured secret: use the managed cache when it is still fresh.
     try:
         if os.path.exists(_SSID_FILE):
             with open(_SSID_FILE, "r") as f:
@@ -296,15 +302,6 @@ def _load_cached_ssid() -> Optional[str]:
                 return ssid
     except Exception:
         pass
-    # Fall back to environment variable — treat as stale (fetched_at=0) so the
-    # auth manager immediately attempts a fresh login.
-    env_ssid = os.environ.get("PO_SSID", "").strip()
-    if env_ssid:
-        if not _SSID_STAMP.get("fetched_at"):
-            _SSID_STAMP["ssid"]       = env_ssid
-            _SSID_STAMP["fetched_at"] = 0   # immediately stale → force refresh
-            _SSID_STAMP["ttl"]        = _detect_ssid_ttl(env_ssid)
-        return env_ssid
     return None
 
 

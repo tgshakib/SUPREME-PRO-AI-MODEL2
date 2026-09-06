@@ -128,6 +128,7 @@ QX_ASSET_MAP = {
 # ═══════════════════════════════════════════════════════════════════════════════
 
 PO_ENDPOINTS = [
+    "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
     "wss://api-c.po.market/socket.io/?EIO=4&transport=websocket",
     "wss://api-l.po.market/socket.io/?EIO=4&transport=websocket",
     "wss://api-s.po.market/socket.io/?EIO=4&transport=websocket",

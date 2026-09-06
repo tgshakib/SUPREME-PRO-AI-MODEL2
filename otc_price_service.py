@@ -46,8 +46,12 @@ STATIC_PROXY_URL = os.environ.get("STATIC_PROXY_URL", "").strip()
 _CANDLE_PERIOD   = 60      # seconds (1-minute candles match pocket_option_ws)
 _PRICE_MAX_AGE   = 3.0     # seconds — fresh tick window (ultra-tight for real-time accuracy)
 _PRICE_STALE_AGE = 90.0    # seconds — stale fallback: return last known rather than None
-# Same Socket.IO endpoint used by pocket_option_ws.py (the working one)
-_PO_WS_URL       = "wss://api-l.po.market/socket.io/?EIO=4&transport=websocket"
+# Broker regions change independently. api-eu currently completes the
+# Socket.IO upgrade from Replit; l/c are retained as rotation fallbacks.
+_PO_WS_URLS      = (
+    "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+)
+_PO_ENDPOINT_INDEX = 0
 _PO_SUB_DELAY    = 0.05   # seconds between subscribe frames (faster subscription)
 _QX_BATCH        = 5
 _QX_BATCH_DELAY  = 0.2
@@ -607,10 +611,13 @@ async def _po_stream_once(ssid: str):
         "Pragma": "no-cache",
         "Cache-Control": "no-cache",
     }
-    logger.info("[otc_svc:po] Connecting to Pocket Option …")
+    global _PO_ENDPOINT_INDEX
+    endpoint = _PO_WS_URLS[_PO_ENDPOINT_INDEX % len(_PO_WS_URLS)]
+    _PO_ENDPOINT_INDEX += 1
+    logger.info("[otc_svc:po] Connecting to Pocket Option via %s …", endpoint)
     _FEED_READY["po"].clear()
     async with _ws.connect(
-        _PO_WS_URL,
+        endpoint,
         additional_headers=headers,
         proxy=STATIC_PROXY_URL or True,
         ping_interval=20,
@@ -634,14 +641,26 @@ async def _po_stream_once(ssid: str):
             raise ConnectionError(f"PO namespace rejected: {resp!r}")
 
         # Authenticate
-        auth_msg = json.dumps(["auth", {"session": ssid, "isDemo": 1}])
-        await ws.send(f"42{auth_msg}")
+        configured = ssid.strip()
+        if configured.startswith("42["):
+            auth_frame = configured
+        elif configured.startswith("["):
+            auth_frame = f"42{configured}"
+        else:
+            auth_frame = "42" + json.dumps([
+                "auth",
+                {"session": configured, "isDemo": 0, "platform": 2},
+            ])
+        await ws.send(auth_frame)
         logger.info("[otc_svc:po] Auth frame sent …")
         auth_resp = str(await asyncio.wait_for(ws.recv(), timeout=15))
-        if "failauth" in auth_resp.lower() or (
-            "error" in auth_resp.lower() and "successauth" not in auth_resp.lower()
+        if not (
+            "successauth" in auth_resp.lower()
+            or "authsuccess" in auth_resp.lower()
         ):
-            raise ConnectionError(f"PO auth rejected: {auth_resp[:200]}")
+            raise ConnectionError(
+                "PO auth rejected: PO_SSID must be the complete browser 42 auth frame"
+            )
         logger.info(f"[otc_svc:po] Authenticated — subscribing {len(_PO_OTC_PAIRS)} pairs …")
 
         # Subscribe all OTC pairs

@@ -406,6 +406,24 @@ def _load_cached_ssid() -> Optional[str]:
     encrypted session cookies (eyJpdiI6...) that Cloudflare hands out.
     """
     # 1. Cache file
+    # A newly configured Replit secret must override any token persisted by an
+    # older login attempt. The old cache previously made QUOTEX_SSID changes
+    # appear to have no effect.
+    env_ssid = os.environ.get("QUOTEX_SSID", "").strip()
+    if env_ssid:
+        if not _is_real_qx_token(env_ssid):
+            logger.warning(
+                "[qx_auth] ⚠️  QUOTEX_SSID env var is not a supported Quotex token."
+            )
+            return None
+        ttl = _detect_token_ttl(env_ssid)
+        _SSID_STAMP.update({
+            "ssid": env_ssid,
+            "fetched_at": time.time(),
+            "ttl": ttl,
+        })
+        return env_ssid
+
     try:
         if os.path.exists(_SSID_FILE):
             with open(_SSID_FILE, "r") as f:
@@ -430,18 +448,6 @@ def _load_cached_ssid() -> Optional[str]:
     except Exception:
         pass
     # 2. Env var (manual secret)
-    env_ssid = os.environ.get("QUOTEX_SSID", "").strip()
-    if env_ssid:
-        if not _is_real_qx_token(env_ssid):
-            logger.warning(
-                "[qx_auth] ⚠️  QUOTEX_SSID env var looks like a Laravel session cookie — ignoring. "
-                "Copy the real token from window.settings.token in your browser's DevTools."
-            )
-            return None
-        if not _SSID_STAMP.get("fetched_at"):
-            ttl = _detect_token_ttl(env_ssid)
-            _SSID_STAMP.update({"ssid": env_ssid, "fetched_at": 0, "ttl": ttl})
-        return env_ssid
     return None
 
 

@@ -27,7 +27,9 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_PO_WS_URL = "wss://api-l.po.market/socket.io/?EIO=4&transport=websocket"
+_PO_WS_URLS = (
+    "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+)
 _CANDLE_BUFFER = 200  # candles stored per (asset, period)
 _RECONNECT_DELAY = 30  # seconds between reconnect attempts
 _PERIODS = [60, 300, 900]  # 1m, 5m, 15m — fetched on connect
@@ -192,6 +194,7 @@ class PocketOptionWS:
         )
         self._connected = False
         self._authenticated = False
+        self._endpoint_index = 0
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -230,7 +233,8 @@ class PocketOptionWS:
             await asyncio.sleep(3600)
             return
 
-        logger.info(f"[po_ws] Connecting to {_PO_WS_URL}")
+        endpoint = _PO_WS_URLS[self._endpoint_index % len(_PO_WS_URLS)]
+        logger.info(f"[po_ws] Connecting to {endpoint}")
         # Use the freshest SSID from env (po_auth may have updated it)
         live_ssid = os.environ.get("PO_SSID", self._ssid).strip() or self._ssid
         if live_ssid != self._ssid:
@@ -251,13 +255,14 @@ class PocketOptionWS:
             "Cache-Control": "no-cache",
         }
         async with _ws.connect(
-            _PO_WS_URL,
+            endpoint,
             additional_headers=_hdrs,
             ping_interval=None,
             close_timeout=10,
         ) as ws:
             self._ws = ws
             await self._handshake(ws)
+        self._endpoint_index += 1
 
     async def _handshake(self, ws):
         ping_task = None
@@ -278,8 +283,17 @@ class PocketOptionWS:
                 ping_task.cancel()
 
     async def _authenticate(self, ws):
-        auth_msg = json.dumps(["auth", {"session": self._ssid, "isDemo": 0}])
-        await ws.send(f"42{auth_msg}")
+        configured = self._ssid.strip()
+        if configured.startswith("42["):
+            auth_frame = configured
+        elif configured.startswith("["):
+            auth_frame = f"42{configured}"
+        else:
+            auth_frame = "42" + json.dumps([
+                "auth",
+                {"session": configured, "isDemo": 0, "platform": 2},
+            ])
+        await ws.send(auth_frame)
         resp = await asyncio.wait_for(ws.recv(), timeout=15)
         resp_str = str(resp)
         if "successauth" in resp_str or "authSuccess" in resp_str:
@@ -287,9 +301,14 @@ class PocketOptionWS:
             self._authenticated = True
             logger.info("[po_ws] Authenticated successfully")
             await self._subscribe_all(ws)
-        elif "failauth" in resp_str or "error" in resp_str.lower():
-            logger.error(f"[po_ws] Auth failed: {resp_str[:200]}")
-            raise ConnectionError("PO auth failed — check PO_SSID")
+        else:
+            # Socket.IO 41 is a namespace close. Treat every response other
+            # than an explicit success event as rejection; previously 41 was
+            # silently accepted and the client waited forever with no ticks.
+            logger.error("[po_ws] Auth rejected by Pocket Option")
+            raise ConnectionError(
+                "PO auth failed — PO_SSID must be the complete browser 42 auth frame"
+            )
 
     async def _subscribe_all(self, ws):
         assets = list(set(_PAIR_TO_ASSET.values()))
